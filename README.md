@@ -12,16 +12,18 @@ To install directly from github try: `pip install git+https://github.com/samthie
 
 This should run on most systems: `numpy`, `pytorch` and `tqdm` are the only required dependencies. Matplotlib is handy too, but not required. 
 
-## Tutorials
+### Tutorials
 
-Jupyter notebooks showing how to use 'curlew' and its various features can be found here:
+To help get up to speed with `curlew`, we maintain a set of CoLab tutorial notebooks [here](https://drive.google.com/drive/folders/14OPpL2-zKuJSd2Hh7jobnIYPnxzl0wCI?usp=sharing). 
+Additional examples (used to make figures in the paper listed below) can be found [here](https://github.com/k4m4th/curlew_tutorials).
 
-- [GitHub]()
-- [CoLab]()
+### Documentation
+
+Documentation is automatically built and served through [GitHub pages](https://samthiele.github.io/curlew/). 
 
 ## Support
 
-Please use GitHub issues to report bugs. 
+Please use [GitHub issues](https://github.com/samthiele/curlew/issues) to report bugs. 
 
 ## Contributing and appreciation
 
@@ -42,4 +44,4 @@ Kamath, A.V., Thiele, S.T., Moulard, M., Grose, L., Tolosana-Delgado, R., Hillie
 
 2) Star this repository so that we get a rough idea of our user base
 
-3) Leave a GitHub issue if you have questions or comments (Issues do not strictly need to be related to bug reports).
+3) Leave a [GitHub issue](https://github.com/samthiele/curlew/issues) if you have questions or comments (Issues do not strictly need to be related to bug reports).
