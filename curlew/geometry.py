@@ -289,7 +289,8 @@ class Grid(object):
             The number of random samples to select.
         poissonDisk : tuple | optional (defaults to None)
             If not None, should be given as a tuple (r, k, seed), where r is the minimum distance between
-            the points and k is the maximum number of points allowed, and seed ensures reproducibility.
+            the points and k is the maximum number of points allowed, and seed ensures reproducibility
+            (can be None to use previous random seed).
             If None, draws randomly from the grid.
         tensor : bool | optional
             True if sampled points should be returned as a torch.Tensor. Default is False. 
@@ -301,17 +302,19 @@ class Grid(object):
         # do random sampling
         if poissonDisk is not None: # Do poisson sampling to ensure evenly spaced points
             if grid.shape[1] == 2: # 2D Grid
-                out = poisson_disk_indices_2d(grid[:, 0], grid[:, 1],
+                ix = poisson_disk_indices_2d(grid[:, 0], grid[:, 1],
                                               radius=poissonDisk[0], max_points=poissonDisk[1],
                                               seed=poissonDisk[2])
             else: # 3D Grid
-                out = poisson_disk_indices_3d(grid[:, 0], grid[:, 1], grid[:, 2],
+                ix = poisson_disk_indices_3d(grid[:, 0], grid[:, 1], grid[:, 2],
                                               radius=poissonDisk[0], max_points=poissonDisk[1],
                                               seed=poissonDisk[2])
 
         else:
             ix = np.random.choice(len(grid), N, replace=False ) # draw random points from the grid (without replacement)
-            out = grid[ix,:]
+        
+        # get chosen points
+        out = grid[ix,:]
 
         # return in desired format
         if tensor:
