@@ -2,6 +2,10 @@ import numpy as np
 from curlew.fields import NF
 
 def test_basic():
+    # test colour map
+    from curlew import ccmap
+    assert len(ccmap(0.5)) == 4 # check it runs and returns a RGBA colour
+
     from curlew import CSet,HSet
 
     H = HSet()
