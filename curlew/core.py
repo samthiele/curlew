@@ -264,6 +264,8 @@ class HSet:
             This approach ensures that each task contributes equally in magnitude (≈1)
             while still allowing non-zero gradients. It effectively adjusts the relative 
             gradient scale of each task based on its current loss.
+        one_hot : bool
+            Enables one-hot encoding of the scalar field value according to the event-ID. Only works with property field HSet()s.
     """
     
     value_loss : float = 1
@@ -275,6 +277,7 @@ class HSet:
     prop_loss : float = "1.0"
     iq_loss : float = 0
     use_dynamic_loss_weighting : bool = False
+    one_hot : bool = False
 
     def copy(self, **kwargs):
         """
