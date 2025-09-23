@@ -129,7 +129,7 @@ def steno( shape=(1500,1000), **kwargs ):
     M : GeoModel
         Geomodel of the synthetic model
     """
-    G = grid( shape, step=(1, 1), origin=(shape[0]/2,shape[1]/2) ) 
+    G = grid( shape, step=(1, 1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
     s0 = strati('s0', C=ACF( 'f0', input_dim=2, gradient= (0.00001,1), curve=(-0.00005,0), origin = (1000,500) ) )
@@ -164,7 +164,7 @@ def lehmann( shape=(1500,1000), **kwargs ):
     M : GeoModel
         Geomodel of the synthetic model
     """
-    G = grid( shape, step=(1,1), origin=(shape[0]/2,shape[1]/2) ) 
+    G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
     s0 = strati('s0', C=ASF('f0', input_dim=2) ) # Folds
@@ -195,7 +195,7 @@ def hutton( shape=(1500,1000), **kwargs ):
     M : GeoModel
         Geomodel of the synthetic model
     """
-    G = grid( shape, step=(1,1), origin=(shape[0]/2,shape[1]/2) ) 
+    G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
     s0 = strati('s0', C=ASF( 'f0', input_dim=2 ) ) # Folds
@@ -233,7 +233,7 @@ def playfair( shape=(1500,1000), width=50, **kwargs ):
     M : GeoModel
         Geomodel of the synthetic model
     """
-    G = grid( shape, step=(1,1), origin=(shape[0]/2,shape[1]/2) ) 
+    G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
     s0 = strati('s0', C=ACF( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500) ) )
@@ -273,7 +273,7 @@ def michell( shape=(1500,1000), offset=100, **kwargs ):
     M : GeoModel
         Geomodel of the synthetic model
     """
-    G = grid( shape, step=(1,1), origin=(shape[0]/2,shape[1]/2) ) 
+    G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
     s0 = strati('s0', C=ACF( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500)  ) )
@@ -331,7 +331,7 @@ def anderson( shape=(1500,1000), offset1=225, offset2=250, **kwargs ):
     M : GeoModel
         Geomodel of the synthetic model
     """
-    G = grid( shape, step=(1,1), origin=(shape[0]/2,shape[1]/2) ) 
+    G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
     s0 = strati('s0', C=ACF( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500)  ) )

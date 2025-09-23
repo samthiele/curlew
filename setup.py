@@ -3,10 +3,10 @@ import setuptools
 
 setup(
     name='curlew',
-    version='0.02',
+    version='1.0',
     packages=setuptools.find_packages(),
     url='https://github.com/samthiele/curlew',
-    license='',
+    license='MIT',
     author='Sam Thiele',
     author_email='s.thiele@hzdr.de',
     description='A python package for constructing complex geological models from various types of neural fields.',

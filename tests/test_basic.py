@@ -52,7 +52,7 @@ def test_geometry():
 
     # test 2D grid creation code
     dims = (200,100) 
-    G = grid( dims, step=(1,1), origin=(dims[0]/2,dims[1]/2) ) 
+    G = grid( dims, step=(1,1), center=(dims[0]/2,dims[1]/2) ) 
     cxy = G.coords(transform=False)
     assert cxy.shape[0] == np.prod( dims )
     assert cxy.shape[-1] == 2
@@ -66,7 +66,7 @@ def test_geometry():
 
     # test 3D grid creation
     dims = (200,100,50) 
-    G = grid( dims, step=(1,1,1), origin=(dims[0]/2,dims[1]/2,dims[2]/2) ) 
+    G = grid( dims, step=(1,1,1), center=(dims[0]/2,dims[1]/2,dims[2]/2) ) 
     cxyz = G.coords(transform=False)
     assert cxyz.shape[0] == np.prod( dims )
     assert cxyz.shape[-1] == 3
@@ -106,8 +106,8 @@ def test_geometry():
 
     # test Grid object
     from curlew.geometry import Grid
-    G1 = Grid([4600,4000,2500], step=30, origin=[200,100,50] )
-    G2 = Grid([4600,4000], step=30, origin=[200,100] )
+    G1 = Grid([4600,4000,2500], step=30, center=[200,100,50] )
+    G2 = Grid([4600,4000], step=30, center=[200,100] )
     for G in [G1, G2]: # Test 2D and 3D grids
         # check coords() function works with transform = False
         points = G.coords(transform=False)
@@ -123,13 +123,13 @@ def test_geometry():
         # check coords() function works with origin offset
         points = G.coords(transform=True)
         for i in range(G.ndim):
-            assert np.min(points[:,i]) == np.min(G.axes[i]) + G.origin[i]
-            assert np.max(points[:,i]) == np.max(G.axes[i]) + G.origin[i]
+            assert np.min(points[:,i]) == np.min(G.axes[i]) + G.center[i]
+            assert np.max(points[:,i]) == np.max(G.axes[i]) + G.center[i]
 
             # also check in reshaped form
             g = G.reshape( points[:,i] )
-            assert np.min(g) == np.min(G.axes[i]) + G.origin[i]
-            assert np.max(g) == np.max(G.axes[i]) + G.origin[i]
+            assert np.min(g) == np.min(G.axes[i]) + G.center[i]
+            assert np.max(g) == np.max(G.axes[i]) + G.center[i]
 
 def test_extrude():
     from curlew.geometry import extrude
