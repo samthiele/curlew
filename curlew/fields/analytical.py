@@ -328,9 +328,9 @@ class APF( AF ):
         A vector indicating the normal vector to the axial foliation of the sinusoids / folds. Note that this
         will be normalised to length one (use the wavelength parameter to adjust the wavelength).
     wavelength : float, optional
-        Wavelength of the evaluated periodic function. Default is 400.
+        Wavelength of the evaluated periodic function. Default is 800.
     amplitude : float, optional
-        Amplitude of the evaluated periodic function. Default is 50.
+        Amplitude of the evaluated periodic function. Default is 150.
     sharpness : float, optional
         A value between 0 and 1 determining the shape of the periodic function, where 0 gives a sinusoid and 1 gives a triangle-wave.
     transform : callable, optional

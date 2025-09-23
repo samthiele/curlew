@@ -2,7 +2,7 @@
 
 A toolkit for building 2- and 3- dimensional geological models using neural fields.
 
-<img src="./icon.png" width="200">
+<img src="https://github.com/samthiele/curlew/blob/main/icon.png?raw=true" width="200">
 
 ## Getting started
 
