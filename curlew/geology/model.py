@@ -256,8 +256,14 @@ class GeoModel(object):
             if self.forward is not None:
                 pp = self.forward.C.pp # position of property constraints
                 pv = self.forward.C.pv # value of property constraints
-                spred = self.fields[-1].predict( pp, combine=True, to_numpy=False) # automatically recursed back throught the linked list.
-                ppred = self.forward( spred ) # generate property predictions
+                spred = self.fields[-1].predict(pp, combine=True, to_numpy=False) # automatically recursed back throught the linked list.
+                # One Hot encoding
+                if self.forward.H.one_hot:
+                    one_hot_encoder = torch.nn.functional.one_hot((spred[:, 1] - 1).long(), num_classes=len(self.fields))
+                    encoded_spred = one_hot_encoder * spred[:, 0][:, None]
+                    ppred = self.forward( encoded_spred )
+                else:
+                    ppred = self.forward( spred ) # generate property predictions
                 prop_loss = self.forward.loss_func( ppred, pv ) # compute loss
                 if isinstance( self.forward.H.prop_loss, str):
                     self.forward.H.prop_loss = float(self.forward.H.prop_loss) / prop_loss.item()
