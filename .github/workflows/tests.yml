@@ -4,9 +4,9 @@ name: CI Pipeline
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "dev"]
   pull_request:
-    branches: ["main"]
+    branches: ["main", "dev"]
 
 permissions:
   contents: write
@@ -85,6 +85,7 @@ jobs:
         path: ./docs/_build/html/curlew
 
   deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' # only run on main
     needs: docs
     runs-on: ubuntu-latest
     environment:

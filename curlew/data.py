@@ -7,7 +7,7 @@ from curlew.geology.model import GeoModel
 from curlew.geometry import grid 
 from curlew.geology.interactions import overprint
 from curlew.visualise import colour
-from curlew.fields.analytical import ALF, ASF, ACF
+from curlew.fields.analytical import ALF, APF, ACF
 from curlew.geology import strati, fold, fault, domainBoundary, sheet
 
 def sample( pxy, sxy, shape, pv=None, breaks=19, init=100, xstep=300, pval=0.6, cmap='tab20', seed=42 ):
@@ -129,7 +129,7 @@ def steno( shape=(1500,1000), **kwargs ):
     M : GeoModel
         Geomodel of the synthetic model
     """
-    G = grid( shape, step=(1, 1), origin=(shape[0]/2,shape[1]/2) ) 
+    G = grid( shape, step=(1, 1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
     s0 = strati('s0', C=ACF( 'f0', input_dim=2, gradient= (0.00001,1), curve=(-0.00005,0), origin = (1000,500) ) )
@@ -164,10 +164,10 @@ def lehmann( shape=(1500,1000), **kwargs ):
     M : GeoModel
         Geomodel of the synthetic model
     """
-    G = grid( shape, step=(1,1), origin=(shape[0]/2,shape[1]/2) ) 
+    G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
-    s0 = strati('s0', C=ASF('f0', input_dim=2) ) # Folds
+    s0 = strati('s0', C=APF('f0', input_dim=2) ) # Folds
     
     M = GeoModel([s0], grid=G )
     s = M.predict(xy)
@@ -195,10 +195,10 @@ def hutton( shape=(1500,1000), **kwargs ):
     M : GeoModel
         Geomodel of the synthetic model
     """
-    G = grid( shape, step=(1,1), origin=(shape[0]/2,shape[1]/2) ) 
+    G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
-    s0 = strati('s0', C=ASF( 'f0', input_dim=2 ) ) # Folds
+    s0 = strati('s0', C=APF( 'f0', input_dim=2 ) ) # Folds
     s1 = strati('s1', C=ACF( 'f1', input_dim=2, gradient=np.array([0.1,0.9]), origin=(1000,500), curve=(-0.00002,0) ), base=0) # uncorformity surface
 
     M  = GeoModel( [s0,s1], grid=G )
@@ -233,7 +233,7 @@ def playfair( shape=(1500,1000), width=50, **kwargs ):
     M : GeoModel
         Geomodel of the synthetic model
     """
-    G = grid( shape, step=(1,1), origin=(shape[0]/2,shape[1]/2) ) 
+    G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
     s0 = strati('s0', C=ACF( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500) ) )
@@ -273,7 +273,7 @@ def michell( shape=(1500,1000), offset=100, **kwargs ):
     M : GeoModel
         Geomodel of the synthetic model
     """
-    G = grid( shape, step=(1,1), origin=(shape[0]/2,shape[1]/2) ) 
+    G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
     s0 = strati('s0', C=ACF( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500)  ) )
@@ -331,7 +331,7 @@ def anderson( shape=(1500,1000), offset1=225, offset2=250, **kwargs ):
     M : GeoModel
         Geomodel of the synthetic model
     """
-    G = grid( shape, step=(1,1), origin=(shape[0]/2,shape[1]/2) ) 
+    G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
     s0 = strati('s0', C=ACF( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500)  ) )

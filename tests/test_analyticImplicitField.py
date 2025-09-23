@@ -33,7 +33,7 @@ def test_multi():
 
     # define a grid covering our model domain
     dims = (1000,500)
-    G = grid( dims, step=(1,1), origin=(dims[0]/2,dims[1]/2) ) 
+    G = grid( dims, step=(1,1), center=(dims[0]/2,dims[1]/2) ) 
     cxy = G.coords()
     # create a model
     s0 = strati('s0', C=ALF( 'f0', input_dim=2, 
@@ -85,7 +85,7 @@ def test_anderson():
     C,M = anderson(dims) # create the synthetic "hutton" dataset
     C = C[0] # we only need the stratigraphic constraints
 
-    G = grid( dims, step=(25,25), origin=(dims[0]/2,dims[1]/2), sampleArgs=dict(N=1024))
+    G = grid( dims, step=(25,25), center=(dims[0]/2,dims[1]/2), sampleArgs=dict(N=1024))
     C.grid = G # add grid to our stratigraphy constraints
     C.trend = np.array([0,1]) # prefer flat stratigraphy (important for optimising fault offset)
 
@@ -173,7 +173,7 @@ def test_fold():
     # evaluate it. Not sure how to check if it "worked"...
     from curlew.geometry import grid
     dims = (1000,500)
-    G = grid( dims, step=(1,1), origin=(dims[0]/2,dims[1]/2) ) 
+    G = grid( dims, step=(1,1), center=(dims[0]/2,dims[1]/2) ) 
     cxy = G.coords()
     sf = M.predict(cxy)
     assert np.isfinite(sf).all()

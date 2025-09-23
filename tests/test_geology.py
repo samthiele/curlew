@@ -14,7 +14,7 @@ def test_hutton():
     C, Ms = hutton(dims, breaks=10, cmap='prism', pval=1.0) 
 
     # initialise random sampling for global constraints
-    G = grid( dims, step=(10,10), origin=(dims[0]/2,dims[1]/2), sampleArgs=dict(N=1024) ) 
+    G = grid( dims, step=(10,10), center=(dims[0]/2,dims[1]/2), sampleArgs=dict(N=1024) ) 
     for _c in C:
         _c.grid = G # add a random grid for each of our constraints
         _c.delta = 10
@@ -73,7 +73,7 @@ def test_hutton():
 
     # create a grid (section) to evaluate our model on
     #sdims, sxy = grid( dims, step=(10,10), origin=(0,0) ) 
-    G2 = grid( dims, step=(20,20), origin=(dims[0]/2,dims[1]/2), sampleArgs=dict(N=1024) )
+    G2 = grid( dims, step=(20,20), center=(dims[0]/2,dims[1]/2), sampleArgs=dict(N=1024) )
     sxy = G2.coords()
 
     # evaluate scalar field
@@ -119,7 +119,7 @@ def test_playfair():
     from curlew.geology import strati, sheet
 
     # initialise random sampling for global constraints
-    G = grid( dims, step=(10,10), origin=(dims[0]/2,dims[1]/2), sampleArgs=dict(N=1024) ) 
+    G = grid( dims, step=(10,10), center=(dims[0]/2,dims[1]/2), sampleArgs=dict(N=1024) ) 
     for _c in C:
         _c.grid = G # add a random grid for each of our constraints
         _c.delta = 10
@@ -176,7 +176,7 @@ def test_michell():
     from curlew.geology import strati, fault
 
     # initialise random sampling for global constraints
-    G = grid( dims, step=(10,10), origin=(dims[0]/2,dims[1]/2), sampleArgs=dict(N=1024) ) 
+    G = grid( dims, step=(10,10), center=(dims[0]/2,dims[1]/2), sampleArgs=dict(N=1024) ) 
     for _c in C:
         _c.grid = G # add a random grid for each of our constraints
         _c.delta = 10
@@ -268,7 +268,7 @@ def test_anderson():
     from curlew.geology import strati, fault
 
     # initialise random sampling for global constraints
-    G = grid( dims, step=(10,10), origin=(dims[0]/2,dims[1]/2), sampleArgs=dict(N=1024) ) 
+    G = grid( dims, step=(10,10), center=(dims[0]/2,dims[1]/2), sampleArgs=dict(N=1024) ) 
     for _c in C:
         _c.grid = G # add a random grid for each of our constraints
         _c.delta = 10
@@ -339,7 +339,7 @@ def test_anderson3D():
 
     # initialise random sampling for global constraints
     dims = ( dims[0], 600, dims[1] ) 
-    G = grid( dims, step=(25,25,25), origin=(dims[0]/2,dims[1]/2,dims[2]/2), sampleArgs=dict(N=4096) ) 
+    G = grid( dims, step=(25,25,25), center=(dims[0]/2,dims[1]/2,dims[2]/2), sampleArgs=dict(N=4096) ) 
     for _c in C3D:
         _c.grid = G # add a random grid for each of our constraints
         _c.delta = 10
@@ -400,7 +400,7 @@ def test_anderson3D():
     except:
         pass
     if tcont:
-        G = grid( dims, step=(100,100,100), origin=(dims[0]/2,dims[1]/2,dims[2]/2) )
+        G = grid( dims, step=(100,100,100), center=(dims[0]/2,dims[1]/2,dims[2]/2) )
         cxy = G.coords()
         gdim = G.shape
         from curlew.utils import batchEval

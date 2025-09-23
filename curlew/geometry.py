@@ -181,7 +181,7 @@ class Grid(object):
     """
     Class encapsulating more advanced grids (e.g., non-axis aligned grids) and facilitating array reshaping.
     """
-    def __init__( self, dims, step, origin=None, rotation=None, sampleArgs={} ):
+    def __init__( self, dims, step, center=None, rotation=None, sampleArgs={} ):
         """
         Initialize a grid object with specified dimensions, step size, origin, and rotation.
         Parameters:
@@ -189,7 +189,7 @@ class Grid(object):
             step (float or int or tuple): Step size for the grid. If a single float or int is provided, 
                 it is applied uniformly to all dimensions. If a tuple is provided, it specifies the step 
                 size for each dimension.
-            origin (tuple, optional): The origin of the grid in the coordinate space. Defaults to None.
+            center (tuple, optional): The origin (center) of the grid in the global coordinate space. Defaults to the origin.
             rotation (numpy.ndarray, optional): A rotation matrix defining the orientation of the grid. 
                 Defaults to None.
             sampleArgs (dict, optional): Additional arguments for sampling with draw(). Defaults to an empty dictionary.
@@ -201,7 +201,7 @@ class Grid(object):
             axes (list): List of numpy arrays representing the axes of the grid.
             shape (tuple): Shape of the grid based on the axes.
             matrix (numpy.ndarray): Transformation matrix combining origin and rotation.
-            origin (numpy.ndarray): Stored origin of the grid for convenience.
+            center (numpy.ndarray): Stored origin (center) of the grid for convenience.
         """
 
         self.dims = tuple([i for i in dims]) # store dims
@@ -217,11 +217,11 @@ class Grid(object):
         
         # build matrix
         self.matrix = np.eye(self.ndim+1)
-        if origin is not None: # define grid origin
-            self.matrix[:self.ndim, self.ndim] = np.array(origin)
+        if center is not None: # define grid origin
+            self.matrix[:self.ndim, self.ndim] = np.array(center)
         if rotation is not None: # define grid rotation matrix
             self.matrix[:self.ndim, :self.ndim] = rotation
-        self.origin = self.matrix[:self.ndim, self.ndim] # store for convenience
+        self.center = self.matrix[:self.ndim, self.ndim] # store for convenience
         self._clearCache()
 
     def coords(self, transform=True):
@@ -403,12 +403,12 @@ class Grid(object):
         """
         Create a copy of the current Grid instance.
         """
-        new_grid = Grid(self.dims, self.step, origin=self.origin, rotation=self.matrix[:self.ndim, :self.ndim], sampleArgs=self.sampleArgs)
+        new_grid = Grid(self.dims, self.step, center=self.center, rotation=self.matrix[:self.ndim, :self.ndim], sampleArgs=self.sampleArgs)
         if self._cache is not None:
             new_grid._setCache(self._cache)
         return new_grid
     
-def grid( dims : tuple, step : tuple, origin=None, sampleArgs={} ):
+def grid( dims : tuple, step : tuple, center=None, sampleArgs={} ):
     """
     Utility function to quickly generate and return an n-dimensional grid of points.
 
@@ -420,7 +420,7 @@ def grid( dims : tuple, step : tuple, origin=None, sampleArgs={} ):
     step : tuple
         A tuple of the form (xstep, ystep, ...) defining the size of each grid cell in each dimension.
     origin : np.ndarray or None
-        A NumPy array containing the origin (the first point) of the grid. If None, the origin is set to 0.
+        A NumPy array containing the middle (the center point) of the grid. If None, the center is set to the origin.
     sampleArgs : dict, optional
         Additional arguments for sampling with `Grid.draw()`. Defaults to an empty dictionary. Can be used to 
         e.g., set the number of random grid points (`N`) drawn for global constraints while training a neural field.
@@ -429,7 +429,7 @@ def grid( dims : tuple, step : tuple, origin=None, sampleArgs={} ):
     -------
     A Grid instance for this grid.
     """
-    return Grid( dims, step, origin=origin, sampleArgs=sampleArgs)
+    return Grid( dims, step, center=center, sampleArgs=sampleArgs)
 
 # TODO - make this return a Grid object
 def section(dims : tuple, origin : np.ndarray, normal : np.ndarray, width : float = None, height : float = None, step=None):
@@ -629,7 +629,7 @@ def triangle_wave(x, A=1, T=2*np.pi, n_terms=11):
     A : float
         Amplitude of the triangle wave.
     T : float
-        Period of the triangle wave.
+        Period (wavelength) of the triangle wave.
     n_terms : int
         Number of terms in the Fourier series approximation.
 
@@ -656,11 +656,9 @@ def blended_wave( x, f=0.5, A=1, T=2*np.pi ):
     f : float
         The blending factor to use. 0 gives a perfectly sinusoidal wave, while 1 gives a perfectly triangular wave.
     A : float
-        Amplitude of the triangle wave.
+        Amplitude of the wave.
     T : float
-        Period of the triangle wave.
-    n_terms : int
-        Number of terms in the Fourier series approximation.
+        Period (wavelength) of the function.
 
     Returns:
     f_x : array-like
