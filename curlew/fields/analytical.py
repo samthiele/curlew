@@ -9,6 +9,7 @@ import numpy as np
 import curlew
 import torch
 from torch import nn
+from curlew.geometry import blended_wave
 
 class AF( nn.Module ):
     """
@@ -28,7 +29,6 @@ class AF( nn.Module ):
     def __init__( self,
                  name: str = 'f0',
                  input_dim: int = 3,
-                 output_dim: int = 1,
                  transform = None ):
         super().__init__()
         self.name = name
@@ -304,14 +304,10 @@ class ACF( AF ):
         """
         return torch.sum( (x - self.origin[None,:]) * self.gradient[None,:] + self.curve[None,:] * ((x - self.origin[None,:]))**2, axis=-1 )
 
-class ASF( AF ):
-    """
-    Analytical sinusoidal field used to represent folded geometries.
-    """
+class APF( AF ):
 
     """
-    A parent class to be inherited by analytical fields implementing specific
-    geometrical functions.
+    Analytical periodic field, used to represent e.g., folded geometries.
 
     Parameters
     ----------
@@ -323,8 +319,20 @@ class ASF( AF ):
         The point at which this function equals 0. Should be a torch tensor or 
         numpy array of length `input_dim`. If None (default), this will be initialised
         as all zeros.
-    scale : float, optional
-        Scaling factor applied to the final scalar field values. Controls the overall magnitude of the field. Default is 30.
+    gradient : np.ndarray, optional
+        The gradient vector of a linear function to which the periodic function is added. Should be a torch tensor or 
+        numpy array of length `input_dim`. If None (default), this will be initialised as all zeros and 1 in the 
+        last dimensions (vertical). It will also be normalised as otherwise the gradient magnitude interferes with
+        the `amplitude` argument.
+    axialPlane : float, optional
+        A vector indicating the normal vector to the axial foliation of the sinusoids / folds. Note that this
+        will be normalised to length one (use the wavelength parameter to adjust the wavelength).
+    wavelength : float, optional
+        Wavelength of the evaluated periodic function. Default is 400.
+    amplitude : float, optional
+        Amplitude of the evaluated periodic function. Default is 50.
+    sharpness : float, optional
+        A value between 0 and 1 determining the shape of the periodic function, where 0 gives a sinusoid and 1 gives a triangle-wave.
     transform : callable, optional
         A function that transforms input coordinates prior to predictions. 
         Must take exactly one argument as input (a tensor of positions) and return the transformed positions. 
@@ -334,7 +342,11 @@ class ASF( AF ):
                  name: str = 'fold',
                  input_dim: int = 3,
                  origin: np.ndarray = None,
-                 scale: float = 30,
+                 gradient : np.ndarray = None,
+                 axialPlane : np.ndarray = None,
+                 wavelength : float = 800,
+                 amplitude : float = 150,
+                 sharpness: float = 0,
                  transform = None ):
         super().__init__( name=name,
                          input_dim=input_dim,
@@ -343,15 +355,34 @@ class ASF( AF ):
         # store origin and gradient as torch tensors
         if origin is None:
             origin = np.zeros( input_dim )
+        if axialPlane is None:
+            axialPlane = np.zeros( input_dim )
+            axialPlane[0] = 4
+            axialPlane[1] = 1.5
+        if gradient is None:
+            gradient = np.zeros( input_dim )
+            gradient[1] = 1
+            
         self.origin = origin
-        self.scale = scale
-
+        self.gradient = gradient
+        self.gradient = -gradient / np.linalg.norm(self.gradient) * np.pi / 4
+        self.axialPlane = np.array(axialPlane)
+        self.axialPlane /= np.linalg.norm(self.axialPlane) # normalise to length 1
+        self.wavelength = wavelength
+        self.amplitude = amplitude
+        self.sharpness = sharpness
+        
     def evaluate( self, x: torch.Tensor ):
         """
         Evaluate the sinusoidal function determining the scalar field values.
         """
-        s = - 4 * torch.sin( x[:,0] / 150 + x[:,1] / 400 ) + x[:,1] / 50 + 30
-        return (s - torch.min(s)) * self.scale
+        # evaluate linear component
+        linear = torch.sum( (x - self.origin[None,:]) * self.gradient[None,:], axis=-1 )
+
+        # project x onto line perpendicular to axial foliation
+        proj = (x-self.origin[None,:]) @ self.axialPlane
+        
+        return -(linear + blended_wave( proj, f=self.sharpness, A=self.amplitude, T=self.wavelength))
     
 # Softramp listric faults
 class AEF(AF):

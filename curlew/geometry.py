@@ -629,7 +629,7 @@ def triangle_wave(x, A=1, T=2*np.pi, n_terms=11):
     A : float
         Amplitude of the triangle wave.
     T : float
-        Period of the triangle wave.
+        Period (wavelength) of the triangle wave.
     n_terms : int
         Number of terms in the Fourier series approximation.
 
@@ -656,11 +656,9 @@ def blended_wave( x, f=0.5, A=1, T=2*np.pi ):
     f : float
         The blending factor to use. 0 gives a perfectly sinusoidal wave, while 1 gives a perfectly triangular wave.
     A : float
-        Amplitude of the triangle wave.
+        Amplitude of the wave.
     T : float
-        Period of the triangle wave.
-    n_terms : int
-        Number of terms in the Fourier series approximation.
+        Period (wavelength) of the function.
 
     Returns:
     f_x : array-like
