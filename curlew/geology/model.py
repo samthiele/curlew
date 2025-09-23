@@ -678,33 +678,30 @@ class GeoModel(object):
             if not isinstance(field.parent2, SF) and field.parent2 is not None:
                 graph.add_edge(field.name, str(field.parent2))
 
-        # Plot 
+        # Plot
         try:
             import matplotlib.pyplot as plt
         except:
             assert False, "Please install matplotlib to use plotting tools.`"
-        fig = plt.figure(figsize=(18, 5))
-
-        ax_graph = fig.add_subplot(121)
-        pos = self._getPositions(graph, list(graph.nodes())[0])
+        
+        fig, ax = plt.subplots(1,1, figsize=(8, 4))
+        pos = self._getPositions(graph, list(graph.nodes())[0], step_x=1, step_y=1)
         node_colors = [graph.nodes[node].get('color', fixed_value_color) for node in graph.nodes()]
         nx.draw(graph, pos, with_labels=True, arrows=True, node_size=2000,
-                node_color=node_colors, font_size=10, ax=ax_graph)
-        ax_graph.set_title('Model tree')
-
+                node_color=node_colors, font_size=8, ax=ax)
+        
         # Legend
         legend_labels = {
-            domain_boundary_color : 'Domain Boundary',
-            dilative_event_color : 'Dilative Event',
-            generative_event_color : 'Generative Event',
-            kinematic_event_color : 'Kinematic Event',
-            fixed_value_color : 'Fixed Value'
+            domain_boundary_color : 'Domain',
+            dilative_event_color : 'Dilative',
+            generative_event_color : 'Generative',
+            kinematic_event_color : 'Kinematic',
+            fixed_value_color : 'Fixed'
         }
-        ax_legend = fig.add_subplot(122)
-        ax_legend.axis('off')
+        #ax_legend.axis('off')
         for color, label in legend_labels.items():
-            ax_legend.scatter([], [], color=color, label=label, s=200)
-        ax_legend.legend(loc='center')
+            ax.scatter([], [], color=color, label=label, s=200)
+        ax.legend(loc='lower center', ncol=5)
 
         # Save the figure
         buffer = io.StringIO()

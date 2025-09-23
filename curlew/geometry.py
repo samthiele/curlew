@@ -242,7 +242,7 @@ class Grid(object):
 
         # apply transform matrix
         if transform:
-            points = np.hstack([points, np.ones( (len(points),1) )]) # concatentate fourth dimension
+            points = np.hstack([points, np.ones( (len(points),1) )]) # concatentate additional dimension
             points = (points @ self.matrix.T)[:,:-1] # drop fake dimension
         return points
     
@@ -289,7 +289,8 @@ class Grid(object):
             The number of random samples to select.
         poissonDisk : tuple | optional (defaults to None)
             If not None, should be given as a tuple (r, k, seed), where r is the minimum distance between
-            the points and k is the maximum number of points allowed, and seed ensures reproducibility.
+            the points and k is the maximum number of points allowed, and seed ensures reproducibility
+            (can be None to use previous random seed).
             If None, draws randomly from the grid.
         tensor : bool | optional
             True if sampled points should be returned as a torch.Tensor. Default is False. 
@@ -301,17 +302,19 @@ class Grid(object):
         # do random sampling
         if poissonDisk is not None: # Do poisson sampling to ensure evenly spaced points
             if grid.shape[1] == 2: # 2D Grid
-                out = poisson_disk_indices_2d(grid[:, 0], grid[:, 1],
+                ix = poisson_disk_indices_2d(grid[:, 0], grid[:, 1],
                                               radius=poissonDisk[0], max_points=poissonDisk[1],
                                               seed=poissonDisk[2])
             else: # 3D Grid
-                out = poisson_disk_indices_3d(grid[:, 0], grid[:, 1], grid[:, 2],
+                ix = poisson_disk_indices_3d(grid[:, 0], grid[:, 1], grid[:, 2],
                                               radius=poissonDisk[0], max_points=poissonDisk[1],
                                               seed=poissonDisk[2])
 
         else:
             ix = np.random.choice(len(grid), N, replace=False ) # draw random points from the grid (without replacement)
-            out = grid[ix,:]
+        
+        # get chosen points
+        out = grid[ix,:]
 
         # return in desired format
         if tensor:
@@ -320,80 +323,81 @@ class Grid(object):
             return out
     
     def contour(self, values, iso, normals=False, transform=True ):
-        """
-        Use values computed for this grid to extract 2D (lines) or 3D (surfaces) contours. Requires scikit-image.
+      """
+      Use values computed for this grid to extract 2D (lines) or 3D (surfaces) contours. Requires scikit-image.
 
-        Parameters
-        -----------
-            values : np.ndarray
-                A 1D array of values to extract contours from. Length must be the same as `self.coords()`.
-            iso : float
-                The isovalue to extract. Must be within the range of `values`.
-            normals : bool
-                If True, an array of vertex normals will be returned in addition to the vertices and faces.
-            transform : bool | optional
-                True (default) if this grids transorm matrix should be applied to return coordinates in world coords. Otherwise
-                internal (local) grid coordinates will be returned.
-        
-        Returns
-        --------
-            An array of `vert`, `faces` for 3D grids, or a list of contour polylines (lists of coordinates) for 2D grids.
-        """
-        try:
-            import skimage
-        except:
-            assert False, "Please install scikit-image using `pip install scikit-image`"
-        
-        if self.ndim == 3: # marching cubes
-            from skimage.measure import marching_cubes
-            vol = self.reshape(values) # predicted value as (3D) grid
-            vix, faces, norm, _ = marching_cubes( vol, level=iso, mask=np.isfinite(vol) ) # find isosurface using marching cubes 
+      Parameters
+      -----------
+          values : np.ndarray
+              A 1D array of values to extract contours from. Length must be the same as `self.coords()`.
+          iso : float
+              The isovalue to extract. Must be within the range of `values`.
+          normals : bool
+              If True, an array of vertex normals will be returned in addition to the vertices and faces.
+          transform : bool | optional
+              True (default) if this grids transorm matrix should be applied to return coordinates in world coords. Otherwise
+              internal (local) grid coordinates will be returned.
+      
+      Returns
+      --------
+          An array of `vert`, `faces` for 3D grids, or a list of contour polylines (lists of coordinates) for 2D grids.
+      """
+      try:
+          import skimage
+      except:
+          assert False, "Please install scikit-image using `pip install scikit-image`"
+      
+      if self.ndim == 3: # marching cubes
+          from skimage.measure import marching_cubes
+          vol = self.reshape(values) # predicted value as (3D) grid
+          vix, faces, norm, _ = marching_cubes( vol, level=iso, mask=np.isfinite(vol) ) # find isosurface using marching cubes 
 
-            # build interpolators that convert indices to positions
-            from scipy.interpolate import interp1d
-            ix = [ interp1d(np.arange(self.shape[i]), self.axes[i]) for i in range(len(self.shape)) ]
-            verts = np.vstack( [ix[i]( vix[:, i] ) for i in range(len(self.shape))] ).T
+          # build interpolators that convert indices to positions
+          from scipy.interpolate import interp1d
+          ix = [ interp1d(np.arange(self.shape[i]), self.axes[i]) for i in range(len(self.shape)) ]
+          verts = np.vstack( [ix[i]( vix[:, i] ) for i in range(len(self.shape))] ).T
 
-            # apply rotation matrix
-            if transform:
-                verts = np.hstack([verts, np.ones( (len(verts),1) )]) # concatentate fourth dimension
-                verts = (verts @ self.matrix.T)[:,:-1] # drop fake dimension
+          # apply rotation matrix
+          if transform:
+              verts = np.hstack([verts, np.ones( (len(verts),1) )]) # concatentate fourth dimension
+              verts = (verts @ self.matrix.T)[:,:-1] # drop fake dimension
 
-            # remove invalid vertices
-            if np.isnan(verts).any():
-                vmask = ~np.isnan(verts).any(axis=-1)
-                verts = verts[vmask]
-                norm = norm[vmask]
-                 
-                # encode faces again...
-                old2New=np.arange(len(vmask), dtype=float)
-                old2New[vmask] = np.arange(np.sum(vmask))
-                old2New[~vmask] = np.nan
-                faces = np.array( [(old2New[i], old2New[j], old2New[k]) for i,j,k in faces] )
-                faces = faces[np.isfinite(faces).all(axis=-1)]
+          # remove invalid vertices
+          if np.isnan(verts).any():
+              vmask = ~np.isnan(verts).any(axis=-1)
+              verts = verts[vmask]
+              norm = norm[vmask]
+                
+              # encode faces again...
+              old2New=np.arange(len(vmask), dtype=float)
+              old2New[vmask] = np.arange(np.sum(vmask))
+              old2New[~vmask] = np.nan
+              faces = np.array( [(old2New[i], old2New[j], old2New[k]) for i,j,k in faces] )
+              faces = faces[np.isfinite(faces).all(axis=-1)]
 
-            if normals:
-                return verts, faces, norm
-            else:
-                return verts, faces
-        elif self.ndim == 2: # marching squares
-            from skimage.measure import find_contours
-            img = self.reshape(values)
-            contours = find_contours( img, iso, mask=np.isfinite(vol))
+          if normals:
+              return verts, faces, norm
+          else:
+              return verts, faces
+      elif self.ndim == 2: # marching squares
+          from skimage.measure import find_contours
+          img = self.reshape(values)
+          contours = find_contours( img, iso, mask=np.isfinite(img))
 
-            # build interpolators that convert indices to positions
-            from scipy.interpolate import interp1d
-            for i,vix in enumerate(contours):
-                ix = [ interp1d(np.arange(self.shape[i]), self.axes[i]) for i in range(len(self.shape)) ]
-                contours[i] = np.vstack( [ix[i]( vix[:, i] ) for i in range(len(self.shape))] ).T
+          # build interpolators that convert indices to positions
+          from scipy.interpolate import interp1d
+          for i,vix in enumerate(contours):
+              ix = [ interp1d(np.arange(self.shape[i]), self.axes[i]) for i in range(len(self.shape)) ]
+              contours[i] = np.vstack( [ix[i]( vix[:, i] ) for i in range(len(self.shape))] ).T
 
-                if transform:
-                    verts = np.hstack([contours[i], np.ones( (len(verts),1) )]) # concatentate fourth dimension
-                    contours[i] = (verts @ self.matrix.T)[:,:-1] # apply and drop fake dimension
+              if transform:
+                  for i,c in enumerate(contours):
+                    points = np.hstack([c, np.ones( (len(c),1) )]) # concatentate additional dimension
+                    contours[i] = (points @ self.matrix.T)[:,:-1] # apply and drop fake dimension
 
-            # TODO; mask NaN areas from 2D contours
+          # TODO; mask NaN areas from 2D contours
 
-            return contours
+          return contours
         
     def copy(self):
         """

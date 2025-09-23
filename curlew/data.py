@@ -172,7 +172,7 @@ def lehmann( shape=(1500,1000), **kwargs ):
     M = GeoModel([s0], grid=G )
     s = M.predict(xy)
     C = sample(xy, s, shape, pv='rgb', **kwargs)
-
+    
     return C, M
 
 def hutton( shape=(1500,1000), **kwargs ):
@@ -190,10 +190,6 @@ def hutton( shape=(1500,1000), **kwargs ):
 
     Returns
     --------
-    xy : np.ndarray
-        A list of (N,d) xy points (from a grid with the specified `shape`)
-    s : np.ndarray,
-        An array of shape (N,2) containing the scalar values and ID of the "event" that caused them.
     C : list, 
         A list of constraints for each of the (two) events in this synthetic model.
     M : GeoModel
@@ -232,10 +228,6 @@ def playfair( shape=(1500,1000), width=50, **kwargs ):
     
     Returns
     --------
-    xy : np.ndarray
-        A list of (N,d) xy points (from a grid with the specified `shape`)
-    s : np.ndarray,
-        An array of shape (N,2) containing the scalar values and ID of the "event" that caused them.
     C : list, 
         A list of constraints for each of the (two) events in this synthetic model.
     M : GeoModel
@@ -276,10 +268,6 @@ def michell( shape=(1500,1000), offset=100, **kwargs ):
     
     Returns
     --------
-    xy : np.ndarray
-        A list of (N,d) xy points (from a grid with the specified `shape`)
-    s : np.ndarray,
-        An array of shape (N,2) containing the scalar values and ID of the "event" that caused them.
     C : list, 
         A list of constraints for each of the (two) events in this synthetic model.
     M : GeoModel
@@ -310,7 +298,7 @@ def michell( shape=(1500,1000), offset=100, **kwargs ):
     C[0].gov = C[0].gov[mask] # mask the gov constraints
 
     C[1].vv = C[1].vv * 0 # ensure value constraints are exactly zero (fault surface = 0)
-
+    
     return C, M # return
 
 def anderson( shape=(1500,1000), offset1=225, offset2=250, **kwargs ):
