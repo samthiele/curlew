@@ -21,9 +21,9 @@ Additional examples (used to make figures in the paper listed below) can be foun
 
 Documentation is automatically built and served through [GitHub pages](https://samthiele.github.io/curlew/). 
 
-## Support
+## Support and feedback
 
-Please use [GitHub issues](https://github.com/samthiele/curlew/issues) to report bugs. 
+Please use [GitHub issues](https://github.com/samthiele/curlew/issues) to report bugs. For broader ideas or questions, don't hesitate to use the [discussions](https://github.com/samthiele/curlew/discussions) page.
 
 ## Contributing and appreciation
 
