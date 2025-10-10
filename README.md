@@ -39,7 +39,7 @@ If you use `curlew` we would appreciate it if you:
 1) Cite the following paper (for academic work)
 
 ```
-Kamath, A.V., Thiele, S.T., Moulard, M., Grose, L., Tolosana-Delgado, R., Hillier, M.J., Wellmann, R., & Gloaguen, R. Curlew 1.0: Implicit geological modelling with neural fields in python. Geoscientific Model Development (preprint online soon) 
+Kamath, A. V., Thiele, S. T., Moulard, M., Grose, L., Tolosana-Delgado, R., Hillier, M., and Gloaguen, R. (2025). Curlew 1.0: Spatio-temporal implicit geological modelling with neural fields in python. doi:10.31223/X5KX81
 ```
 
 2) Star this repository so that we get a rough idea of our user base
