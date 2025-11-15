@@ -189,11 +189,47 @@ def stock(name, C, H, contact=0, **kwargs):
     """
     pass
 
-def fold( name, origin, compression, extension, wavelength, amplitude=1.0, sharpness=1.0):
+def fold( name, origin, compression, extension, wavelength, amplitude=1.0, sharpness=1.0, estStrain=False):
     """
-    Create a new SF instance representing a fold structure. This uses an explicitely
-    defined scalar field (defining distance along the fold-shortening axis) to compute
-    displacement vectors that give the specified fold amplitude and wavelength. 
+    Create a SF representing a fold structure.
+
+    This constructs an explicitly defined scalar field aligned with the
+    fold-shortening axis, then computes displacement vectors that reproduce a
+    fold geometry with the specified wavelength, amplitude, and sharpness.
+    Optionally, an estimated finite strain required to “undo” the folding can
+    be computed from the waveform geometry (and applied when transforming from
+    model to paleo-coordinates).
+
+    Parameters
+    ------------
+    name : str
+        A name for the created fold structure (and the SF that represents it).
+    origin : array-like
+        A point through which the fold scalar field passes; used as the field’s origin.
+    compression : array-like
+        Vector describing the principal compression direction. This is
+        normalized and scaled internally to represent the fold wavelength. This vector
+        should be perpendicular to the fold's axial foliation.
+    extension : array-like
+        Vector describing the principal extension direction, such that the fold axis
+        is the cross product between the extension and compression vectors.
+    wavelength : float
+        The fold wavelength. Used to scale the compression vector into a
+        periodic scalar field.
+    amplitude : float, default=1.0
+        Amplitude of the fold waveform.
+    sharpness : float, default=1.0
+        Sharpness of the fold waveform, controlling the peakedness of the
+        blended wave.
+    estStrain : bool, default=False
+        If True, numerically estimate the finite strain required to restore the
+        folded layer to its unfolded length using a line integral of the
+        waveform.
+
+    Returns
+    ---------
+    A `curlew.geology.SF` instance representing the fold structure, with an
+    associated analytical scalar field and deformation function.
     """
     # create a fold field and associated deformation function
     compression = compression / np.linalg.norm(compression) # direction of principal compression
@@ -202,14 +238,17 @@ def fold( name, origin, compression, extension, wavelength, amplitude=1.0, sharp
               origin=origin, gradient=compression )
     
     # evaluate fold strain
-    x = torch.tensor( np.linspace(0,2,1000), device=curlew.device, dtype=curlew.dtype )
-    y = blended_wave(x, f=sharpness, A=amplitude, T=2) # evaluate one waveform
-    dx = torch.mean( torch.diff(x) )
-    dy = torch.diff( y )
-    l0 = torch.sum( torch.sqrt( dx**2 + dy**2 ) ) # line-integral gives initial length
-    l1 = x[-1] - x[0] # current length is known
-    strain = ((l0-l1) / l1).item() # hence get strain needed to undo folding
-
+    if estStrain:
+        x = torch.tensor( np.linspace(0,2,1000), device=curlew.device, dtype=curlew.dtype )
+        y = blended_wave(x, f=sharpness, A=amplitude, T=2) # evaluate one waveform
+        dx = torch.mean( torch.diff(x) )
+        dy = torch.diff( y )
+        l0 = torch.sum( torch.sqrt( dx**2 + dy**2 ) ) # line-integral gives initial length
+        l1 = x[-1] - x[0] # current length is known
+        strain = ((l0-l1) / l1).item() # hence get strain needed to undo folding
+    else:
+        strain = 0 # ignore shortening
+    
     # create a lambda function for evaluating folds from scalar value
     f = lambda x: blended_wave( x, f=sharpness, A=amplitude, T=2)
 
