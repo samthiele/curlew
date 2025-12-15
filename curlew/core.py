@@ -6,7 +6,61 @@ import torch
 from dataclasses import dataclass, field
 import copy
 import curlew
+from curlew.geometry import Grid
 
+import torch.optim as optim
+import torch.nn as nn
+
+class LearnableBase(nn.Module):
+    """
+    Base class for all learnable curlew objects.
+    """
+    def __init__(self):
+        """
+        Initialise a new learnable torch module.
+        """
+        super().__init__()
+        self.optim = None # needs to be initialised at some point
+        
+    def init_optim(self, method=optim.Adam, lr=1e-2, **kwargs):
+        """
+        Initialise optimiser used for this MLP. This should only be called
+        (or re-called) once all relevant learnable parameters have been created.
+
+        Parameters
+        ------------
+        method : torch.optim.Optimizer
+            The optimiser class to use (e.g., `torch.optim.Adam`).
+        lr : float
+            The learning rate to use for the underlying ADAM optimiser.
+
+        Keywords
+        ------------
+        Any additional keyword arguments to pass to the optimiser initialisation.
+        """
+        self.optim = method(self.parameters(), lr=lr, **kwargs)
+    
+    def zero(self):
+        """
+        Zero gradients in the optimiser for this NF.
+        """
+        if self.optim is not None:
+            self.optim.zero_grad()
+
+    def step(self):
+        """
+        Step the optimiser for this NF.
+        """
+        if self.optim is not None:
+            self.optim.step()
+
+    def set_rate(self, lr=1e-2 ):
+        """
+        Update the learning rate for this learnable object's optimiser.
+        """
+        assert self.optim is not None, "Optimiser not initialised. Call `init_optim()` first."
+        for param_group in self.optim.param_groups:
+            param_group['lr'] = lr
 
 @dataclass
 class CSet:
@@ -29,9 +83,7 @@ class CSet:
         iq (tuple): Inequality constraints. Should be a tuple containing `(N,[(P1, P2, iq),...]`), where each P1 and P2 are (N,d) arrays or tensors
                     defining positions at which to evaluate inequality constraints such as `P1 > P2`. `iq` defines the inequality to evaluate, and can be `<`, `=` or `>`.
                     Note that this inequality is computed for a random set of `N` pairs sampled from `P1` and `P2`. 
-        grid (tuple, torch.tensor or np.ndarray): Either a tuple containing (N,[[xmin,xmax],[ymin,ymax],...] to use random grid points during each epoch, or a
-                                            (N,i) array of positions (in modern-day coordinates) defining specific points. These points are used to define
-                                            where "global" constraints are enforced.
+        grid (tuple, torch.tensor or np.ndarray): A `curlew.geometry.Grid` instance defining the grid used to enforce global constraints (and associated sampling strategy).
         delta (float): The step size used when computing numerical derivatives at the grid points. Default (None) is to initialise
                        as half the distance between the first and second points listed in `grid`. Larger values of delta result
                        in gradients representing larger scale gradients.
@@ -50,8 +102,7 @@ class CSet:
     iq : tuple = None # inequality constraints
 
     # global constraints
-    grid : torch.tensor = None # predefined grid, or params for sampling random ones
-    sgrid : torch.tensor = None # tensor or array containing the last-used (random) grid
+    grid : Grid = None # predefined grid, or params for sampling random ones
     delta : float = None # step to use when computing numerical derivatives 
     trend : torch.tensor = None # global preferential gradient direction vector
     # axis: an (i,) vector defining a globally preferential axis direction.
@@ -61,8 +112,7 @@ class CSet:
 
     def torch(self):
         """
-        Return a copy of these constraints cast to pytorch tensors with the specified
-        data type and hosted on the specified device. 
+        Return a copy of these constraints cast to pytorch tensors. 
         """
         args = {}
         for k in dir(self):
@@ -113,6 +163,10 @@ class CSet:
         return CSet(**args)
 
     def toPLY( self, path ):
+        """
+        Quickly save this CSet to a PLY file for visualisation in a 3D viewer (e.g., CloudCompare).
+        """
+
         from curlew.io import savePLY
         from pathlib import Path
         path = Path(path)
@@ -127,12 +181,13 @@ class CSet:
                 savePLY( path / str(f'iq_{i}_{lkup[iq[2]]}/rhs.ply'), xyz=iq[1], rgb=[(0,0,255) for i in range(len(iq[1]))])
 
     def toCSV( self, path ):
-        from curlew.io import savePLY
         from pathlib import Path
+        import pandas as pd
+        
         path = Path(path)
         C = self.numpy()
         def saveCSV( path, xyz, attr=None, names=[], rgb=None ):
-            import pandas as pd
+            
             cols = ['x','y','z']+names
             if rgb is not None:
                 cols += ['r','g','b']

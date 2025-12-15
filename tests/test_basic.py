@@ -1,5 +1,5 @@
 import numpy as np
-from curlew.fields import NF
+from curlew.fields import BaseNF
 
 def test_basic():
     # test colour map
@@ -133,7 +133,7 @@ def test_geometry():
 
 def test_extrude():
     from curlew.geometry import extrude
-    from curlew.data import steno
+    from curlew.synthetic import steno
     C, _ = steno((1000,500))
     n=3
     C3D = extrude(C, step=(0,100,0), n=n, y="up")

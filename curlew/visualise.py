@@ -4,7 +4,7 @@ need to be extended at some point to be more usable during model development.
 """
 
 import numpy as np
-from curlew.geology.SF import SF
+from curlew.geology.geofield import GeoField
 
 def plot2D( sxy, grid, C=None, ticksize=50, lw=1, cmap='rainbow', levels=None, ax=None, alpha=0.3 ):
     """
@@ -99,8 +99,8 @@ def plot2D( sxy, grid, C=None, ticksize=50, lw=1, cmap='rainbow', levels=None, a
                 
 
         # plot grid for evaluating global constraints
-        if C.sgrid is not None:
-            ax.scatter( C.sgrid[:,0], C.sgrid[:,1], color='gray', s=ticksize/3 )
+        #if C.sgrid is not None:
+        #    ax.scatter( C.sgrid[:,0], C.sgrid[:,1], color='gray', s=ticksize/3 )
     
     return ax.get_figure(), ax
 
@@ -256,7 +256,7 @@ def get_positions(M, G, node, first_x=0, first_y=0, step_x=10, step_y=5, pos=Non
 
     # If the node is a domain boundary, handle its children differently
     node_field = next((field for field in M.fields if field.name == node), None)
-    if node_field.parent2 is not None and isinstance(node_field, SF):
+    if node_field.parent2 is not None and isinstance(node_field, GeoField):
         # Move to the right
         pos = get_positions(M, G, children[0], first_x + step_x, first_y, step_x, step_y, pos)
         # Move down
@@ -307,13 +307,13 @@ def showModel(M, axs=None, leg_loc=None, title="c)", node_size=3000, font_size=1
         graph.add_node(field.name, label=format_latex_subscript(field.name), color=color)
 
         # Add edges
-        if isinstance(field.parent, SF):
+        if isinstance(field.parent, GeoField):
             graph.add_edge(field.name, field.parent.name)
-        if isinstance(field.parent2, SF):
+        if isinstance(field.parent2, GeoField):
             graph.add_edge(field.name, field.parent2.name)
-        if not isinstance(field.parent, SF) and field.parent is not None: # Handle fixed values
+        if not isinstance(field.parent, GeoField) and field.parent is not None: # Handle fixed values
             graph.add_edge(field.name, str(field.parent))
-        if not isinstance(field.parent2, SF) and field.parent2 is not None:
+        if not isinstance(field.parent2, GeoField) and field.parent2 is not None:
             graph.add_edge(field.name, str(field.parent2))
 
     # Plotting

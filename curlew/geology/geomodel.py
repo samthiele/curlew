@@ -1,11 +1,13 @@
 """
 A class representing a time-aware geological model and
-facilitating interactions with the underlying linked-list of SF instances
+facilitating interactions with the underlying linked-list of GeoField instances
 (that represent each geological structure in the model).
 """
 
-from curlew.geology.SF import SF, apply_child_undeform
-from curlew.geology.interactions import faultOffset
+from curlew.geology.geofield import GeoField, apply_child_undeform
+from curlew.utils import batchEval
+from curlew.geology.interactions import FaultOffset
+
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -19,7 +21,7 @@ def _linkF( fields ):
     Link the list of fields (to the final element in the list).
     """
     for i in range(len(fields)):
-        if not isinstance( fields[i], SF ):
+        if not isinstance( fields[i], GeoField ):
             continue # skip ints, floats etc.
         if (i > 0) and (fields[i].parent is None):
             fields[i].parent = fields[i-1]
@@ -29,18 +31,18 @@ def _linkF( fields ):
 class GeoModel(object):
     """
     A class representing a time-aware geological model and
-    facilitating interactions with the underlying linked-list of SF instances
+    facilitating interactions with the underlying linked-list of GeoField instances
     (that represent each geological structure in the model).
     """
 
     def __init__( self, fields : list, forward=None, lr=0.01, grid=None ):
         """
-        Construct a GeoModel from a list of SFs.
+        Construct a GeoModel from a list of GeoFields.
 
         Parameters
         ----------
         fields : list
-            A list of SF instances representing geological events, from oldest to youngest. This list 
+            A list of GeoField instances representing geological events, from oldest to youngest. This list 
             can include domain boundaries if needed, but non-domain fields (e.g., faults, stratigraphy, etc.)
             should not be older than these.
         forward : curlew.fields.NF | optional
@@ -54,16 +56,16 @@ class GeoModel(object):
             An optional grid to associate with this GeoModel instance. This will set the `M.grid` variable but is not
             necessary (i.e. can be `null`; which is the default).
         """
-        # set parent and child properties of underlying SFs
-        # (i.e. build our linked list / binary tree of SFs)
+        # set parent and child properties of underlying GeoFields
+        # (i.e. build our linked list / binary tree of GeoFields)
         _linkF( fields)
 
         # traverse back down linked list / tree and define IDs
         def traverse( node, i = 1):
             node.eid = i
-            if isinstance( node.parent, SF ):
+            if isinstance( node.parent, GeoField ):
                 i = traverse( node.parent, i+1)
-            if isinstance( node.parent2, SF):
+            if isinstance( node.parent2, GeoField):
                 i = traverse( node.parent2, i+1)
             return i
         traverse( fields[-1] )
@@ -71,16 +73,16 @@ class GeoModel(object):
         # accumulate all fields in this model
         self.fields = []
         def traverse_fields( node ):
-            if isinstance(node, SF):
+            if isinstance(node, GeoField):
                 self.fields.append(node)
-            if isinstance(node.parent, SF):
+            if isinstance(node.parent, GeoField):
                 traverse_fields( node.parent )
-            if isinstance(node.parent2, SF):
+            if isinstance(node.parent2, GeoField):
                 traverse_fields( node.parent2 )
         traverse_fields( fields[-1] ) # traverse from last field in the list
         self.fields = self.fields[::-1] # we want the youngest field last, so reverse the list
         self.lastEvent = self.fields[-1] # change to evaluate model in some paleo-space
-        self.eidLookup = { f.eid : f for f in self.fields } # create a lookup table for translating event IDs to SF instances
+        self.eidLookup = { f.eid : f for f in self.fields } # create a lookup table for translating event IDs to GeoField instances
 
         # store forward model, if defined
         self.forward = forward
@@ -109,14 +111,14 @@ class GeoModel(object):
 
         Parameters
         ------------
-        name, str | SF | list:
-            The name of the SF to freeze. Can also be a list of names or instances. If None, 
-            the specified freeze will be applied to all SFs in this model. Use `'forward'` to 
+        name, str | GeoField | list:
+            The name of the GeoField to freeze. Can also be a list of names or instances. If None, 
+            the specified freeze will be applied to all GeoFields in this model. Use `'forward'` to 
             address any defined forward model.
         geometry : bool
-            True if the geometry of the specified SF should be frozen. Default is True. 
+            True if the geometry of the specified GeoField should be frozen. Default is True. 
         params : bool
-            True if other parameters (e.g., fault slip) associated with the specified SFs should be frozen. Default is False.
+            True if other parameters (e.g., fault slip) associated with the specified GeoFields should be frozen. Default is False.
         """
         if name is None:
             name = [f.name for f in self.fields] # apply to all
@@ -131,7 +133,7 @@ class GeoModel(object):
 
     def prefit(self, epochs, **kwargs):
         """
-        Train all SFs in this model to fit their respective constraints
+        Train all GeoFields in this model to fit their respective constraints
         in isolation, starting with the youngest field.
 
         Parameters
@@ -143,7 +145,7 @@ class GeoModel(object):
         ----------
         All keywords are passed to `curlew.fields.NF.fit(...)`. These include:
         learning_rate : float, optional
-            Reset each SF's optimiser to the specified learning rate before training.
+            Reset each GeoField's optimiser to the specified learning rate before training.
         best : bool, optional
             After training set neural field weights to the best loss.
         vb : bool, optional
@@ -194,15 +196,15 @@ class GeoModel(object):
 
     def fit(self, epochs, learning_rate=None, early_stop=(100,1e-4), best=True, vb=True, prefix='Training'):
         """
-        Train all SFs in this model to fit the specified constraints
+        Train all GeoFields in this model to fit the specified constraints
         simeltaneously.
 
         Parameters
         ----------
         epochs : int
-            The number of epochs to train each SF for.
+            The number of epochs to train each GeoField for.
         learning_rate : float, optional
-            Reset each SF's optimiser to the specified learning rate before training.
+            Reset each GeoField's optimiser to the specified learning rate before training.
         early_stop : tuple,
             Tuple containing early stopping criterion. This should be (n,t) such that optimisation
             stops after n iterations with <= t improvement in the loss. Set to None to disable. Note 
@@ -253,22 +255,22 @@ class GeoModel(object):
                 out.update(details) # store for output
 
             # also add forward (property) reconstruction loss
-            if self.forward is not None:
-                pp = self.forward.C.pp # position of property constraints
-                pv = self.forward.C.pv # value of property constraints
-                spred = self.fields[-1].predict(pp, combine=True, to_numpy=False) # automatically recursed back throught the linked list.
-                # One Hot encoding
-                if self.forward.H.one_hot:
-                    one_hot_encoder = torch.nn.functional.one_hot((spred[:, 1] - 1).long(), num_classes=len(self.fields))
-                    encoded_spred = one_hot_encoder * spred[:, 0][:, None]
-                    ppred = self.forward( encoded_spred )
-                else:
-                    ppred = self.forward( spred ) # generate property predictions
-                prop_loss = self.forward.loss_func( ppred, pv ) # compute loss
-                if isinstance( self.forward.H.prop_loss, str):
-                    self.forward.H.prop_loss = float(self.forward.H.prop_loss) / prop_loss.item()
-                loss = loss + self.forward.H.prop_loss * prop_loss
-                out['forward'] = (prop_loss.item(),{})
+            # if self.forward is not None:
+            #     pp = self.forward.C.pp # position of property constraints
+            #     pv = self.forward.C.pv # value of property constraints
+            #     spred = self.fields[-1].predict(pp, combine=True, to_numpy=False) # automatically recursed back throught the linked list.
+            #     # One Hot encoding
+            #     if self.forward.H.one_hot:
+            #         one_hot_encoder = torch.nn.functional.one_hot((spred[:, 1] - 1).long(), num_classes=len(self.fields))
+            #         encoded_spred = one_hot_encoder * spred[:, 0][:, None]
+            #         ppred = self.forward( encoded_spred )
+            #     else:
+            #         ppred = self.forward( spred ) # generate property predictions
+            #     prop_loss = self.forward.loss_func( ppred, pv ) # compute loss
+            #     if isinstance( self.forward.H.prop_loss, str):
+            #         self.forward.H.prop_loss = float(self.forward.H.prop_loss) / prop_loss.item()
+            #     loss = loss + self.forward.H.prop_loss * prop_loss
+            #     out['forward'] = (prop_loss.item(),{})
 
             # store best state(s)
             if (loss.item() < (best_loss+eps)):
@@ -302,110 +304,104 @@ class GeoModel(object):
         # return
         return loss.item(), out
 
-    def predict(self, x : np.ndarray ):
+    def predict(self, x : np.ndarray, batchSize=50000):
         """
         Create model predictions at the specified points.
 
         Parameters
         ----------
-        x : np.ndarray
+        x : np.ndarray | torch.tensor | curlew.geometry.Grid
             An array of shape (N, input_dim) containing the coordinates at which to evaluate
             this GeoModel.
 
         Returns
         --------
-        S : An array of shape (N,1) containig the predicted scalar values and corresponding SF
+        S : An array of shape (N,1) containig the predicted scalar values and corresponding GeoField
             that "created" them.
         """
-        out = self.fields[-1].predict( x, combine=True, to_numpy=False) # automatically recursed back throught the linked list.
-        out = out.cpu().detach().numpy()
-        if out.shape[1] == 1: # add "structure ID" for consistency if needed
-            out = np.hstack([out, np.zeros_like(out)])
-        out[:,1] = out[:,1].astype(int) # convert field IDs to integers
-        return out
+        out = self.fields[-1].predict( x, combine=True, to_numpy=False, batchSize=batchSize) # automatically recursed back throught the linked list.
+        return out.numpy()
 
-    def gradient(self, x : np.ndarray, return_vals : bool =False, normalize : bool = True ):
-        """
-        Evaluate this model using `self.predict(x, **kwds)` and then compute
-        and return the gradients of the underlying scalar fields (as these represent
-        e.g., bedding orientation).
+    # def gradient(self, x : np.ndarray, return_vals : bool =False, normalize : bool = True ):
+    #     """
+    #     Evaluate this model using `self.predict(x, **kwds)` and then compute
+    #     and return the gradients of the underlying scalar fields (as these represent
+    #     e.g., bedding orientation).
 
-        Parameters
-        ----------
-        x : np.ndarray
-            And (N,d) array containing the locations at which to evaluate the model.
-        return_vals : bool
-            True if evaluated scalar values should be returned as well as gradients. Default is False. 
-        normalize : bool
-            True if gradient vectors should be normalised to length 1 (i.e. to represent poles to planes). Default is True. 
+    #     Parameters
+    #     ----------
+    #     x : np.ndarray
+    #         And (N,d) array containing the locations at which to evaluate the model.
+    #     return_vals : bool
+    #         True if evaluated scalar values should be returned as well as gradients. Default is False. 
+    #     normalize : bool
+    #         True if gradient vectors should be normalised to length 1 (i.e. to represent poles to planes). Default is True. 
 
-        Returns
-        --------
-        Gradient vectors at the specified locations (`x`). If `return_vals` is `True`,
-        tuple (gradients, values) will be returned.
-        """
-        # compute gradients from final scalar field
-        # (n.b. this automatically recurses back through the linked list)
-        return self.fields[-1].gradient( x, combine=True, to_numpy=True,
-                                                normalize=normalize,
-                                                return_vals=return_vals)
+    #     Returns
+    #     --------
+    #     Gradient vectors at the specified locations (`x`). If `return_vals` is `True`,
+    #     tuple (gradients, values) will be returned.
+    #     """
+    #     # compute gradients from final scalar field
+    #     # (n.b. this automatically recurses back through the linked list)
+    #     return self.fields[-1].gradient( x, to_numpy=True, normalize=normalize, return_vals=return_vals)
 
-    def classify(self, x : np.ndarray, return_vals=False):
-        """
-        Evaluate this model using `self.predict(x, **kwds)` and then bin
-        the resulting scalar values according to the isosurfaces associated
-        with the scalar field responsible for each prediction (i.e. after taking
-        account for overprinting relations between the various fields).
+    # def classify(self, x : np.ndarray, return_vals=False):
+    #     """
+    #     Evaluate this model using `self.predict(x, **kwds)` and then bin
+    #     the resulting scalar values according to the isosurfaces associated
+    #     with the scalar field responsible for each prediction (i.e. after taking
+    #     account for overprinting relations between the various fields).
 
-        Parameters
-        ----------
-        x : np.ndarray
-            And (N,d) array containing the locations at which to evaluate the model.
-        return_vals : bool
-            True if evaluated scalar values should be returned as well as classes. Default is False. 
+    #     Parameters
+    #     ----------
+    #     x : x : np.ndarray | torch.tensor | curlew.geometry.Grid
+    #         And (N,d) array containing the locations at which to evaluate the model.
+    #     return_vals : bool
+    #         True if evaluated scalar values should be returned as well as classes. Default is False. 
 
-        Returns
-        -------
-        class_ids : np.ndarray
-            Class ID's after classifying according to the defined isosurfaces.
-        class_names : np.ndarray
-            Array of unit names corresponding to the above class_ids.
-        """
+    #     Returns
+    #     -------
+    #     class_ids : np.ndarray
+    #         Class ID's after classifying according to the defined isosurfaces.
+    #     class_names : np.ndarray
+    #         Array of unit names corresponding to the above class_ids.
+    #     """
 
-        # evaluate all scalar values
-        pred = self.predict(x)
-        sfv = pred[:, 0].copy() # scalar field values
-        sid = pred[:, 1].astype(int) # structural field IDs
+    #     # evaluate all scalar values
+    #     pred = self.predict(x)
+    #     sfv = pred[:, 0].copy() # scalar field values
+    #     sid = pred[:, 1].astype(int) # structural field IDs
 
-        # individually classify each of them, and aggregate classes
-        labels = []
-        classes = pred.copy()
-        classes[:, 0] = classes[:, 1]
-        unique_ids = np.array([f.eid for f in self.fields]).astype(int)
+    #     # individually classify each of them, and aggregate classes
+    #     labels = []
+    #     classes = pred.copy()
+    #     classes[:, 0] = classes[:, 1]
+    #     unique_ids = np.array([f.eid for f in self.fields]).astype(int)
 
-        for i in range(len(unique_ids)):
-            # mask to get pixels this SF is responsible for
-            mask = (sid == unique_ids[i])
-            if mask.sum() > 0:
-                # Belongs to normal fields
-                iso = self.fields[i].getIsovalues()
-                isov = np.array( list(iso.values()) )
-                ixx = np.argsort(isov)
-                inames = np.array( list(iso.keys()) )[ixx]
-                cids = np.digitize( sfv[mask], bins=isov[ixx] )
+    #     for i in range(len(unique_ids)):
+    #         # mask to get pixels this GeoField is responsible for
+    #         mask = (sid == unique_ids[i])
+    #         if mask.sum() > 0:
+    #             # Belongs to normal fields
+    #             iso = self.fields[i].getIsovalues()
+    #             isov = np.array( list(iso.values()) )
+    #             ixx = np.argsort(isov)
+    #             inames = np.array( list(iso.keys()) )[ixx]
+    #             cids = np.digitize( sfv[mask], bins=isov[ixx] )
 
-                # store IDs and corresponding labels
-                classes[mask, 0] = cids + len(labels)
-                labels += [('%d_'%i)+n for n in inames]
+    #             # store IDs and corresponding labels
+    #             classes[mask, 0] = cids + len(labels)
+    #             labels += [('%d_'%i)+n for n in inames]
 
-        labels += ['overburden'] # we need to add one extra class
+    #     labels += ['overburden'] # we need to add one extra class
 
-        if return_vals:
-            return classes, labels, pred
-        else:
-            return classes, labels
+    #     if return_vals:
+    #         return classes, labels, pred
+    #     else:
+    #         return classes, labels
 
-    def drill( self, start, end, step ):
+    def drill( self, start, end, step, batchSize=50000 ):
         """
         Evaluate the model along a line between start and end with an interval of step.
 
@@ -420,15 +416,8 @@ class GeoModel(object):
 
         Returns
         ---------
-        A dictionary containing the following model output arrays
-        ```
-        {"pos":[...positions],
-        "scalar":[...scalarValues],
-        "fieldID":[...scalar field id],
-        "classID":[...class IDs (as returned by classify(...))],
-        "classNames":[...class Names (as returned by classify(...))]
-        }
-        ```
+        A Geode instance containing the results given by evaluating the model
+        along the drillhole.
         """
         dir = np.array(end) - np.array(start)
         length = np.linalg.norm(dir)
@@ -436,28 +425,25 @@ class GeoModel(object):
         pos = np.array([start+dir*i for i in range( int(length / step) ) ])
 
         # evaluate model
-        cids, inames, pred = self.classify( pos, return_vals=True )
+        g = self.predict( pos, batch=batchSize)
 
         # find contacts
-        cmask = np.abs( np.diff( cids[:,0], prepend=cids[0,0] ) ) > 0
-        ori = self.gradient(pos[cmask], return_vals=False, normalize=True)
-        contacts = dict(
-            pos=pos[cmask],
-            ori=ori,
-            scalar=pred[cmask,0],
-            fieldID=pred[cmask,1].astype(int),
-            classID=cids[cmask,0].astype(int),
-            className=inames )
+        if False:
+            # TODO
+            cmask = np.abs( np.diff( cids[:,0], prepend=cids[0,0] ) ) > 0
+            ori = self.gradient(pos[cmask], return_vals=False, normalize=True)
+            contacts = dict(
+                pos=pos[cmask],
+                ori=ori,
+                scalar=pred[cmask,0],
+                fieldID=pred[cmask,1].astype(int),
+                classID=cids[cmask,0].astype(int),
+                className=inames )
 
-        # return
-        return dict( pos=pos,
-                    scalar=pred[:,0],
-                    fieldID=pred[:,1].astype(int),
-                    classID=cids[:,0].astype(int),
-                    className=inames,
-                    contacts=contacts )
+        # return Geode
+        return g
 
-    def evaluate( self, grid, topology=False, buffer=None, surfaces=None, batch_size=50000, vb=True):
+    def evaluate( self, grid, topology=False, buffer=None, surfaces=None, batchSize=50000, vb=True):
         """
         Evaluate a *curlew* model on a grid and extract isosurfaces, topology and/or fault buffers.
 
@@ -498,11 +484,10 @@ class GeoModel(object):
         # recurse through model extracting required info
         def recurse( f, dmask, i=0 ):
             # evaluate model
-            from curlew.utils import batchEval
             if (f.parent2 is not None) or (f.deformation is not None): # ignore stratigraphic fields
                 if vb:
                     print(f"Evaluating field {i}/{len(self.fields)}", end='\r')
-                pred = batchEval( gxy, f.predict, batch_size=batch_size, vb=False)[:,0]
+                pred = batchEval( gxy, f.predict, batch_size=batchSize, vb=False)[:,0]
                 pred[dmask] = np.nan # remove masked areas
 
             # evaluate topology, buffer & recurse
@@ -520,12 +505,12 @@ class GeoModel(object):
                     out['topology'][ footwall, i ] = -1
                     out['topology'][ hangingwall, i ] = 1
 
-                if isinstance(f.parent, SF):
+                if isinstance(f.parent, GeoField):
                     recurse( f.parent, dmask=(dmask + footwall ), i=i+1 ) # recurse hangingwall objects
-                if isinstance(f.parent2, SF):
+                if isinstance(f.parent2, GeoField):
                     recurse( f.parent2, dmask=(dmask + hangingwall), i=i+1 ) # recurse footwall objects
 
-            elif (f.deformation is not None) and (f.deformation == faultOffset): # this is a fault surface
+            elif (f.deformation is not None) and isinstance(f, FaultOffset): # this is a fault surface
                 if topology:
                     iso = f.getIsovalue( f.deformation_args['contact'], offset=0 ) # fault surface
                     footwall = pred < iso
@@ -539,7 +524,7 @@ class GeoModel(object):
                     i1 = f.getIsovalue( f.deformation_args['contact'], offset=buffer ) # upper buffer
                     out['buffer'][ (pred >= min(i0, i1)) & (pred <= max(i0, i1)) & (out['buffer'] == 0) ] = f.eid
 
-                if isinstance(f.parent, SF):
+                if isinstance(f.parent, GeoField):
                     recurse( f.parent, dmask=dmask, i=i+1 ) # recurse older objects
             else:
                 iso = None
@@ -574,7 +559,7 @@ class GeoModel(object):
 
         Returns
         -------
-        SF
+        GeoField
             The scalar field instance associated with the specified event ID.
         """
         return self.eidLookup.get( int(eid), None)
@@ -620,7 +605,7 @@ class GeoModel(object):
 
         # If the node is a domain boundary, handle its children differently
         node_field = next((field for field in self.fields if field.name == node), None)
-        if node_field.parent2 is not None and isinstance(node_field, SF):
+        if node_field.parent2 is not None and isinstance(node_field, GeoField):
             # Move to the right
             pos = self._getPositions(G, children[0], first_x + step_x, first_y, step_x, step_y, pos)
             # Move down
@@ -675,13 +660,13 @@ class GeoModel(object):
             graph.add_node(field.name, label=field.name, color=color)
 
             # Add edges
-            if isinstance(field.parent, SF):
+            if isinstance(field.parent, GeoField):
                 graph.add_edge(field.name, field.parent.name)
-            if isinstance(field.parent2, SF):
+            if isinstance(field.parent2, GeoField):
                 graph.add_edge(field.name, field.parent2.name)
-            if not isinstance(field.parent, SF) and field.parent is not None: # Handle fixed values
+            if not isinstance(field.parent, GeoField) and field.parent is not None: # Handle fixed values
                 graph.add_edge(field.name, str(field.parent))
-            if not isinstance(field.parent2, SF) and field.parent2 is not None:
+            if not isinstance(field.parent2, GeoField) and field.parent2 is not None:
                 graph.add_edge(field.name, str(field.parent2))
 
         # Plot

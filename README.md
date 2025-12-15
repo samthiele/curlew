@@ -10,7 +10,7 @@ A toolkit for building 2- and 3- dimensional geological models using neural fiel
 
 To install directly from github try: `pip install git+https://github.com/samthiele/curlew.git`.
 
-This should run on most systems: `numpy`, `pytorch` and `tqdm` are the only required dependencies. Matplotlib is handy too, but not required. 
+This should run on most systems: `numpy`, `pytorch` and `tqdm` are the only required dependencies. Other recommended (but optional) dependencies include matplotlib (for 2D plotting), plyfile (for IO with 3D PLY files), ipywidgets and pythreejs (for basic 3D visualisation in notebooks).
 
 ### Tutorials
 

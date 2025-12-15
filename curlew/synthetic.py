@@ -3,26 +3,20 @@ Generate synthetic datasets and models for testing purposes.
 """
 import numpy as np
 from curlew.core import CSet
-from curlew.geology.model import GeoModel
+from curlew.geology.geomodel import GeoModel
 from curlew.geometry import grid 
-from curlew.geology.interactions import overprint
 from curlew.visualise import colour
-from curlew.fields.analytical import ALF, APF, ACF
+from curlew.fields.analytical import LinearField, PeriodicField, QuadraticField
 from curlew.geology import strati, fold, fault, domainBoundary, sheet
 
-def sample( pxy, sxy, shape, pv=None, breaks=19, init=100, xstep=300, pval=0.6, cmap='tab20', seed=42 ):
+def sample( G, pv=None, breaks=19, init=100, xstep=300, pval=0.6, cmap='tab20', seed=42 ):
     """
     Sample value, orientation, and property constraints from a scalar field and associated gradients.
 
     Parameters
     ----------
-    pxy : np.ndarray
-        A (N, 2) array of position vectors. Note that this function works only with 2D data.
-    sxy : np.ndarray
-        A (N,) or (N, d) array of scalar values corresponding to the above points, 
-        where the last dimension corresponds to the event ID.
-    shape : tuple
-        A tuple containing the (width, height) of the grid defined by `pxy`.
+    G : curlew.geofield.Geode
+        A Geode object containing the results from a GeoField or GeoModel.
     pv : np.ndarray or str
         A (N, d) array of n-dimensional property vectors (e.g., color). Can also be 'rgb' to create synthetic colors.
     breaks : list
@@ -47,23 +41,21 @@ def sample( pxy, sxy, shape, pv=None, breaks=19, init=100, xstep=300, pval=0.6, 
 
     # sample constraints along drillhoes for s0 and s1
     np.random.seed(seed)
-
-    # ensure sf has an "eventID" axis
-    if len(sxy.shape) == 1:
-        sxy = np.array([sxy, np.zeros_like(sxy) ]).T
     
-    # reshape sf to image dims and initialise structure for accumulating constraints
-    sf = sxy.reshape( shape + (2, ))
-    xy = pxy.reshape( shape + (-1, ))
-    constraints = {int(k):{'vp':[], 'vv':[], 'gp':[], 'gv':[], 'gop':[], 'gov':[]} for k in np.unique(sxy[:,1])}
+
+    # reshape GeoField to image dims and initialise structure for accumulating constraints
+    sf = G.grid.reshape( G.scalar )
+    sid = G.grid.reshape( G.structureID.astype(int) )
+    xy = G.grid.reshape( G.grid.coords() )
+    constraints = {int(k):{'vp':[], 'vv':[], 'gp':[], 'gv':[], 'gop':[], 'gov':[]} for k in np.unique(sid)}
 
     # compute contact points and gradients (bedding orientation)
-    gx = np.diff( sf[...,0], axis= 0 )
-    gy = np.diff( sf[...,0], axis= 1 )
-    c = colour(sf[...,0], breaks=breaks, cmap=cmap) # discretise resulting scalar field into colours
+    gx = np.diff( sf, axis= 0 )
+    gy = np.diff( sf, axis= 1 )
+    c = colour(sf, breaks=breaks, cmap=cmap) # discretise resulting scalar field into colours
     contacts = np.sum( np.abs( np.diff(c, axis=1, append=0) ), axis=-1)  > 0 # get contacts
-    domains = np.sum( [np.abs( np.diff(sf[...,1], axis=1, append=0) ), # get domain boundaries as gradients will be wrong here
-                       np.abs( np.diff(sf[...,1], axis=0, append=0) )], axis=0) > 0 
+    domains = np.sum( [np.abs( np.diff(sid, axis=1, append=0) ), # get domain boundaries as gradients will be wrong here
+                       np.abs( np.diff(sid, axis=0, append=0) )], axis=0) > 0 
     if pv == 'rgb':
         pv = c
 
@@ -72,7 +64,7 @@ def sample( pxy, sxy, shape, pv=None, breaks=19, init=100, xstep=300, pval=0.6, 
         cc = np.argwhere( contacts[x,:] )
         if (len(cc) > 1):
             for y in cc.squeeze()[:-1]: # ignore last as this is the boundary
-                i = int( sf[x,y,1] )
+                i = int( sid[x,y] )
                 if not domains[x,y]: # ignore domain boundaries as gradients will be wrong
                     constraints[i]['gp'].append( xy[x,y] ) # add gradient constraint
                     constraints[i]['gv'].append( (gx[x,y], gy[x,y]) )
@@ -80,7 +72,7 @@ def sample( pxy, sxy, shape, pv=None, breaks=19, init=100, xstep=300, pval=0.6, 
                     constraints[i]['gov'].append( (gx[x,y], gy[x,y]) )
                     if np.random.rand() <= pval: # add value constraint
                         constraints[i]['vp'].append( xy[x,y] )
-                        constraints[i]['vv'].append( sf[x,y,0] )
+                        constraints[i]['vv'].append( sf[x,y] )
 
         if pv is not None: # add continuous property constraints
             for y in np.arange(sf.shape[1], step=1):
@@ -89,7 +81,7 @@ def sample( pxy, sxy, shape, pv=None, breaks=19, init=100, xstep=300, pval=0.6, 
                 constraints['property']['pp'].append( xy[x,y] ) # property position
                 constraints['property']['pv'].append( pv[x,y] ) # property value
                 constraints['property']['vp'].append( xy[x,y] ) # position again
-                constraints['property']['vv'].append( sf[x,y,:] ) # also store scalar value -- useful as a reference
+                constraints['property']['vv'].append( sf[x,y] ) # also store scalar value -- useful as a reference
         
     # convert to numpy arrays
     for i in constraints.keys():
@@ -132,11 +124,11 @@ def steno( shape=(1500,1000), **kwargs ):
     G = grid( shape, step=(1, 1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
-    s0 = strati('s0', C=ACF( 'f0', input_dim=2, gradient= (0.00001,1), curve=(-0.00005,0), origin = (1000,500) ) )
+    s0 = strati('s0', C=QuadraticField( 'f0', input_dim=2, gradient= (0.00001,1), curve=(-0.00005,0), origin = (1000,500) ) )
     M = GeoModel([s0], grid=G)
 
-    s = s0.predict(xy)
-    C = sample( xy, s, shape, pv='rgb', **kwargs )
+    s = s0.predict(G)
+    C = sample( s, pv='rgb', **kwargs )
 
     return C, M
 
@@ -167,11 +159,11 @@ def lehmann( shape=(1500,1000), **kwargs ):
     G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
-    s0 = strati('s0', C=APF('f0', input_dim=2) ) # Folds
+    s0 = strati('s0', C=PeriodicField('f0', input_dim=2) ) # Folds
     
     M = GeoModel([s0], grid=G )
-    s = M.predict(xy)
-    C = sample(xy, s, shape, pv='rgb', **kwargs)
+    s = M.predict(G)
+    C = sample(s, pv='rgb', **kwargs)
     
     return C, M
 
@@ -196,14 +188,14 @@ def hutton( shape=(1500,1000), **kwargs ):
         Geomodel of the synthetic model
     """
     G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
-    xy = G.coords()
+    #xy = G.coords()
 
-    s0 = strati('s0', C=APF( 'f0', input_dim=2 ) ) # Folds
-    s1 = strati('s1', C=ACF( 'f1', input_dim=2, gradient=np.array([0.1,0.9]), origin=(1000,500), curve=(-0.00002,0) ), base=0) # uncorformity surface
+    s0 = strati('s0', C=PeriodicField( 'f0', input_dim=2 ) ) # Folds
+    s1 = strati('s1', C=QuadraticField( 'f1', input_dim=2, gradient=np.array([0.1,0.9]), origin=(1000,500), curve=(-0.00002,0) ), base=0) # uncorformity surface
 
     M  = GeoModel( [s0,s1], grid=G )
-    s = M.predict(xy)
-    C = sample( xy, s, shape, pv='rgb', **kwargs )
+    s = M.predict(G)
+    C = sample( s, pv='rgb', **kwargs )
     C=[C[1],C[0],C[2]]
 
     return C, M
@@ -236,16 +228,16 @@ def playfair( shape=(1500,1000), width=50, **kwargs ):
     G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
-    s0 = strati('s0', C=ACF( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500) ) )
+    s0 = strati('s0', C=QuadraticField( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500) ) )
     s1 = sheet( 's1', 
-           C=ALF( 'f1', input_dim=2, origin = [1000,500], gradient=(0.5,0.5) ), contact=(-width,width) )
+           C=LinearField( 'f1', input_dim=2, origin = [1000,500], gradient=(0.5,0.5) ), contact=(-width,width) )
     
     M = GeoModel( [s0, s1], grid=G )
-    s = M.predict(xy)
+    s = M.predict(G)
     
     kwargs['pval'] = kwargs.get('pval', 1.0) # change default to sample all value constraints
-    C = sample( xy, M.predict(xy), shape, pv='rgb', **kwargs )
-    C1 = sample( xy, s1.predict(xy), shape, pv='rgb', breaks=[-width,width], **kwargs)
+    C = sample( M.predict(G), pv='rgb', **kwargs )
+    C1 = sample( s1.predict(G), pv='rgb', breaks=[-width,width], **kwargs)
 
     return [C[1], C1[0], C[-1]], M
 
@@ -276,18 +268,18 @@ def michell( shape=(1500,1000), offset=100, **kwargs ):
     G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
-    s0 = strati('s0', C=ACF( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500)  ) )
+    s0 = strati('s0', C=QuadraticField( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500)  ) )
     s1 = fault( 's1', 
-           C=ALF( 'f1', input_dim=2, origin=(1000,500), gradient=(0.5,0.5)  ),
+           C=LinearField( 'f1', input_dim=2, origin=(1000,500), gradient=(0.5,0.5)  ),
            offset=offset, sigma1 = [-1,0] )
 
     M = GeoModel( [s0,s1], grid=G )
-    s = M.predict(xy)
-    C = sample( xy, s, shape, pv='rgb', **kwargs ) # sample unit and bedding constraints
+    s = M.predict(G)
+    C = sample( s, pv='rgb', **kwargs ) # sample unit and bedding constraints
     kwargs['pval'] = kwargs.get('pval', 1.0) # change default to sample all value constraints
     if 'breaks' in kwargs:
         del kwargs['breaks']
-    Cf = sample( xy, s1.predict(xy), shape, pv='rgb', breaks=[0.5], **kwargs  )
+    Cf = sample( s1.predict(G), pv='rgb', breaks=[0.5], **kwargs  )
 
     C = [C[0], Cf[0], C[-1]] # get stratigraphy, fault and property constraints
 
@@ -334,25 +326,25 @@ def anderson( shape=(1500,1000), offset1=225, offset2=250, **kwargs ):
     G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
     xy = G.coords()
 
-    s0 = strati('s0', C=ACF( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500)  ) )
+    s0 = strati('s0', C=QuadraticField( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500)  ) )
     s1 = fault( 's1', 
-           C=ALF( 'f1', input_dim=2, origin=(950,550), gradient=(np.cos( np.deg2rad(35) ), np.sin( np.deg2rad(35) ))  ),
-           offset=offset1 ) 
+           C=LinearField( 'f1', input_dim=2, origin=(950,550), gradient=(np.cos( np.deg2rad(35) ), np.sin( np.deg2rad(35) ))  ),
+           offset=offset1, sigma1=[0,1] ) 
     s2 = fault( 's2', 
-           C=ALF( 'f2', input_dim=2, origin=(1050,500), gradient=(-np.cos( np.deg2rad(35) ), np.sin( np.deg2rad(35) ))  ),
-           offset=offset2 )
+           C=LinearField( 'f2', input_dim=2, origin=(1050,500), gradient=(-np.cos( np.deg2rad(35) ), np.sin( np.deg2rad(35) ))  ),
+           offset=offset2, sigma1=[0,1] )
     
     M = GeoModel( [s0, s1, s2], grid=G )
-    s = M.predict(xy)
+    s = M.predict(G)
 
-    C = sample( xy, s, shape, pv='rgb', **kwargs )
+    C = sample( s, pv='rgb', **kwargs )
     if 'breaks' in kwargs:
         del kwargs['breaks']
     if 'pv' in kwargs:
         del kwargs['pv']
     kwargs['pval'] = kwargs.get('pval', 1.0) # change default to sample all value constraints
-    Cf1 = sample( xy, s1.predict(xy), shape, pv='rgb', breaks=[0.5],xstep=400, **kwargs )
-    Cf2 = sample( xy, s2.predict(xy), shape, pv='rgb', breaks=[0.5], **kwargs )
+    Cf1 = sample( s1.predict(G), pv='rgb', breaks=[0.5],xstep=400, **kwargs )
+    Cf2 = sample( s2.predict(G), pv='rgb', breaks=[0.5], **kwargs )
 
     C = [C[0], Cf1[0], Cf2[0], C[-1]] # combine stratigraphy, fault and property constraints
 

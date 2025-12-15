@@ -44,9 +44,10 @@ Kamath, A.V., Thiele, S.T., Moulard, M., Grose, L., Tolosana-Delgado, R., Hillie
 
 """
 import torch
-from curlew.fields import NF
-from curlew.geology.model import GeoModel
-from curlew.geology.SF import SF
+
+from curlew.fields import BaseNF
+from curlew.geology.geomodel import GeoModel
+from curlew.geology.geofield import GeoField
 
 device = 'cpu' # can be changed to set device to e.g., gpu
 """The device used to compute operations with pytorch tensors. Change to allow e.g. GPU parallelisation."""
@@ -79,7 +80,7 @@ except:
 
 # import things we want to expose under the `curlew` namespace
 from curlew import core
-from curlew import data
+from curlew import synthetic
 from curlew import geology
 from curlew import geometry
 from curlew import visualise
