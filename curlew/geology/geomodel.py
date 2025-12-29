@@ -35,7 +35,7 @@ class GeoModel(object):
     (that represent each geological structure in the model).
     """
 
-    def __init__( self, fields : list, forward=None, lr=0.01, grid=None ):
+    def __init__( self, fields : list, lr=0.01, grid=None ):
         """
         Construct a GeoModel from a list of GeoFields.
 
@@ -45,10 +45,6 @@ class GeoModel(object):
             A list of GeoField instances representing geological events, from oldest to youngest. This list 
             can include domain boundaries if needed, but non-domain fields (e.g., faults, stratigraphy, etc.)
             should not be older than these.
-        forward : curlew.fields.NF | optional
-            A neural field taking 2-inputs (scalar value and structure ID) and outputting predictions
-            matching any defined property measurements, such that it learns a forward model used to constrain
-            model geometry with arbitrary (informative) quantitative data.
         lr : float | optional 
             The learning rate to use for any optimised parameters outside of the neural fields. This
             includes e.g., fault offsets.
@@ -84,9 +80,6 @@ class GeoModel(object):
         self.lastEvent = self.fields[-1] # change to evaluate model in some paleo-space
         self.eidLookup = { f.eid : f for f in self.fields } # create a lookup table for translating event IDs to GeoField instances
 
-        # store forward model, if defined
-        self.forward = forward
-
         # store grid if defined
         self.grid = grid
         
@@ -94,7 +87,6 @@ class GeoModel(object):
         # (these are gathered from all the fields in this model)
         # also store references to each fields optimiser for easy access.
         self.optim = {}
-        self.frozen = {'forward':False} # all frozen optimisers will be stored here and prevented from stepping
         for F in self.fields:
             # create all "non-mlp" params
             params = [ param for name, param in F.field.named_parameters() if 'mlp' not in name ]
@@ -121,15 +113,19 @@ class GeoModel(object):
             True if other parameters (e.g., fault slip) associated with the specified GeoFields should be frozen. Default is False.
         """
         if name is None:
-            name = [f.name for f in self.fields] # apply to all
+            name = [f for f in self.fields] # apply to all
         if not isinstance(name, list) or isinstance(name, tuple):
             name = [name]
         for f in name:
-            if not isinstance(f, str):
-                f = f.name
-            self.frozen[f] = geometry
-            if f+'_params' in self.optim:
-                self.frozen[ f+'_params' ] = params
+            if isinstance(f, str) or isinstance(f, int):
+                f = self[f] # get field by name or ID
+            f.field.frozen = geometry # freeze geometry?
+            if f.deformation is not None: # freeze potentially learnable properties?
+                f.deformation.frozen = params
+            if f.property is not None: # freeze potentially learnable properties?
+                f.property.frozen = params
+            if f.overprint is not None: # freeze potentially learnable properties?
+                f.overprint.frozen = params
 
     def prefit(self, epochs, **kwargs):
         """
@@ -169,30 +165,16 @@ class GeoModel(object):
         Zero all (unfrozen) optimisers associated with the neural fields and 
         other learned parameters (e.g., fault offsets) in this model. 
         """
-        if (self.forward is not None) and not self.frozen.get('forward', False):
-            self.forward.zero()
         for f in self.fields:
-            if not self.frozen.get(f.name,False):
-                f.field.zero() # underlying field
-        for k,v in self.optim.items():
-            if not self.frozen.get(k, False):
-                v[0].zero_grad() # parameter optimiser
+            f.zero()
 
-    def step(self, fields=True, forward=True, params=True):
+    def step(self):
         """
-        Step all (unfrozen) optimisers associated with the neural fields and 
-        other learned parameters (e.g., fault offsets) in this model. 
+        Step all (unfrozen) optimisers associated with the fields making
+        up this model, and (potentially) other leanrned parameters (e.g., fault offsets). 
         """
-        if forward and (self.forward is not None) and not self.frozen.get('forward', False):
-            self.forward.step()
-        if fields:
-            for f in self.fields:
-                if not self.frozen.get(f.name,False):
-                    f.field.step() # underlying field
-        if params:
-            for k,v in self.optim.items():
-                if not self.frozen.get(k, False):
-                    v[0].step() # parameter optimiser
+        for f in self.fields:
+            f.step()
 
     def fit(self, epochs, learning_rate=None, early_stop=(100,1e-4), best=True, vb=True, prefix='Training'):
         """
@@ -227,12 +209,7 @@ class GeoModel(object):
         # set learning rate if specified
         if learning_rate is not None:
             for F in self.fields:
-                F.field.set_rate( learning_rate )
-            if self.forward is not None:
-                self.forward.set_rate( learning_rate )
-            for opt in self.optim.values():
-                for param_group in opt[0].param_groups:
-                    param_group['lr'] = learning_rate
+                F.set_rate( learning_rate )
         
         # setup progress bar
         bar = range(epochs)
@@ -241,7 +218,7 @@ class GeoModel(object):
 
         # iterate
         out = {}
-        best_state = []
+        #best_state = []
         best_loss = np.inf
         best_count = 0
         eps = 0
@@ -250,7 +227,7 @@ class GeoModel(object):
         for epoch in bar:
             loss = 0
             for F in self.fields[::-1]:
-                ll, details = F.field.loss() # compute loss for this field
+                ll, details = F.loss() # compute loss for this field
                 loss = loss + ll # accumulate loss
                 out.update(details) # store for output
 
@@ -274,9 +251,7 @@ class GeoModel(object):
 
             # store best state(s)
             if (loss.item() < (best_loss+eps)):
-                best_state = [ copy.deepcopy( F.field.state_dict()  ) for F in self.fields ]
-                if self.forward is not None:
-                    best_state.append( copy.deepcopy( self.forward.state_dict() ) )
+                #best_state = [ copy.deepcopy( F.field.state_dict()  ) for F in self.fields ]
                 best_loss = loss.item()
                 best_count = 0
             else:
@@ -295,11 +270,9 @@ class GeoModel(object):
             self.step()
 
         # set best state
-        if best_state:
-            for i,F in enumerate(self.fields):
-                F.field.load_state_dict(best_state[i])
-            if self.forward is not None:
-                self.forward.load_state_dict(best_state[-1])
+        #if best_state:
+        #    for i,F in enumerate(self.fields):
+        #        F.field.load_state_dict(best_state[i])
 
         # return
         return loss.item(), out
@@ -548,21 +521,30 @@ class GeoModel(object):
 
         return out
 
+    def __getitem__(self, index ):
+        """Get fields by name (str) or SID (int)"""
+        return self.getField( index )
+
     def getField( self, eid ):
         """
-        Get the scalar field associated with the specified event ID.
+        Get the scalar field associated with the specified event ID (int) or name (str).
 
         Parameters
         ----------
-        eid : int
-            The event ID of the scalar field to retrieve.
+        eid : int | str
+            The event ID or field name to retrieve.
 
         Returns
         -------
         GeoField
             The scalar field instance associated with the specified event ID.
         """
-        return self.eidLookup.get( int(eid), None)
+        if isinstance(eid, str):
+            for f in self.fields:
+                if f.name == eid: return f
+            assert False, f"A field with name {eid} does not exist in this model."
+        else:
+            return self.eidLookup.get( int(eid), None)
 
     def _getPositions(self, G, node, first_x=0, first_y=0, step_x=10, step_y=10, pos=None):
         """

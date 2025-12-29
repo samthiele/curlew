@@ -8,6 +8,7 @@ the "glue" that bind different scalar fields into a potentially complex multi-ev
 """
 import numpy as np
 import torch
+from torch import nn
 from curlew.core import LearnableBase
 
 # OVERPRINTING RELATIONS -- function used to create new rocks (generative fields)
@@ -103,13 +104,17 @@ class OffsetBase(LearnableBase):
         G._lastDisp = o # store temporary results on field so these can be later added to the output
         return o
     
+    def learnable(self):
+        """ Return true if this offset has learnable parameters (and an optimiser is initialised)."""
+        return self.optim is not None
+    
     def dss( self, X, G, normalize=False ):
         """
         Evaluate the scalar field gradient (ds) and value (s)  for the points `X` given GeoField `G`. Note that 
         this assumes `X` is already transformed into the local (paleo) coordinate system relevant for `G`.
         """
         # get gradient of scalar field at X and associated value
-        ds, s = G.gradient( X, normalize=normalize, return_vals=True, transform=False, to_numpy=False )
+        ds, s = G.gradient( X, normalize=normalize, return_vals=True, transform=False, to_numpy=False, retain=self.learnable() )
         s = s.scalar
 
         # store temporary results on field so these can be later added to the output
@@ -143,6 +148,7 @@ class SheetOffset( OffsetBase ):
             The polarity of the dyke offset. If 1 (default), the hangingwall is moved and the footwall is fixed.
             If -1, the footwall is moved and the hangingwall is fixed.
         """
+        super().__init__()
         assert len(contact) == 2, "Contact must be a list or tuple of length two, representing the lower and upper surface of this intrusion."
         self.contact = contact
         self.aperture = aperture
@@ -185,7 +191,7 @@ class FaultOffset( OffsetBase ):
         Parameters
         ----------
         sigma1 : torch.tensor
-            The principal stress direction used to determine slip direction on the fault, through projection onto 
+            The principal strain direction used to determine slip direction on the fault, through projection onto 
             the tangent of the fault plane.
         offset : float | tuple
             The mode II shear offset on the fault. Defaults to 0. If a float is passed
@@ -212,26 +218,26 @@ class FaultOffset( OffsetBase ):
             The polarity of the fault offset. If 1 (default), the hangingwall is moved and the footwall is fixed.
             If -1, the footwall is moved and the hangingwall is fixed.
         """
-
+        super().__init__()
         self.sigma1 = sigma1
         self.offset = offset
         self.contact = contact
         self.width = width
         self.highcurve = highcurve
         self.polarity = polarity
-
+    
     def disp( self, X, G ):
         """
         Compute displacement vectors for points `X` based on GeoField `G`.
         """
         # TODO - only evaluate gradient where slip is significant (faster!)
-        ds, s = self.dss(X,G)
+        ds, s = self.dss(X,G,normalize=True) # get gradient direction
         
         # shift so that the fault surface is at zero
         contact = self.contact
         if isinstance(contact, str):
             contact = G.getIsovalue(contact)
-        s = s - (contact / G.field.mnorm) # force isosurface to be at zero
+        s = s - (contact / G.field.mnorm) # force isosurface to be at zero and scale to have ~unit average gradient
 
         # get displacement vectors by projecting sigma1 onto tangent to the scalar field
         # [ project onto tangent plane using: sigma1 - sigma1 . gradient ]

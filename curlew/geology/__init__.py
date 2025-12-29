@@ -27,7 +27,7 @@ def _initF( name, C, **kwargs):
         f = GeoField( name, type=type(C), field=C, **kwargs ) # create our GeoField using predefined Field
     return f
 
-def strati( name, C, base = -np.inf, sharpness=1e4, mode="above", **kwargs):
+def strati( name, *, C, base = -np.inf, sharpness=1e4, mode="above", **kwargs):
     """
     Create a GeoField representing a stratigraphic series (base stratigraphy or unconformity).
 
@@ -64,7 +64,7 @@ def strati( name, C, base = -np.inf, sharpness=1e4, mode="above", **kwargs):
     o = Overprint(threshold=base, sharpness=sharpness, mode=mode)
     return _initF( name, C=C, overprint=o, **kwargs)
 
-def sheet(name, C, contact=(-1,1), aperture=2, **kwargs):
+def sheet(name, *, C, contact=(-1,1), aperture=2, **kwargs):
     """
     Create a GeoField representing a sheet intrusion (dyke, sill or vein).
 
@@ -99,7 +99,7 @@ def sheet(name, C, contact=(-1,1), aperture=2, **kwargs):
 
     return _initF( name, C=C, deformation=offset, overprint=o, **kwargs)
 
-def fault(name, C, sigma1, H=None, learn_sigma=False, offset=0, contact=0, width=0, highcurve=False, **kwargs):
+def fault(name, *, C, sigma1, learn_sigma=False, offset=0, contact=0, width=0, highcurve=False, **kwargs):
     """
     Create a GeoField representing a fault, shear zone or (optionally) dilatant shear vein.
 
@@ -109,8 +109,6 @@ def fault(name, C, sigma1, H=None, learn_sigma=False, offset=0, contact=0, width
         A name for the created stratigraphic series (and GeoField that represents it).
     C : CSet | curlew.fields.analytical.AF | curlew.fields.NF
         The constraints or predefined field used to constrain this geological structure.
-    H : HSet
-        The hyperparameters used by the underlying `curlew.fields.NF` interpolator.
     sigma1 : np.ndarray
         A numpy array of shape (n,) defining the principal compressive stress vector. This
         is used to resolve the slip direction, by projection onto the tangent of the fault's
@@ -161,13 +159,11 @@ def fault(name, C, sigma1, H=None, learn_sigma=False, offset=0, contact=0, width
         sigma1 = np.zeros( f.field.input_dim )
         sigma1[-1] = -1 # default is vertical vector
     sigma1 = torch.tensor( sigma1, device=curlew.device, dtype=curlew.dtype) 
-    if learn_sigma:
-        assert False, "Todo - implement learnable fault offset here"
     
     # build offset object
     O = FaultOffset(sigma1=sigma1, offset=offset, contact=contact, 
                          width=sharpness, highcurve=highcurve )
-    
+
     # handle constant or learnable offsets and/or slip direction
     init=False
     if isinstance( offset, tuple):
@@ -184,26 +180,26 @@ def fault(name, C, sigma1, H=None, learn_sigma=False, offset=0, contact=0, width
         init=True
     
     if init: # initialise the optimiser to include the new parameters
-        O.init_optim()
+        O.init_optim(lr=kwargs.get('learning_rate', 1e-1))
 
     # build field
     f = _initF( name, C=C, deformation=O, **kwargs)
 
     return f
 
-def finiteFault(name, C, H, **kwargs):
+def finiteFault(name, *, C, H, **kwargs):
     """
     Create a GeoField representing a finite fault.
     """
     pass
 
-def stock(name, C, H, contact=0, **kwargs):
+def stock(name, *, C, H, contact=0, **kwargs):
     """
     Create a GeoField representing a stock, pluton or batholith. 
     """
     pass
 
-def fold( name, origin, compression, extension, wavelength, amplitude=1.0, sharpness=1.0, estStrain=False):
+def fold( name, *, origin, compression, extension, wavelength, amplitude=1.0, sharpness=1.0, estStrain=False):
     """
     Create a GeoField representing a fold structure.
 
@@ -282,7 +278,7 @@ def fold( name, origin, compression, extension, wavelength, amplitude=1.0, sharp
     return GeoField( name, None, field=fa, 
         deformation=foldOffset, deformation_args=dargs )
 
-def domainBoundary( name, C, H=None, bound = 0, gt = 0, lt = 1, **kwargs ):
+def domainBoundary( name, *, C, H=None, bound = 0, gt = 0, lt = 1, **kwargs ):
     """
     Create a GeoField representing a domain boundary, in which different sub-models are modelled on either side of the boundary. 
     This can be very useful for modelling e.g., sedimentary basins, where the basin fill is modelled on one side of the boundary (onlap relations), 

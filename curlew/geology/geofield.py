@@ -360,19 +360,18 @@ class GeoField( object ):
             self.field.bind( kwargs.pop('C', self.field.C) )
         C = self.field.C 
 
-        # enable caching to avoid lots
         # of evaluations of displacement fields
         # that will not change
         C0 = C # no need to reconstruct
         if cache and self.child is not None:
             if faultBuffer > 0:
-                from curlew.geology.interactions import faultOffset
+                from curlew.geology.interactions import FaultOffset
                 def buffer( arr ): # quick function for masking points on faults
                     f = self.child
                     mask = np.full( len(arr), True )
                     while f is not None:
-                        if ((f.deformation is not None) and (f.deformation == faultOffset)): # faults
-                            b = f.buffer( arr, f.deformation_args['contact'], faultBuffer )
+                        if ((f.deformation is not None) and isinstance(f.deformation, FaultOffset)): # faults
+                            b = f.buffer( arr, f.deformation.contact, faultBuffer )
                         elif (f.parent2 is not None):
                             b = f.buffer( arr, f.bound, faultBuffer ) # domain boundary
                         mask[ b ] = False # identify and remove points within buffer distance of a fault 
@@ -385,7 +384,9 @@ class GeoField( object ):
         
         # fit
         try:
-            out = self.field.fit(epochs, C=C0, transform=False, **kwargs)
+            out = self.field.fit(epochs, C=C0, transform=False, 
+                                 opt=[self.deformation, self.overprint, self.property], # include possibly learnable elements in these
+                                 **kwargs)
         finally:
             if C0.grid is not None:
                 C0.grid._clearCache()
@@ -565,7 +566,7 @@ class GeoField( object ):
         out.grid=grid
         return out
 
-    def gradient(self, x: np.ndarray, return_vals=False, normalize=True, to_numpy=True, transform=True):
+    def gradient(self, x: np.ndarray, return_vals=False, normalize=True, to_numpy=True, transform=True, retain=False):
         """
         Return the gradient vector of this GeologicalField at the specified location. Note that this
         does  not combine the results from previous scalar fields first (i.e. the prediction
@@ -584,6 +585,8 @@ class GeoField( object ):
             True if the results should be cast to a numpy array rather than a `torch.Tensor`.
         transform : bool
             True if results should be transformed into modern-day coordinates.
+        retain : bool, optional
+            True if the gradient graph should be retained (to allow e.g., subsequent backpropagation). Default is False.
 
         Returns
         --------
@@ -595,8 +598,9 @@ class GeoField( object ):
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=curlew.dtype, device=curlew.device, requires_grad=True)
         if not x.requires_grad:
-            x = torch.tensor(x, dtype=curlew.dtype, device=curlew.device, requires_grad=True)
-
+            #x = torch.tensor(x, dtype=curlew.dtype, device=curlew.device, requires_grad=True)
+            x = x.detach().clone().requires_grad_(True)
+        
         # evalaute scalar value
         pred = self.forward( x, undef=transform ).squeeze()
 
@@ -605,8 +609,8 @@ class GeoField( object ):
             outputs=pred,
             inputs=x,
             grad_outputs=torch.ones_like(pred),
-            create_graph=True,
-            retain_graph=False
+            create_graph=False, # should be True???
+            retain_graph=retain,
         )[0]
 
         # normalise gradients
@@ -900,7 +904,7 @@ class GeoField( object ):
             A boolean array indicating whether each element in `x` falls within 
             the buffer range. Elements excluded by the mask are set to `False`.
         """
-        pred = self.predict(x)[:,0] # get values at points
+        pred = self.predict(x).numpy().scalar # get values at points
         if isinstance(isovalue, tuple) or isinstance(isovalue, list):
             i0 = min(isovalue) # easy!
             i1 = max(isovalue)
@@ -912,6 +916,44 @@ class GeoField( object ):
             out[mask] = False
         return out
 
+    def loss(self):
+        """
+        Compute loss associated with the underlying field and learnable property, deformation or overprint objects.
+        """
+        loss, details = self.field.loss() 
+        for o in [self.property, self.deformation, self.overprint]:
+            if o is not None: 
+                ll, dets = o.loss()
+                loss = loss + ll
+                details.update(dets)
+        return loss, details
+
+    def zero(self):
+        """
+        Zero optimiser associated with the underlying field and learnable property, deformation or overprint objects. 
+        """
+        self.field.zero()
+        if self.property is not None: self.property.zero()
+        if self.deformation is not None: self.deformation.zero()
+        if self.overprint is not None: self.overprint.zero()
+
+    def step(self):
+        """
+        Step optimiser associated with the underlying field and learnable property, deformation or overprint objects. 
+        """
+        self.field.step()
+        if self.property is not None: self.property.step()
+        if self.deformation is not None: self.deformation.step()
+        if self.overprint is not None: self.overprint.step()
+    
+    def set_rate(self, lr=1e-3):
+        """
+        Set the learning rate for the underlying field and learnable property, deformation or overprint objects.
+        """
+        for o in [self.field, self.property, self.deformation, self.overprint]:
+            if (o is not None) and (o.optim is not None):
+                o.set_rate(lr=lr)
+    
     # def classify( self, x: np.ndarray, return_vals=False, **kwds ):
     #     """
     #     Evaluate the model using `self.predict(x, **kwds)` and then bin

@@ -21,7 +21,8 @@ class LearnableBase(nn.Module):
         """
         super().__init__()
         self.optim = None # needs to be initialised at some point
-        
+        self.frozen = False # if True, optimizer step is ignored
+
     def init_optim(self, method=optim.Adam, lr=1e-2, **kwargs):
         """
         Initialise optimiser used for this MLP. This should only be called
@@ -51,7 +52,7 @@ class LearnableBase(nn.Module):
         """
         Step the optimiser for this NF.
         """
-        if self.optim is not None:
+        if (self.optim is not None) and not self.frozen:
             self.optim.step()
 
     def set_rate(self, lr=1e-2 ):
@@ -62,6 +63,10 @@ class LearnableBase(nn.Module):
         for param_group in self.optim.param_groups:
             param_group['lr'] = lr
 
+    def loss(self):
+        """Should be implemented by child classess that incur losses."""
+        return torch.tensor(0, dtype=curlew.dtype, device=curlew.device, requires_grad=True), dict()
+    
 @dataclass
 class CSet:
     """

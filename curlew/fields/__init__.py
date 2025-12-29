@@ -62,8 +62,8 @@ class BaseSF(LearnableBase):
         if C is not None:
             self.bind(C)
         
-        self.mnorm = 1.0 # keep track of the average field gradient (sometimes useful for quick/rough normalisation)
-
+        self.mnorm = 0 # cache the average field gradient (can be useful for quick/rough normalisation)
+        self.nnorm = 0 # number of evaluations used to compute average gradient
         self.initField( **kwargs ) # call child class init to build the network
     
     def initField(self, **kwargs):
@@ -168,7 +168,17 @@ class BaseSF(LearnableBase):
             return S.cpu().detach().numpy()
         return S
     
-    def gradient(self, coords: torch.Tensor, normalize: bool = True, transform=True, return_value=False) -> torch.Tensor:
+    def reset_mnorm(self):
+        """Reset accumulation of average gradient magnitude"""
+        self.mnorm = 0
+        self.nnorm = 0
+
+    def gradient(self, coords: torch.Tensor, 
+                       normalize: bool = True, 
+                       transform=True, 
+                       return_value=False, 
+                       retain=False,
+                       accumulate=True) -> torch.Tensor:
         """
         Compute the gradient of the scalar potential with respect to the input coordinates. Note that this only works
         for scalar (i.e. 1-D) fields.
@@ -183,7 +193,12 @@ class BaseSF(LearnableBase):
             If True, any defined transform function is applied before encoding and evaluating the field for `coords`.
         return_value : bool, optional
             If True, both the gradient and the scalar value at the evaluated points are returned.
-
+        retain : bool, optional
+            True if the gradient graph should be retained (to allow e.g., subsequent backpropagation). Default is False.
+        accumulate : bool, optional
+            True (optional) if the gradient evaluation should contribute to the average gradient estimate. Note that this averaging
+            can be reset using `self.reset_mnorm` and accessed through `self.mnorm`.
+        
         Returns
         -------
         torch.Tensor
@@ -203,15 +218,20 @@ class BaseSF(LearnableBase):
             outputs=potential,
             inputs=coords,
             grad_outputs=torch.ones_like(potential),
-            create_graph=True,
-            retain_graph=True
+            create_graph=False, # should be True???
+            retain_graph=retain
         )[0]
 
-        # Normalize?
-        if normalize:
+        # Accumulate and/or normalize gradients?
+        if accumulate or normalize:
             norm = torch.norm(grad_out, dim=-1, keepdim=True) + 1e-8
-            grad_out = grad_out / norm
-
+            if accumulate:
+                self.mnorm = (self.mnorm*self.nnorm) + torch.mean(norm, axis=0).item()*len(norm) # update average gradeint
+                self.nnorm += len(norm) # update counter holding number of observations
+                self.mnorm = self.mnorm / self.nnorm # convert from total to average
+            if normalize:
+                grad_out = grad_out / norm
+        
         # Return
         if return_value:
             return grad_out, potential
@@ -290,10 +310,9 @@ class BaseNF(BaseSF):
             neural architecture.
             """
             # initialise everything (including calling the initField class of the relevant child class)
-            super().__init__(name=name, input_dim=input_dim, output_dim=output_dim, H=H, C=C, transform=transform, seed=seed)
+            super().__init__(name=name, input_dim=input_dim, output_dim=output_dim, H=H, C=C, transform=transform, seed=seed, **kwargs)
 
             # store neural field specific properties
-            self.mnorm = None # will be set to the average gradient magnitude
             self.closs = torch.nn.CosineSimilarity() # needed by some loss functions
             self.vloss = vloss # loss function to use for value fitting
 
@@ -318,22 +337,23 @@ class BaseNF(BaseSF):
 
         # LOCAL LOSS FUNCTIONS
         # -----------------------------
-        # [ N.B. positions are all in un-transformed coordinates! :-) ]
+        
         # Value Loss
         if (C.vp is not None) and (C.vv is not None) and (isinstance(H.value_loss, str) or (H.value_loss > 0)):
             v_pred = self(C.vp, transform=transform)
             L['value_loss'] = self.vloss( v_pred, C.vv[:,None] )
 
         # Gradient loss
+        self.reset_mnorm() # reset accumulation
         # [ N.B. positions (and thus gradients) are in un-transformed coordinates ]
         if (C.gp is not None) and (isinstance(H.grad_loss, str) or (H.grad_loss > 0)):
-            gv_pred = self.gradient(C.gp, normalize=True, transform=transform) # compute gradient direction 
-            L['grad_loss'] = self.vloss(gv_pred, C.gv) # orientation + younging direction
+            gv_pred = self.gradient(C.gp, normalize=True, transform=transform, accumulate=True) # compute gradient direction 
+            L['grad_loss'] = self.vloss(gv_pred, C.gv) # N.B. constraints orientation and younging direction
 
         # Orientation loss
         # [ N.B. positions (and thus gradients) are in un-transformed coordinates ]
         if (C.gop is not None) and (isinstance(H.ori_loss, str) or (H.ori_loss > 0)):
-            gv_pred = self.gradient(C.gop, normalize=True, transform=transform) # compute gradient direction 
+            gv_pred = self.gradient(C.gop, normalize=True, transform=transform, accumulate=True) # compute gradient direction 
             L['ori_loss'] = torch.clamp( torch.mean( 1 - torch.abs( self.closs(gv_pred, C.gov ) ) ), min=1e-6 ) # N.B.: Orientation loss on its own fits a bit too well, numerical precision crashes avoided with the clamp - AVK
 
         # GLOBAL LOSS FUNCTIONS
@@ -351,18 +371,16 @@ class BaseNF(BaseSF):
                 # to compute the divergence of the normalised field and so penalise bubbles (local maxima and minima)
                 #hess = torch.zeros((gridL.shape[0], self.input_dim, self.input_dim), device=curlew.device, dtype=curlew.dtype)
                 ndiv = torch.zeros((gridL.shape[0]), device=curlew.device, dtype=curlew.dtype)
-                mnorm = 0
                 for j in range(self.input_dim):
                     # compute hessian
-                    grad_pos = self.gradient(gridL + C._offset[j], normalize=False, transform=False)
-                    grad_neg = self.gradient(gridL - C._offset[j], normalize=False, transform=False)
+                    grad_pos = self.gradient(gridL + C._offset[j], normalize=False, transform=False, accumulate=True)
+                    grad_neg = self.gradient(gridL - C._offset[j], normalize=False, transform=False, accumulate=True)
                     #for i in range(self.input_dim):
                     #    hess[:, i, j] = (grad_pos[:, i] - grad_neg[:, i])/(2*C.delta)
 
                     # compute and accumulate average gradient
                     pnorm = torch.norm(grad_pos, dim=-1 )[:,None]
                     nnorm = torch.norm(grad_neg, dim=-1 )[:,None]
-                    mnorm = mnorm + torch.mean(pnorm).item() + torch.mean(nnorm).item()
 
                     # compute divergence of normalised gradient field
                     if isinstance(H.mono_loss, str) or (H.mono_loss > 0):
@@ -378,7 +396,7 @@ class BaseNF(BaseSF):
 
                 # compute derived thickness and monotonocity loss
                 if isinstance(H.mono_loss, str) or (H.mono_loss > 0):
-                    mono_loss = torch.mean(ndiv**2) # (normalised) divergence should be close to 0
+                    L['mono_loss'] = torch.mean(ndiv**2) # (normalised) divergence should be close to 0
                 if isinstance(H.thick_loss, str) or (H.thick_loss > 0):
                     # L['thick_loss'] = torch.mean( torch.linalg.det(hess)**2 ) # determinant should be close to 0 [ breaks in 2D, as the trace and determinant can't both be 0 unless all is 0!]
                     L['thick_loss'] = L['thick_loss'] / (2*self.input_dim) # normalise to get average (doesn't change anything, but makes values easier to interpret)
@@ -391,11 +409,6 @@ class BaseNF(BaseSF):
                         gv_at_grid_p = self.gradient(gridL, normalize=True, transform=False)
                     L['flat_loss'] = torch.mean((gv_at_grid_p - C.trend[None,:])**2) # "younging" direction
                     #flat_loss = (1 - self.closs( gv_at_grid_p, C.trend )).mean() # orientation only
-
-                # store the mean gradient, as it can be handy if we want to scale our field to have an (average) gradient of 1
-                # (Note that we need to get rid of the gradient here to prevent
-                #  messy recursion during back-prop)
-                self.mnorm = mnorm / (2*self.input_dim)
 
         # inequality losses
         if (C.iq is not None) and (isinstance(H.iq_loss, str) or (H.iq_loss > 0)):
@@ -447,7 +460,15 @@ class BaseNF(BaseSF):
         # done! 
         return total_loss, out
 
-    def fit(self, epochs, C=None, learning_rate=None, early_stop=(100,1e-4), transform=True, best=True, vb=True, prefix='Training'):
+    def fit(self, epochs, 
+                 C : CSet = None, 
+                 learning_rate : float = None, 
+                 early_stop : tuple = (100,1e-4), 
+                 transform : bool = True, 
+                 best : bool = True, 
+                 vb : bool = True, 
+                 prefix : str = 'Training',
+                 opt : list = []):
         """
         Train this neural field to fit the specified constraints.
 
@@ -474,7 +495,10 @@ class BaseNF(BaseSF):
             Display a tqdm progress bar to monitor training.
         prefix : str, optional
             The prefix used for the tqdm progress bar.
-        
+        opt : list, optional
+            An optional list of additional optimisers to include in the training loop (zero() and step() will be called
+            on these at the same time as the optimiser used for this NF's internal learnable parameters). Used to allow
+            e.g., learnable fault offset.
         Returns
         -------
         loss : float
@@ -528,8 +552,12 @@ class BaseNF(BaseSF):
 
             # backward pass and update
             self.zero()
+            for o in opt:
+                if o is not None: o.zero() # can often be None; ignore in that case.
             loss.backward(retain_graph=False)
             self.step()
+            for o in opt:
+                if o is not None: o.step()
 
         if best:
             self.load_state_dict(best_state)

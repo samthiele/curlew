@@ -22,7 +22,7 @@ def get_colors(inp, colormap="viridis", normalize=True, vmin=None, vmax=None):
     norm = plt.Normalize(vmin, vmax)
     return colormap(norm(inp))[:, :3]
 
-def batchEval( array, function, batch_size = 10000, vb=True, **kwargs):
+def batchEval( array, function, batch_size = 10000, vb=False, **kwargs):
     """
     Evaluate the specified function in batches to save memory. This can be used to evaluate models on large datasets using M.predict(...) or M.classify(...).
 

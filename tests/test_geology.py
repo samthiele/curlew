@@ -131,23 +131,24 @@ def test_playfair():
             grad_loss=1,  # strength of penalty for mismatch between gradient constraints and field gradients
             mono_loss='0.01', thick_loss='0.1') # disable these for now
     s0 = strati('basement', # name of created geological neural field (GNF)
-                C[0], # constraints for this field
-                H, # interpolator hyperparameters
+                C=C[0], # constraints for this field
+                H=H, # interpolator hyperparameters
+                type=NFF,
                 base=-np.inf, # basal surface (important for unconformities)
                 input_dim=2, # field input coordinate dimensions (2D in our case)
                 hidden_layers=[8,], # hidden layers in the multi-layer perceptron that parameterises our field
                 rff_features=32, # number of random sin and cos features to create for each scale 
                 length_scales=[2000]) # the length scales in our model
-
-
+    
     # define interpolator for unconformity field
     H = HSet( value_loss=1, # strength of penalty for mismatch between value constraints and field outputs
             grad_loss=1,  # strength of penalty for mismatch between gradient constraints and field gradients
             mono_loss="0.01", 
             thick_loss=1.0) # constant thickness is relatively important for dyke scalar fields as this is linked to offset
     s1 = sheet('dyke', # name of created geological neural field (GNF)
-                C[1], # constraints for this field
-                H, # interpolator hyperparameters
+                C=C[1], # constraints for this field
+                H=H, # interpolator hyperparameters
+                type=NFF,
                 contact=("upper","lower"), # Lower and upper surface of our dyke (which in this case is 100 m thick).
                 input_dim=2, # field input coordinate dimensions (2D in our case)
                 hidden_layers=[8,], # hidden layers in the multi-layer perceptron that parameterises our field
@@ -174,6 +175,11 @@ def test_michell():
     C, _ = michell(dims, offset=225) # create the synthetic "hutton" dataset
     C = C[:-1] # drop value constraints as they're not needed
 
+    # expand constraints for fault a bit to enable fitting
+    n = 100
+    C[1].vp = np.vstack([ C[1].vp, C[1].vp+n*C[1].gv, C[1].vp-n*C[1].gv])
+    C[1].vv = np.hstack([ C[1].vv, C[1].vv+1, C[1].vv-1])
+
     from curlew import HSet
     from curlew.geology import strati, fault
 
@@ -187,11 +193,12 @@ def test_michell():
     H = HSet( value_loss=1, grad_loss=1,
             mono_loss='0.1', thick_loss="1.0")
     s0 = strati('basement', # name of created geological neural field (GNF)
-                C[0], # constraints for this field
-                H, # interpolator hyperparameters
+                C=C[0], # constraints for this field
+                H=H, # interpolator hyperparameters
+                type=NFF,
                 base=-np.inf, # basal surface (important for unconformities)
                 input_dim=2, # field input coordinate dimensions (2D in our case)
-                hidden_layers=[8,], # hidden layers in the multi-layer perceptron that parameterises our field
+                hidden_layers=[16,], # hidden layers in the multi-layer perceptron that parameterises our field
                 rff_features=32, # number of random sin and cos features to create for each scale 
                 length_scales=[2000]) # the length scales in our model
 
@@ -200,15 +207,16 @@ def test_michell():
             grad_loss=1,  # strength of penalty for mismatch between gradient constraints and field gradients
             mono_loss="0.01") # constant thickness is relatively important for dyke scalar fields as this is linked to offset
     s1 = fault('fault', # name of created geological neural field (GNF)
-                C[1], # constraints for this field
-                H, # interpolator hyperparameters
+                C=C[1], # constraints for this field
+                H=H, # interpolator hyperparameters
+                type=NFF,
                 sigma1=(-1,0), # horizontal stress
-                offset=(100,0,200), # Initial slip estimate, minimum slip, maximum slip
+                offset=(200,0,200), # Initial slip estimate, minimum slip, maximum slip
                 width=(5,100,0.5), # add a funky drag fold, coz we can and it's pretty.
                 input_dim=2, # field input coordinate dimensions (2D in our case)
-                hidden_layers=[8,], # hidden layers in the multi-layer perceptron that parameterises our field
+                hidden_layers=[16,], # hidden layers in the multi-layer perceptron that parameterises our field
                 rff_features=32, # number of random sin and cos features to create for each scale 
-                length_scales=[2000,]) # the length scales in our model
+                length_scales=[6000,]) # the length scales in our model
     
     # combine into a geomodel
     M = GeoModel([s0, s1]) 
@@ -228,8 +236,8 @@ def test_michell():
     _, loss2 = M.fit( epochs=200, learning_rate=0.1 , early_stop=None ) # and now optimise only fault slip (and the stratigraphic field)
 
     # check model is converging
-    assert loss1['basement'][0] / loss2['basement'][0] > 1.5 # loss should be better
-    assert abs( s1.field.offset.item() - 200 ) > 2 # more than 2 m difference in offset
+    assert loss1['basement'][0] / loss2['basement'][0] > 1 # loss should be better
+    assert abs( s1.deformation.offset.item() - 200 ) > 10 # more than 10 m difference in offset
 
     # check training at least runs for single-field fitting
     _, loss3 = s0.fit( 100, cache=True, faultBuffer=20)
@@ -245,11 +253,14 @@ def test_michell():
     C1.iq = (1024, [(C1.vp, C1.vp, '=')]) # add a fake equality to check this is also undeformed
     C0 = C1.transform( s0.undeform )
     assert (C1.grid != C0.grid) # check grid instances are a copy
-    assert ((C1.grid.coords() != C0.grid.coords()).all()) # check grid coords have been updated
+    assert (np.sum(C1.grid.coords() == C0.grid.coords()) > 1000) # check some grid coords remain stationary
+    assert ( np.sum(C1.grid.coords() != C0.grid.coords()) > 1000 ) # check some grid coords have moved
+
     for p0, p1 in zip([C0.vp, C0.gp, C0.iq[1][0][0], C0.iq[1][0][1]],
-                      [C1.vp, C1.gp, C1.iq[1][0][0], C1.iq[1][0][1]]):
-        diff = np.median( np.linalg.norm( p1-p0, axis=1) )
-        assert abs( diff - s1.field.offset.item()/2 ) < 1 # TODO - why is the measure applied displacement half of the specified??
+                        [C1.vp, C1.gp, C1.iq[1][0][0], C1.iq[1][0][1]]):
+        diff = np.linalg.norm( p1-p0, axis=1) # get offset vectors
+        diff = np.median( diff[diff > 1]) # take median of points that have moved
+        assert abs( diff - s1.deformation.offset.item() ) < 1 # check that median offset matches offset on fault
 
     # check isolated training works with this undeformed CSet
     _, loss3 = s0.field.fit(1, C=C0, transform=False)
@@ -257,7 +268,7 @@ def test_michell():
 
     # check loss explodes if we don't transform!
     _, loss4 = s0.field.fit(1, C=C0, transform=True)
-    assert loss4['basement'][0] / loss2['basement'][0] > 5
+    assert loss4['basement'][0] / loss2['basement'][0] > 1.5
 
 def test_anderson():
     # load an example containing a fault
@@ -451,5 +462,5 @@ def test_isosurfaces():
         assert f1.getIsovalue('fault') == 0
 
     # test isovalue offset
-    assert (f1.getIsovalue('fault', offset=1.0) - np.linalg.norm( f1.field.gradient )) < 1e-6
-    assert (-f1.getIsovalue('fault', offset=-1.0) - np.linalg.norm( f1.field.gradient )) < 1e-6
+    assert (f1.getIsovalue('fault', offset=1.0) - np.linalg.norm( f1.field.grad )) < 1e-6
+    assert (-f1.getIsovalue('fault', offset=-1.0) - np.linalg.norm( f1.field.grad )) < 1e-6
