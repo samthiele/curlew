@@ -329,10 +329,10 @@ def anderson( shape=(1500,1000), offset1=225, offset2=250, **kwargs ):
     s0 = strati('s0', C=QuadraticField( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500)  ) )
     s1 = fault( 's1', 
            C=LinearField( 'f1', input_dim=2, origin=(950,550), gradient=(np.cos( np.deg2rad(35) ), np.sin( np.deg2rad(35) ))  ),
-           offset=offset1, sigma1=[0,1] ) 
+           offset=offset1, sigma1 = [0,-1] )  # extensional faults
     s2 = fault( 's2', 
            C=LinearField( 'f2', input_dim=2, origin=(1050,500), gradient=(-np.cos( np.deg2rad(35) ), np.sin( np.deg2rad(35) ))  ),
-           offset=offset2, sigma1=[0,1] )
+           offset=offset2, sigma1 = [0,-1] ) # extensional faults
     
     M = GeoModel( [s0, s1, s2], grid=G )
     s = M.predict(G)
@@ -343,7 +343,7 @@ def anderson( shape=(1500,1000), offset1=225, offset2=250, **kwargs ):
     if 'pv' in kwargs:
         del kwargs['pv']
     kwargs['pval'] = kwargs.get('pval', 1.0) # change default to sample all value constraints
-    Cf1 = sample( s1.predict(G), pv='rgb', breaks=[0.5],xstep=400, **kwargs )
+    Cf1 = sample( s1.predict(G), pv='rgb', breaks=[0.5],xstep=600, **kwargs )
     Cf2 = sample( s2.predict(G), pv='rgb', breaks=[0.5], **kwargs )
 
     C = [C[0], Cf1[0], Cf2[0], C[-1]] # combine stratigraphy, fault and property constraints

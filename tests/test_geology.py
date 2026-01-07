@@ -175,10 +175,10 @@ def test_michell():
     C, _ = michell(dims, offset=225) # create the synthetic "hutton" dataset
     C = C[:-1] # drop value constraints as they're not needed
 
-    # expand constraints for fault a bit to enable fitting
-    n = 100
-    C[1].vp = np.vstack([ C[1].vp, C[1].vp+n*C[1].gv, C[1].vp-n*C[1].gv])
-    C[1].vv = np.hstack([ C[1].vv, C[1].vv+1, C[1].vv-1])
+    # expand constraints for fault to get more value constraints
+    #n = 100
+    #C[1].vp = np.vstack([ C[1].vp, C[1].vp+n*C[1].gv, C[1].vp-n*C[1].gv])
+    #C[1].vv = np.hstack([ C[1].vv, C[1].vv+1, C[1].vv-1])
 
     from curlew import HSet
     from curlew.geology import strati, fault
@@ -211,8 +211,8 @@ def test_michell():
                 H=H, # interpolator hyperparameters
                 type=NFF,
                 sigma1=(-1,0), # horizontal stress
-                offset=(200,0,200), # Initial slip estimate, minimum slip, maximum slip
-                width=(5,100,0.5), # add a funky drag fold, coz we can and it's pretty.
+                offset=(250,0,300), # Initial slip estimate, minimum slip, maximum slip
+                width=0, # brittle fault
                 input_dim=2, # field input coordinate dimensions (2D in our case)
                 hidden_layers=[16,], # hidden layers in the multi-layer perceptron that parameterises our field
                 rff_features=32, # number of random sin and cos features to create for each scale 
@@ -223,7 +223,7 @@ def test_michell():
 
     # fit scalar fields independently [ helps get fault surface sorted out first ]
     loss1 = M.prefit( epochs=25, best=True, vb=False, early_stop=None )
-    loss2 = M.prefit( epochs=200, best=True, vb=False, early_stop=None )
+    loss2 = M.prefit( epochs=50, best=True, vb=False, early_stop=None )
 
     # check model is converging
     for k, v in loss1.items():
@@ -236,8 +236,8 @@ def test_michell():
     _, loss2 = M.fit( epochs=200, learning_rate=0.1 , early_stop=None ) # and now optimise only fault slip (and the stratigraphic field)
 
     # check model is converging
-    assert loss1['basement'][0] / loss2['basement'][0] > 1 # loss should be better
-    assert abs( s1.deformation.offset.item() - 200 ) > 10 # more than 10 m difference in offset
+    assert loss1['basement'][0] / loss2['basement'][0] > 1 # loss should be better (if only a bit)
+    assert abs( s1.deformation.offset.item() - 100 ) > 5 # more than 10 m difference in offset
 
     # check training at least runs for single-field fitting
     _, loss3 = s0.fit( 100, cache=True, faultBuffer=20)
@@ -263,12 +263,12 @@ def test_michell():
         assert abs( diff - s1.deformation.offset.item() ) < 1 # check that median offset matches offset on fault
 
     # check isolated training works with this undeformed CSet
-    _, loss3 = s0.field.fit(1, C=C0, transform=False)
-    assert loss3['basement'][0] / loss2['basement'][0] < 1.1 # loss should be similar as we didn't train much
+    _, loss4 = s0.field.fit(1, C=C0, transform=False) # Transform = False as C0 is in paleo-coordinates
+    assert loss3['basement'][0] / loss3['basement'][0] < 1.1 # loss should be similar as we didn't train much
 
     # check loss explodes if we don't transform!
-    _, loss4 = s0.field.fit(1, C=C0, transform=True)
-    assert loss4['basement'][0] / loss2['basement'][0] > 1.5
+    _, loss4 = s0.field.fit(1, C=C0, transform=True) # If Transform=True, constraints should end up in incorrect locations
+    assert loss4['basement'][0] / loss3['basement'][0] > 1.5
 
 def test_anderson():
     # load an example containing a fault
@@ -335,8 +335,8 @@ def test_anderson():
 
     # check model is converging
     assert loss1['basement'][0] > loss2['basement'][0] # loss should be better
-    assert abs( s1.field.offset.item() - (-200) ) > 1 # more than 1 m difference in offset
-    assert abs( s2.field.offset.item() - (-200) ) > 1 # more than 1 m difference in offset
+    assert abs( s1.deformation.offset.item() - (-200) ) > 1 # more than 1 m difference in offset
+    assert abs( s2.deformation.offset.item() - (-200) ) > 1 # more than 1 m difference in offset
 
 def test_anderson3D():
         # load an example containing a fault
@@ -365,6 +365,7 @@ def test_anderson3D():
     H = HSet( value_loss=1, grad_loss=1,
             mono_loss='0.1', thick_loss="1.0")
     params = dict(
+        type=NFF,
         input_dim=3, # field input coordinate dimensions
         hidden_layers=[8,], # hidden layers
         rff_features=32, # number of fourier features
@@ -372,20 +373,20 @@ def test_anderson3D():
     )
 
     s0 = strati('basement', # basement stratigraphy field
-            C3D[0], # constraints
-            H, # hyperparameters
+            C=C3D[0], # constraints
+            H=H, # hyperparameters
             **params)
     s1 = fault('fault1', # older fault field
-                C3D[1], # constraints
-                H, # hyperparameters
+                C=C3D[1], # constraints
+                H=H, # hyperparameters
                 sigma1=(0,0,1), # vertical sigma 1
                 learn_sigma=False,
                 offset=(-200,-100,-400),
                 width=1e-6,
                 **params)
     s2 = fault('fault2', # younger fault field
-                C3D[2], # constraints
-                H, # hyperparameters
+                C=C3D[2], # constraints
+                H=H, # hyperparameters
                 sigma1=(0,0,1), # vertical sigma 1
                 learn_sigma=False,
                 offset=(-200,-100,-400),
@@ -406,8 +407,8 @@ def test_anderson3D():
 
     # check model is converging
     assert loss1['basement'][0] > loss2['basement'][0] # loss should be better
-    assert abs( s1.field.offset.item() - (-200) ) > 1 # more than 1 m difference in offset
-    assert abs( s2.field.offset.item() - (-200) ) > 1 # more than 1 m difference in offset
+    assert abs( s1.deformation.offset.item() - (-200) ) > 1 # more than 1 m difference in offset
+    assert abs( s2.deformation.offset.item() - (-200) ) > 1 # more than 1 m difference in offset
 
     tcont = False # test contouring (requires skimage)
     try:

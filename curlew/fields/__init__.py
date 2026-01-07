@@ -177,7 +177,8 @@ class BaseSF(LearnableBase):
                        normalize: bool = True, 
                        transform=True, 
                        return_value=False, 
-                       retain=False,
+                       retain_graph=False,
+                       create_graph=False,
                        accumulate=True) -> torch.Tensor:
         """
         Compute the gradient of the scalar potential with respect to the input coordinates. Note that this only works
@@ -193,8 +194,10 @@ class BaseSF(LearnableBase):
             If True, any defined transform function is applied before encoding and evaluating the field for `coords`.
         return_value : bool, optional
             If True, both the gradient and the scalar value at the evaluated points are returned.
-        retain : bool, optional
+        retain_graph : bool, optional
             True if the gradient graph should be retained (to allow e.g., subsequent backpropagation). Default is False.
+        create_graph : bool, optional
+            True if the gradient value should have an underlying graph to allow it to influence back-prop operations. Default is False.
         accumulate : bool, optional
             True (optional) if the gradient evaluation should contribute to the average gradient estimate. Note that this averaging
             can be reset using `self.reset_mnorm` and accessed through `self.mnorm`.
@@ -218,8 +221,8 @@ class BaseSF(LearnableBase):
             outputs=potential,
             inputs=coords,
             grad_outputs=torch.ones_like(potential),
-            create_graph=False, # should be True???
-            retain_graph=retain
+            create_graph=create_graph,
+            retain_graph=retain_graph
         )[0]
 
         # Accumulate and/or normalize gradients?
@@ -337,7 +340,6 @@ class BaseNF(BaseSF):
 
         # LOCAL LOSS FUNCTIONS
         # -----------------------------
-        
         # Value Loss
         if (C.vp is not None) and (C.vv is not None) and (isinstance(H.value_loss, str) or (H.value_loss > 0)):
             v_pred = self(C.vp, transform=transform)
@@ -347,13 +349,13 @@ class BaseNF(BaseSF):
         self.reset_mnorm() # reset accumulation
         # [ N.B. positions (and thus gradients) are in un-transformed coordinates ]
         if (C.gp is not None) and (isinstance(H.grad_loss, str) or (H.grad_loss > 0)):
-            gv_pred = self.gradient(C.gp, normalize=True, transform=transform, accumulate=True) # compute gradient direction 
+            gv_pred = self.gradient(C.gp, normalize=True, transform=transform, accumulate=True, retain_graph=True, create_graph=True) # compute gradient direction 
             L['grad_loss'] = self.vloss(gv_pred, C.gv) # N.B. constraints orientation and younging direction
 
         # Orientation loss
         # [ N.B. positions (and thus gradients) are in un-transformed coordinates ]
         if (C.gop is not None) and (isinstance(H.ori_loss, str) or (H.ori_loss > 0)):
-            gv_pred = self.gradient(C.gop, normalize=True, transform=transform, accumulate=True) # compute gradient direction 
+            gv_pred = self.gradient(C.gop, normalize=True, transform=transform, accumulate=True, retain_graph=True, create_graph=True) # compute gradient direction 
             L['ori_loss'] = torch.clamp( torch.mean( 1 - torch.abs( self.closs(gv_pred, C.gov ) ) ), min=1e-6 ) # N.B.: Orientation loss on its own fits a bit too well, numerical precision crashes avoided with the clamp - AVK
 
         # GLOBAL LOSS FUNCTIONS
@@ -373,8 +375,8 @@ class BaseNF(BaseSF):
                 ndiv = torch.zeros((gridL.shape[0]), device=curlew.device, dtype=curlew.dtype)
                 for j in range(self.input_dim):
                     # compute hessian
-                    grad_pos = self.gradient(gridL + C._offset[j], normalize=False, transform=False, accumulate=True)
-                    grad_neg = self.gradient(gridL - C._offset[j], normalize=False, transform=False, accumulate=True)
+                    grad_pos = self.gradient(gridL + C._offset[j], normalize=False, transform=False, accumulate=True, retain_graph=True, create_graph=True)
+                    grad_neg = self.gradient(gridL - C._offset[j], normalize=False, transform=False, accumulate=True, retain_graph=True, create_graph=True)
                     #for i in range(self.input_dim):
                     #    hess[:, i, j] = (grad_pos[:, i] - grad_neg[:, i])/(2*C.delta)
 
@@ -404,9 +406,9 @@ class BaseNF(BaseSF):
                 # Flatness Loss --  gradients everywhere parallel to trend
                 if (isinstance(H.flat_loss, str) or (H.flat_loss > 0)) and (C.trend is not None):
                     if transform:
-                        gv_at_grid_p = self.gradient(gridL, normalize=True, transform=self.transform) # this requires gradients relative to modern coordinates! 
+                        gv_at_grid_p = self.gradient(gridL, normalize=True, transform=self.transform, retain_graph=True, create_graph=True) # this requires gradients relative to modern coordinates! 
                     else:
-                        gv_at_grid_p = self.gradient(gridL, normalize=True, transform=False)
+                        gv_at_grid_p = self.gradient(gridL, normalize=True, transform=False, retain_graph=True, create_graph=True)
                     L['flat_loss'] = torch.mean((gv_at_grid_p - C.trend[None,:])**2) # "younging" direction
                     #flat_loss = (1 - self.closs( gv_at_grid_p, C.trend )).mean() # orientation only
 

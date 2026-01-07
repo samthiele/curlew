@@ -566,7 +566,7 @@ class GeoField( object ):
         out.grid=grid
         return out
 
-    def gradient(self, x: np.ndarray, return_vals=False, normalize=True, to_numpy=True, transform=True, retain=False):
+    def gradient(self, x: np.ndarray, return_vals=False, normalize=True, to_numpy=True, transform=True, retain_graph=False, create_graph=False):
         """
         Return the gradient vector of this GeologicalField at the specified location. Note that this
         does  not combine the results from previous scalar fields first (i.e. the prediction
@@ -585,9 +585,11 @@ class GeoField( object ):
             True if the results should be cast to a numpy array rather than a `torch.Tensor`.
         transform : bool
             True if results should be transformed into modern-day coordinates.
-        retain : bool, optional
+        retain_graph : bool, optional
             True if the gradient graph should be retained (to allow e.g., subsequent backpropagation). Default is False.
-
+        create_graph : bool, optional
+            True if the gradient value should have an underlying graph to allow it to influence back-prop operations. Default is False.
+        
         Returns
         --------
         Gradient vectors at the specified locations (`x`). If `return_vals` is `True`,
@@ -609,8 +611,8 @@ class GeoField( object ):
             outputs=pred,
             inputs=x,
             grad_outputs=torch.ones_like(pred),
-            create_graph=False, # should be True???
-            retain_graph=retain,
+            create_graph=create_graph,
+            retain_graph=retain_graph,
         )[0]
 
         # normalise gradients

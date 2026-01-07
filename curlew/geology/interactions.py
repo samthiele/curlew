@@ -114,7 +114,7 @@ class OffsetBase(LearnableBase):
         this assumes `X` is already transformed into the local (paleo) coordinate system relevant for `G`.
         """
         # get gradient of scalar field at X and associated value
-        ds, s = G.gradient( X, normalize=normalize, return_vals=True, transform=False, to_numpy=False, retain=self.learnable() )
+        ds, s = G.gradient( X, normalize=normalize, return_vals=True, transform=False, to_numpy=False, retain_graph=self.learnable() )
         s = s.scalar
 
         # store temporary results on field so these can be later added to the output
@@ -246,7 +246,7 @@ class FaultOffset( OffsetBase ):
 
         # handle possibly learnable offset
         offset = self.offset
-        if isinstance(offset, tuple):
+        if isinstance(offset, tuple): # TODO - fix the fact that offset will never be a tuple (as if learnable it is a torch.Parameter).
             # keep offset between specified range
             offset[0].clamp(min(offset[1], offset[2]), max(offset[1], offset[2]) )
             offset = offset[0]
@@ -257,11 +257,11 @@ class FaultOffset( OffsetBase ):
             s = -s # reverse polarity to move footwall instead of hangingwall
         if isinstance(self.width, tuple):
             s1, s2, p = self.width
-            scale = (1-p)*torch.sigmoid(s*4/s1) + p*torch.sigmoid(s*4/s2)
+            scale = (1-p)*torch.sigmoid(s*4/np.clip(s1,1e-6,np.inf)) + p*torch.sigmoid(s*4/np.clip(s2, 1e-6,np.inf))
         else:
-            scale = torch.sigmoid(s*4/self.width) # N.B. -4 is approximately where the sigmoid function reaches 0
+            scale = torch.sigmoid(s*4/np.clip( self.width, 1e-6, np.inf)) # N.B. -4 is approximately where the sigmoid function reaches 0
         
-        offset = offset * scale[:, None] # scale displacements to move fault hangingwall only
+        offset = offset * scale[:, None].detach() # scale displacements to move fault hangingwall only. N.B. we disregard gradients from the scalar field here to help focus on optimising the offset term. 
 
         # apply correction for non-locally linear scalar field tangents
         # TODO - make this iterative if better approximation is needed?

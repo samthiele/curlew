@@ -144,15 +144,6 @@ def fault(name, *, C, sigma1, learn_sigma=False, offset=0, contact=0, width=0, h
     ---------
     A `curlew.geology.GeoField` instance for the created structure.
     """
-
-    # TODO - fix this mess now that offset uses width rather than sharpness
-    # handle single or composite width
-    sharpness = 1/10000
-    if width != 0:
-        if isinstance(width, tuple):
-            sharpness = (4/width[0], 4/width[1], width[2])
-        else:
-            sharpness = 4/width
     
     # sigma1
     if sigma1 is None: 
@@ -162,7 +153,7 @@ def fault(name, *, C, sigma1, learn_sigma=False, offset=0, contact=0, width=0, h
     
     # build offset object
     O = FaultOffset(sigma1=sigma1, offset=offset, contact=contact, 
-                         width=sharpness, highcurve=highcurve )
+                         width=width, highcurve=highcurve )
 
     # handle constant or learnable offsets and/or slip direction
     init=False
