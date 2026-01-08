@@ -80,7 +80,7 @@ class Geode( object ):
                             if isinstance(attr, torch.Tensor ):
                                 args[k] = torch.concat([args[k], attr])
                             elif isinstance(attr, np.ndarray ):
-                                args[k] = np.concat([args[k], attr])
+                                args[k] = np.concatenate([args[k], attr])
                             elif isinstance(attr, dict):
                                 temp = {**args[k], **attr}
                                 for k2,v in args[k].items(): # also concatenate any relevant dict entries
@@ -88,7 +88,7 @@ class Geode( object ):
                                         if isinstance(v, torch.Tensor ):
                                             temp[k2] = torch.concat( [v, attr[k2]] )
                                         elif isinstance(v, np.ndarray ):
-                                            temp[k2] = np.concat( [v, attr[k2]] )
+                                            temp[k2] = np.concatenate( [v, attr[k2]] )
                                 args[k] = temp
                         else:
                             args[k] = attr
