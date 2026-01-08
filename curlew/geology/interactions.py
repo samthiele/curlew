@@ -11,6 +11,8 @@ import torch
 from torch import nn
 from curlew.core import LearnableBase
 
+from typing import Union, List
+
 # OVERPRINTING RELATIONS -- function used to create new rocks (generative fields)
 # -----------------------------------------------------------------------------------
 class Overprint(LearnableBase):
@@ -18,7 +20,7 @@ class Overprint(LearnableBase):
     Base class for combining predictions from two consecutive scalar fields and "overprinting" some older
     scalar values to form unconformities or intrusions.
     """
-    def __init__(self, threshold : str | list = 0, sharpness=1e4, mode='above'):
+    def __init__(self, threshold : Union[str, list] = 0, sharpness=1e4, mode='above'):
         """
         Create a new "overprint" object for applying overprinting stratigraphic (e.g., unconformities) and
         igneous (e.g., dykes, intrusions) events.
