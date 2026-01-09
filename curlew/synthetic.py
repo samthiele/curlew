@@ -200,7 +200,6 @@ def hutton( shape=(1500,1000), **kwargs ):
 
     return C, M
 
-
 def playfair( shape=(1500,1000), width=50, **kwargs ):
 
     """

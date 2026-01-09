@@ -80,18 +80,6 @@ class GeoModel(object):
         self.lastEvent = self.fields[-1] # change to evaluate model in some paleo-space
         self.eidLookup = { f.eid : f for f in self.fields } # create a lookup table for translating event IDs to GeoField instances
 
-        # build lithology lookup (to ensure lithologies from different fields get unique IDs)
-        self.llookup = {}
-        n=0
-        for F in self.fields:
-            if F.overprint is not None:  # only relevant for generative (overprinting) events [ as these "create" new rocks ]
-                for k in F.isosurfaces.keys():
-                    k = f"{F.name}_{k}" # build key using field name and lithology name
-                    assert k not in self.llookup, f"All isosurfaces in model must have unique names, but {k} is not unique!"
-                    self.llookup[k] = n # assign ID for this lithology
-                    n = n + 1 # increment ID
-                F.llookup = self.llookup # link lookup to field so it is used during predict(...).
-
         # store grid if defined
         self.grid = grid
         
@@ -292,234 +280,173 @@ class GeoModel(object):
         S : An array of shape (N,1) containig the predicted scalar values and corresponding GeoField
             that "created" them.
         """
+
+        # update isosurface lookup (incase the defined isosurfaces have been changed)
+        # build lithology lookup (to ensure lithologies from different fields get unique IDs)
+        self.llookup = {}
+        self.eidLookup = { f.eid : f for f in self.fields } # create a lookup table for translating event IDs to GeoField instances
+        n=0
+        for F in self.fields:
+            if F.overprint is not None:  # only relevant for generative (overprinting) events [ as these "create" new rocks ]
+                for k in F.isosurfaces.keys():
+                    k = f"{F.name}_{k}" # build key using field name and lithology name
+                    assert k not in self.llookup, f"All isosurfaces in model must have unique names, but {k} is not unique!"
+                    self.llookup[k] = n # assign ID for this lithology
+                    n = n + 1 # increment ID
+                F.llookup = self.llookup # link lookup to field so it is used during predict(...).
+
+        # generate predictions
         out = self.fields[-1].predict( x, combine=True, to_numpy=False, batchSize=batchSize) # automatically recursed back throught the linked list.
+        
+        # return
         return out.numpy()
 
-    # def gradient(self, x : np.ndarray, return_vals : bool =False, normalize : bool = True ):
+    # def drill( self, start, end, step, batchSize=50000 ):
     #     """
-    #     Evaluate this model using `self.predict(x, **kwds)` and then compute
-    #     and return the gradients of the underlying scalar fields (as these represent
-    #     e.g., bedding orientation).
+    #     Evaluate the model along a line between start and end with an interval of step.
 
     #     Parameters
-    #     ----------
-    #     x : np.ndarray
-    #         And (N,d) array containing the locations at which to evaluate the model.
-    #     return_vals : bool
-    #         True if evaluated scalar values should be returned as well as gradients. Default is False. 
-    #     normalize : bool
-    #         True if gradient vectors should be normalised to length 1 (i.e. to represent poles to planes). Default is True. 
+    #     -----------
+    #     start : np.ndarray
+    #         The start coordinate of the "drillhole"
+    #     end : np.ndarray
+    #         The end coordinate of the "drillhole"
+    #     step : float
+    #         The distance between points along this line
 
     #     Returns
-    #     --------
-    #     Gradient vectors at the specified locations (`x`). If `return_vals` is `True`,
-    #     tuple (gradients, values) will be returned.
+    #     ---------
+    #     A Geode instance containing the results given by evaluating the model
+    #     along the drillhole.
     #     """
-    #     # compute gradients from final scalar field
-    #     # (n.b. this automatically recurses back through the linked list)
-    #     return self.fields[-1].gradient( x, to_numpy=True, normalize=normalize, return_vals=return_vals)
+    #     dir = np.array(end) - np.array(start)
+    #     length = np.linalg.norm(dir)
+    #     dir = (dir / length)*step
+    #     pos = np.array([start+dir*i for i in range( int(length / step) ) ])
 
-    # def classify(self, x : np.ndarray, return_vals=False):
+    #     # evaluate model
+    #     g = self.predict( pos, batch=batchSize)
+
+    #     # find contacts
+    #     if False:
+    #         # TODO
+    #         cmask = np.abs( np.diff( cids[:,0], prepend=cids[0,0] ) ) > 0
+    #         ori = self.gradient(pos[cmask], return_vals=False, normalize=True)
+    #         contacts = dict(
+    #             pos=pos[cmask],
+    #             ori=ori,
+    #             scalar=pred[cmask,0],
+    #             fieldID=pred[cmask,1].astype(int),
+    #             classID=cids[cmask,0].astype(int),
+    #             className=inames )
+
+    #     # return Geode
+    #     return g
+
+    # def evaluate( self, grid, topology=False, buffer=None, surfaces=None, batchSize=50000, vb=True):
     #     """
-    #     Evaluate this model using `self.predict(x, **kwds)` and then bin
-    #     the resulting scalar values according to the isosurfaces associated
-    #     with the scalar field responsible for each prediction (i.e. after taking
-    #     account for overprinting relations between the various fields).
+    #     Evaluate a *curlew* model on a grid and extract isosurfaces, topology and/or fault buffers.
 
     #     Parameters
     #     ----------
-    #     x : x : np.ndarray | torch.tensor | curlew.geometry.Grid
-    #         And (N,d) array containing the locations at which to evaluate the model.
-    #     return_vals : bool
-    #         True if evaluated scalar values should be returned as well as classes. Default is False. 
+    #     grid : curlew.geometry.Grid | np.ndarray
+    #         A structured Grid to evaluate the model on (if surfaces are to be calculated), or an array
+    #         of coordinates (unstructured grid). Isosurfaces cannot be calculate for unstructured grids.
+    #     topology : bool, optional
+    #         True if model topology (fault hangingwall and footwall relations) should be calculated and returned. Default is False. 
+    #     buffer : float, optional
+    #         If not None, this distance (in model coordinates) will be used to compute a buffer of this size on either side of each fault surface.
+    #     surfaces : str | bool, optional
+    #         If not None, isosurfaces will be computed and returned. If a string is passed, these will also be saved to PLY in the specified folder.
 
     #     Returns
     #     -------
-    #     class_ids : np.ndarray
-    #         Class ID's after classifying according to the defined isosurfaces.
-    #     class_names : np.ndarray
-    #         Array of unit names corresponding to the above class_ids.
+    #     A dict containing some of the following keys: 'topology', 'buffer', 'surfaces'.
     #     """
 
-    #     # evaluate all scalar values
-    #     pred = self.predict(x)
-    #     sfv = pred[:, 0].copy() # scalar field values
-    #     sid = pred[:, 1].astype(int) # structural field IDs
-
-    #     # individually classify each of them, and aggregate classes
-    #     labels = []
-    #     classes = pred.copy()
-    #     classes[:, 0] = classes[:, 1]
-    #     unique_ids = np.array([f.eid for f in self.fields]).astype(int)
-
-    #     for i in range(len(unique_ids)):
-    #         # mask to get pixels this GeoField is responsible for
-    #         mask = (sid == unique_ids[i])
-    #         if mask.sum() > 0:
-    #             # Belongs to normal fields
-    #             iso = self.fields[i].getIsovalues()
-    #             isov = np.array( list(iso.values()) )
-    #             ixx = np.argsort(isov)
-    #             inames = np.array( list(iso.keys()) )[ixx]
-    #             cids = np.digitize( sfv[mask], bins=isov[ixx] )
-
-    #             # store IDs and corresponding labels
-    #             classes[mask, 0] = cids + len(labels)
-    #             labels += [('%d_'%i)+n for n in inames]
-
-    #     labels += ['overburden'] # we need to add one extra class
-
-    #     if return_vals:
-    #         return classes, labels, pred
+    #     # TODO - extend this to include e.g., lithological classifications, stratigraphic contacts, etc.
+    #     from curlew.geometry import Grid
+    #     if isinstance(grid, Grid):
+    #         gxy = grid.coords()
     #     else:
-    #         return classes, labels
+    #         surfaces = None # disable surfaces
+    #         gxy = grid
 
-    def drill( self, start, end, step, batchSize=50000 ):
-        """
-        Evaluate the model along a line between start and end with an interval of step.
+    #     # setup output array
+    #     out = dict()
+    #     if buffer:
+    #         out['buffer'] = np.zeros( len(gxy) ) # initialise fault buffer
+    #     if topology:
+    #         out['topology'] = np.zeros( (len(gxy), len(self.fields)) ) # array to store hanging-wall & footwall information
+    #     if surfaces:
+    #         out['surfaces'] = {}
 
-        Parameters
-        -----------
-        start : np.ndarray
-            The start coordinate of the "drillhole"
-        end : np.ndarray
-            The end coordinate of the "drillhole"
-        step : float
-            The distance between points along this line
+    #     # recurse through model extracting required info
+    #     def recurse( f, dmask, i=0 ):
+    #         # evaluate model
+    #         if (f.parent2 is not None) or (f.deformation is not None): # ignore stratigraphic fields
+    #             if vb:
+    #                 print(f"Evaluating field {i}/{len(self.fields)}", end='\r')
+    #             pred = batchEval( gxy, f.predict, batch_size=batchSize, vb=False)[:,0]
+    #             pred[dmask] = np.nan # remove masked areas
 
-        Returns
-        ---------
-        A Geode instance containing the results given by evaluating the model
-        along the drillhole.
-        """
-        dir = np.array(end) - np.array(start)
-        length = np.linalg.norm(dir)
-        dir = (dir / length)*step
-        pos = np.array([start+dir*i for i in range( int(length / step) ) ])
+    #         # evaluate topology, buffer & recurse
+    #         if f.parent2 is not None: # this is a domain boundary
+    #             iso = f.getIsovalue( f.bound )
 
-        # evaluate model
-        g = self.predict( pos, batch=batchSize)
+    #             if buffer:
+    #                 i0 = f.getIsovalue( f.bound, offset=-buffer ) # lower buffer
+    #                 i1 = f.getIsovalue( f.bound, offset=buffer ) # upper buffer
+    #                 out['buffer'][ (pred >= min(i0, i1)) & (pred <= max(i0, i1)) & (out['buffer'] == 0) ] = f.eid
 
-        # find contacts
-        if False:
-            # TODO
-            cmask = np.abs( np.diff( cids[:,0], prepend=cids[0,0] ) ) > 0
-            ori = self.gradient(pos[cmask], return_vals=False, normalize=True)
-            contacts = dict(
-                pos=pos[cmask],
-                ori=ori,
-                scalar=pred[cmask,0],
-                fieldID=pred[cmask,1].astype(int),
-                classID=cids[cmask,0].astype(int),
-                className=inames )
+    #             footwall = pred < iso
+    #             hangingwall = pred >= iso
+    #             if topology:
+    #                 out['topology'][ footwall, i ] = -1
+    #                 out['topology'][ hangingwall, i ] = 1
 
-        # return Geode
-        return g
+    #             if isinstance(f.parent, GeoField):
+    #                 recurse( f.parent, dmask=(dmask + footwall ), i=i+1 ) # recurse hangingwall objects
+    #             if isinstance(f.parent2, GeoField):
+    #                 recurse( f.parent2, dmask=(dmask + hangingwall), i=i+1 ) # recurse footwall objects
 
-    def evaluate( self, grid, topology=False, buffer=None, surfaces=None, batchSize=50000, vb=True):
-        """
-        Evaluate a *curlew* model on a grid and extract isosurfaces, topology and/or fault buffers.
+    #         elif (f.deformation is not None) and isinstance(f, FaultOffset): # this is a fault surface
+    #             if topology:
+    #                 iso = f.getIsovalue( f.deformation_args['contact'], offset=0 ) # fault surface
+    #                 footwall = pred < iso
+    #                 hangingwall = pred > iso
 
-        Parameters
-        ----------
-        grid : curlew.geometry.Grid | np.ndarray
-            A structured Grid to evaluate the model on (if surfaces are to be calculated), or an array
-            of coordinates (unstructured grid). Isosurfaces cannot be calculate for unstructured grids.
-        topology : bool, optional
-            True if model topology (fault hangingwall and footwall relations) should be calculated and returned. Default is False. 
-        buffer : float, optional
-            If not None, this distance (in model coordinates) will be used to compute a buffer of this size on either side of each fault surface.
-        surfaces : str | bool, optional
-            If not None, isosurfaces will be computed and returned. If a string is passed, these will also be saved to PLY in the specified folder.
+    #                 out['topology'][ footwall, i ] = -1
+    #                 out['topology'][ hangingwall, i ] = 1
 
-        Returns
-        -------
-        A dict containing some of the following keys: 'topology', 'buffer', 'surfaces'.
-        """
+    #             if buffer:
+    #                 i0 = f.getIsovalue( f.deformation_args['contact'], offset=-buffer ) # lower buffer
+    #                 i1 = f.getIsovalue( f.deformation_args['contact'], offset=buffer ) # upper buffer
+    #                 out['buffer'][ (pred >= min(i0, i1)) & (pred <= max(i0, i1)) & (out['buffer'] == 0) ] = f.eid
 
-        # TODO - extend this to include e.g., lithological classifications, stratigraphic contacts, etc.
-        from curlew.geometry import Grid
-        if isinstance(grid, Grid):
-            gxy = grid.coords()
-        else:
-            surfaces = None # disable surfaces
-            gxy = grid
-
-        # setup output array
-        out = dict()
-        if buffer:
-            out['buffer'] = np.zeros( len(gxy) ) # initialise fault buffer
-        if topology:
-            out['topology'] = np.zeros( (len(gxy), len(self.fields)) ) # array to store hanging-wall & footwall information
-        if surfaces:
-            out['surfaces'] = {}
-
-        # recurse through model extracting required info
-        def recurse( f, dmask, i=0 ):
-            # evaluate model
-            if (f.parent2 is not None) or (f.deformation is not None): # ignore stratigraphic fields
-                if vb:
-                    print(f"Evaluating field {i}/{len(self.fields)}", end='\r')
-                pred = batchEval( gxy, f.predict, batch_size=batchSize, vb=False)[:,0]
-                pred[dmask] = np.nan # remove masked areas
-
-            # evaluate topology, buffer & recurse
-            if f.parent2 is not None: # this is a domain boundary
-                iso = f.getIsovalue( f.bound )
-
-                if buffer:
-                    i0 = f.getIsovalue( f.bound, offset=-buffer ) # lower buffer
-                    i1 = f.getIsovalue( f.bound, offset=buffer ) # upper buffer
-                    out['buffer'][ (pred >= min(i0, i1)) & (pred <= max(i0, i1)) & (out['buffer'] == 0) ] = f.eid
-
-                footwall = pred < iso
-                hangingwall = pred >= iso
-                if topology:
-                    out['topology'][ footwall, i ] = -1
-                    out['topology'][ hangingwall, i ] = 1
-
-                if isinstance(f.parent, GeoField):
-                    recurse( f.parent, dmask=(dmask + footwall ), i=i+1 ) # recurse hangingwall objects
-                if isinstance(f.parent2, GeoField):
-                    recurse( f.parent2, dmask=(dmask + hangingwall), i=i+1 ) # recurse footwall objects
-
-            elif (f.deformation is not None) and isinstance(f, FaultOffset): # this is a fault surface
-                if topology:
-                    iso = f.getIsovalue( f.deformation_args['contact'], offset=0 ) # fault surface
-                    footwall = pred < iso
-                    hangingwall = pred > iso
-
-                    out['topology'][ footwall, i ] = -1
-                    out['topology'][ hangingwall, i ] = 1
-
-                if buffer:
-                    i0 = f.getIsovalue( f.deformation_args['contact'], offset=-buffer ) # lower buffer
-                    i1 = f.getIsovalue( f.deformation_args['contact'], offset=buffer ) # upper buffer
-                    out['buffer'][ (pred >= min(i0, i1)) & (pred <= max(i0, i1)) & (out['buffer'] == 0) ] = f.eid
-
-                if isinstance(f.parent, GeoField):
-                    recurse( f.parent, dmask=dmask, i=i+1 ) # recurse older objects
-            else:
-                iso = None
+    #             if isinstance(f.parent, GeoField):
+    #                 recurse( f.parent, dmask=dmask, i=i+1 ) # recurse older objects
+    #         else:
+    #             iso = None
             
-            if surfaces: # compute isosurface meshes
-                out['surfaces'][f.name] = {}
-                for k in f.isosurfaces.keys():
-                    if grid.ndim == 3: # 3D
-                        verts, faces = grid.contour( pred, iso=f.getIsovalue(k))
-                        out['surfaces'][f.name][k] = (verts, np.array(faces))
-                        if isinstance(surfaces, str) or isinstance(surfaces, Path):
-                            from curlew.io import savePLY
-                            savePLY( Path( surfaces ) / str(f.name) / f'{str(k)}.ply',
-                                    xyz = verts, faces = faces )
-                    elif grid.ndim == 2: # 2D
-                        contours = grid.contour( pred, iso=f.getIsovalue(k))
-                        out['surfaces'][f.name][k] = contours
+    #         if surfaces: # compute isosurface meshes
+    #             out['surfaces'][f.name] = {}
+    #             for k in f.isosurfaces.keys():
+    #                 if grid.ndim == 3: # 3D
+    #                     verts, faces = grid.contour( pred, iso=f.getIsovalue(k))
+    #                     out['surfaces'][f.name][k] = (verts, np.array(faces))
+    #                     if isinstance(surfaces, str) or isinstance(surfaces, Path):
+    #                         from curlew.io import savePLY
+    #                         savePLY( Path( surfaces ) / str(f.name) / f'{str(k)}.ply',
+    #                                 xyz = verts, faces = faces )
+    #                 elif grid.ndim == 2: # 2D
+    #                     contours = grid.contour( pred, iso=f.getIsovalue(k))
+    #                     out['surfaces'][f.name][k] = contours
 
-        # traverse from last event in model
-        recurse( self.fields[-1], np.full( len(gxy), False ) )
+    #     # traverse from last event in model
+    #     recurse( self.fields[-1], np.full( len(gxy), False ) )
 
-        return out
+    #     return out
 
     def __getitem__(self, index ):
         """Get fields by name (str) or SID (int)"""
@@ -627,17 +554,13 @@ class GeoModel(object):
         for field in self.fields[::-1]:
             # Determine the color based on the event type
             color = None
-            if field.parent2 is not None:
-                # domain boundary
+            if field.parent2 is not None: # domain boundary
                 color = domain_boundary_color
-            elif field.bound is not None and field.deformation is not None:
-                # dilative event
+            elif field.overprint is not None and field.deformation is not None: # dilative event
                 color = dilative_event_color
-            elif field.bound is not None:
-                # generative event
+            elif field.overprint is not None: # generative event
                 color = generative_event_color
-            elif field.deformation is not None:
-                # kinematic event
+            elif field.deformation is not None: # kinematic event
                 color = kinematic_event_color
             graph.add_node(field.name, label=field.name, color=color)
 
