@@ -22,6 +22,8 @@ def _initF( name, C, **kwargs):
     if isinstance( C, CSet ): # build a GeoField
         f = GeoField( name, **kwargs ) # create our GeoField
         f.field.bind( C ) # bind constraints
+    elif C is None: # construct a new field but without constraints
+        f = GeoField( name, **kwargs ) # create our GeoField
     else:  # predifined field
         f = GeoField( name, type=type(C), field=C, **kwargs ) # create our GeoField using predefined Field
     return f
