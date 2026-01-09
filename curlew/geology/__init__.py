@@ -7,8 +7,7 @@ from torch import nn
 import curlew
 from curlew.core import CSet
 from curlew.geology.geofield import GeoField
-from curlew.geology.interactions import Overprint, SheetOffset, FaultOffset
-from curlew.geology.interactions import foldOffset
+from curlew.geology.interactions import Overprint, SheetOffset, FaultOffset, FoldOffset
 from curlew.geology.geomodel import _linkF
 from curlew.geometry import blended_wave
 from curlew.fields.analytical import LinearField
@@ -258,16 +257,13 @@ def fold( name, *, origin, compression, extension, wavelength, amplitude=1.0, sh
     # create a lambda function for evaluating folds from scalar value
     f = lambda x: blended_wave( x, f=sharpness, A=amplitude, T=2)
 
-    # create dargs and set offset function
+    # creat fold object
     extension = extension / np.linalg.norm(extension) # principal stretching direction
-    dargs = dict(thicker=torch.tensor(extension, dtype=curlew.dtype, device=curlew.device ),
-                 shorter=torch.tensor(compression, dtype=curlew.dtype, device=curlew.device ),
-                 shortening=strain, 
-                 periodic=f )
+    defo = FoldOffset( thicker=extension, shorter=compression, shortening=strain, periodic=f )
 
     # create and return our GeoField instance
-    return GeoField( name, None, field=fa, 
-        deformation=foldOffset, deformation_args=dargs )
+    return GeoField( name, None, field=fa, # use pre-existing (analytical) field rather than creating a new one
+                    deformation=defo )
 
 def domainBoundary( name, *, C, H=None, bound = 0, gt = 0, lt = 1, **kwargs ):
     """

@@ -9,8 +9,8 @@ the "glue" that bind different scalar fields into a potentially complex multi-ev
 import numpy as np
 import torch
 from torch import nn
+import curlew
 from curlew.core import LearnableBase
-
 from typing import Union, List
 
 # OVERPRINTING RELATIONS -- function used to create new rocks (generative fields)
@@ -276,40 +276,47 @@ class FaultOffset( OffsetBase ):
             offset[mask,:] = offset[mask,:] - delta[:,None] * ds2
         return offset # add displacements to get undeformed coordinates
 
-def finiteFaultOffset( X, sf, **kwds):
-    """
-    Function calculate offsets from a scalar field (SF) representing a finite fault.
-    """
-    pass # TODO! 
-
-def foldOffset( X, G, thicker, shorter, shortening, periodic ):
+class FoldOffset( OffsetBase ):
     """
     Calculate offsets from a scalar field (SF) representing distance along a fold series.
-
-    Parameters
-    ----------
-    X : torch.Tensor
-        Some (N, ndim) array of points to displace.
-    G : SF
-        The scalar field (SF) to use for the displacement (e.g., to sample scalar values and/or gradients).
-    thicker : torch.tensor
-        The direction of principal stretching (i.e. the direction in which the folds thicken the series)
-    shorter : torch.tensor
-        The direction of principal shortening (i.e. axis along which the folds act)
-    shortening : float
-        The bulk shortening associated with this folding. Assumed to be constant everywhere.
-    periodic : float
-        A periodic function that takes an array of scalar values and returns periodically varying offsets.
     """
-    ds, s = G.field.compute_gradient( X, normalize=False,
-                                      return_value=True,
-                                      transform=False )
-    scale = torch.mean( torch.norm(ds, dim=-1) )
-    y = periodic(s) # compute fold function
 
-    # convert to displacement vectors
-    disp = -y[:,None] * thicker[None,:] # remove fold amplitude
-    disp = disp + s[:,None]*shorter[None,:]*(shortening / scale) # extend to original length
+    def __init__(self, thicker : Union[torch.tensor, np.ndarray], shorter : Union[torch.tensor, np.ndarray], shortening : float, periodic):
+        """
+        Create a new fold offset object
 
-    # apply and return
-    return disp
+        Parameters
+        ----------
+        thicker : torch.tensor | np.ndarray
+            The direction of principal stretching (i.e. the direction in which the folds thicken the series)
+        shorter : torch.tensor  | np.ndarray
+            The direction of principal shortening (i.e. axis along which the folds act)
+        shortening : float
+            The bulk shortening associated with this folding. Assumed to be constant everywhere.
+        periodic : function
+            A periodic function that takes an array of scalar values and returns periodically varying offsets.
+        """
+        super().__init__()
+        self.thicker = torch.tensor( thicker, device=curlew.device, dtype=curlew.dtype)
+        self.shorter = torch.tensor( shorter, device=curlew.device, dtype=curlew.dtype)
+        self.shortening = shortening
+        self.periodic = periodic
+    
+    def disp( self, X, G ):
+        """
+        Compute displacement vectors for points `X` based on GeoField `G`.
+        """
+        ds, s = self.dss(X,G,normalize=False) # get gradient direction
+        #ds, s = G.field.compute_gradient( X, normalize=False,
+        #                              return_value=True,
+        #                              transform=False )
+
+        scale = torch.mean( torch.norm(ds, dim=-1) )
+        y = self.periodic(s) # compute fold function
+
+        # convert to displacement vectors
+        disp = -y[:,None] * self.thicker[None,:] # remove fold amplitude
+        disp = disp + s[:,None]*self.shorter[None,:]*(self.shortening / scale) # extend to original length
+
+        # return displacement vectors
+        return disp

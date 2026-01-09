@@ -89,7 +89,6 @@ def test_multi():
     #plt.imshow(sf.T)
 
 def test_fold():
-    return # disable test; TODO - fix and re-enable
 
     from curlew import GeoModel
     from curlew.geology import strati, fold
@@ -97,21 +96,21 @@ def test_fold():
     from curlew.fields.analytical import LinearField
 
     s0 = strati('s0', C=LinearField( 'f0', input_dim=2, 
-                         origin=np.array([0,0]),
-                         gradient=np.array([0.0,0.1]) ) )
-    
+                            origin=np.array([0,0]),
+                            gradient=np.array([0.0,0.1]) ) )
+
     s1 = fold('s1', origin=np.array([0,0]), 
-                extension=np.array([0,1]), 
-                compression=np.array([1,0]), 
-                wavelength=100, 
-                amplitude=30, sharpness=0.7 )
+                    extension=np.array([0,1]), 
+                    compression=np.array([1,0]), 
+                    wavelength=150, 
+                    amplitude=20, sharpness=0.7 )
 
     s2 = fold('s2', origin=np.array([0,0]), 
                 extension=np.array([0,1]), 
                 compression=np.array([1,0]), 
-                wavelength=2000, 
+                wavelength=1000, 
                 amplitude=100, sharpness=0.7 )
-    
+
     s3 = sheet( 'dyke', C=LinearField( 'f2', input_dim=2, 
                         origin=np.array([300,0]),
                         gradient=np.array([1.5,-1]), normalise=True ),
@@ -130,12 +129,17 @@ def test_fold():
                     wavelength=1000, 
                     amplitude=30, sharpness=0.6 )
 
+    for z in [0,50,75,100,200,250,300,400,500,750]:
+            s0.addIsosurface(f"layer{z}", seed=np.array([[200,z]]))
+    s3.addIsosurface("dyke", value=-np.inf) # add isosurface so dyke is filled with material
+
     M = GeoModel( [s0, s1, s2, s3, s4, s5 ] )
-    
+
     # evaluate it. Not sure how to check if it "worked"...
     from curlew.geometry import grid
     dims = (1000,500)
     G = grid( dims, step=(1,1), center=(dims[0]/2,dims[1]/2) ) 
-    cxy = G.coords()
-    sf = M.predict(cxy)
-    assert np.isfinite(sf).all()
+    geo = M.predict(G)
+    assert np.isfinite(geo.scalar).all() # scalar values should all be finite
+    assert len( np.unique( geo.lithoID ) ) > 9 # should have lots of layers
+    assert len( np.unique( geo.structureID )) >= 2 # two different structures; stratigraphy and dyke.

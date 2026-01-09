@@ -84,6 +84,17 @@ def test_hutton():
     assert (pred.structureID == 2).any() # check some basement is present
     assert (pred.structureID == 1).any() # check some unconformity is present
 
+    # check lithoIDs were assigned correctly
+    lithoNames = set( pred.lithoLookup.values() )
+    assert 'basement_layer1' in lithoNames
+    assert 'unconformity_layer1' in lithoNames
+    for k,v in pred.lithoLookup.items(): # check that some lithologies exist for each lithology
+        mask = pred.lithoID == k
+        assert np.sum(mask) > 3 
+        for k2,v2 in pred.structureLookup.items():
+            if v2 in v: # name suggest structure matches
+                assert (np.sum(pred.structureID[mask] == k2) / np.sum(mask)) > 0.99 # should be nearly 100% match (some rounding / floating point errors)
+        
     # check evaluate gradients function works
     grad, pred2 = s0.gradient( G2.coords(), normalize=True, return_vals=True )
     assert np.max( np.abs(1-np.linalg.norm(grad, axis=1)) ) < 1e-6 # check vectors are unit vectors

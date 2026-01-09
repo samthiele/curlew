@@ -531,6 +531,7 @@ class GeoField( object ):
                     values = np.array(list(isosurfaces.values()))
                     ixx = np.argsort(values) # sort these to ensure isosurfaces are applied from smallest to largest
                     for i,(k,v) in enumerate(zip( keys[ixx], values[ixx])):
+                        k = f"{self.name}_{k}" # include field name in k to help ensure it is unique!
                         mask = scalar >= v # isosurface is formation top
                         if self.llookup is not None:
                             assert k in self.llookup, "Lithology lookup must contain all isosurfaces in generative fields"

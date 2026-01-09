@@ -80,21 +80,21 @@ class GeoModel(object):
         self.lastEvent = self.fields[-1] # change to evaluate model in some paleo-space
         self.eidLookup = { f.eid : f for f in self.fields } # create a lookup table for translating event IDs to GeoField instances
 
+        # build lithology lookup (to ensure lithologies from different fields get unique IDs)
+        self.llookup = {}
+        n=0
+        for F in self.fields:
+            if F.overprint is not None:  # only relevant for generative (overprinting) events [ as these "create" new rocks ]
+                for k in F.isosurfaces.keys():
+                    k = f"{F.name}_{k}" # build key using field name and lithology name
+                    assert k not in self.llookup, f"All isosurfaces in model must have unique names, but {k} is not unique!"
+                    self.llookup[k] = n # assign ID for this lithology
+                    n = n + 1 # increment ID
+                F.llookup = self.llookup # link lookup to field so it is used during predict(...).
+
         # store grid if defined
         self.grid = grid
         
-        # init optimiser for custom parameters (e.g., fault slip)
-        # (these are gathered from all the fields in this model)
-        # also store references to each fields optimiser for easy access.
-        self.optim = {}
-        for F in self.fields:
-            # create all "non-mlp" params
-            params = [ param for name, param in F.field.named_parameters() if 'mlp' not in name ]
-            if len(params) > 0:
-                self.optim[F.name + '_params'] = ( # create optimiser and store params
-                    torch.optim.SGD( params, lr=lr, momentum=0 ),
-                    params )
-        self.freeze(geometry=False, params=False) # start with everything "unfrozen"
 
     def freeze( self, name=None, geometry=True, params=False ):
         """
