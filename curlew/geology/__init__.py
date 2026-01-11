@@ -267,7 +267,7 @@ def fold( name, *, origin, compression, extension, wavelength, amplitude=1.0, sh
     return GeoField( name, None, field=fa, # use pre-existing (analytical) field rather than creating a new one
                     deformation=defo )
 
-def domainBoundary( name, *, C, H=None, bound = 0, gt = 0, lt = 1, **kwargs ):
+def domainBoundary( name, *, C, bound = 0, gt = 0, lt = 1, sharpness=1e4, mode="below", **kwargs ):
     """
     Create a GeoField representing a domain boundary, in which different sub-models are modelled on either side of the boundary. 
     This can be very useful for modelling e.g., sedimentary basins, where the basin fill is modelled on one side of the boundary (onlap relations), 
@@ -280,8 +280,6 @@ def domainBoundary( name, *, C, H=None, bound = 0, gt = 0, lt = 1, **kwargs ):
     C : CSet | curlew.fields.analytical.AF | curlew.fields.NF
         Either a pre-constructed neural field, explicit field or a set of 
         constraints to use to construct a new GeoField representing this domain boundary.
-    H : HSet
-        Hyperparameters for the created neural field (if C is a CSet).
     bound : float, str
         A float specifying the value (isosurface value or name) of the interpolated scalar field that represents the domain boundary.
     gt : float | GeoField | list
@@ -290,7 +288,14 @@ def domainBoundary( name, *, C, H=None, bound = 0, gt = 0, lt = 1, **kwargs ):
     lt : float | GeoField | list
         A float or a list of floats or GeoFields that define the scalar field(s) used to populate the footwall (val < bound) of this domain boundary. In essence these
         define the geological sub-model used on the footwall side of the domain boundary. If a float is provided, it will be populated with a constant value.
-
+    mode : str
+        The overprinting mode. Options are:
+            - `"above"`: replace all regions greater than the provided threshold). Useful for e.g., unconformities.
+            - `"below"`: replace all regions less than than the provided threshold). Useful for e.g., intrusions.
+    sharpness : float
+        Multiple used to change the sharpness of the inequality when using differentiable pytorch
+        tensors (as the inequality operator is replaced with a sigmoid functions).
+    
     Keywords
     ----------
     All keywords are passed to `curlew.GeoField.__init__(...)`, many of which are then used to initialise the 
@@ -303,7 +308,8 @@ def domainBoundary( name, *, C, H=None, bound = 0, gt = 0, lt = 1, **kwargs ):
     """
 
     # create field representing domain boundary
-    f = _initF( name, C=C, H=H, bound=bound, **kwargs) 
+    o = Overprint(threshold=bound, sharpness=sharpness, mode=mode)
+    f = _initF( name, C=C, overprint=o, **kwargs)
 
     # define parent / child relationships for domain boundary field
     if not (isinstance(gt, list) or isinstance(gt, list)):

@@ -58,6 +58,9 @@ dtype = torch.float64
 ccmap = None
 """A colourful (custom) matplotlib colormap taylored for `curlew`. Will only be set if `matplotlib` is installed."""
 
+batchSize = 512000
+"""Divide arrays larger than this size into chunks (batches) to reduce memory usage and avoid out-of-memory crashes."""
+
 try:
     # Define curlew colormap :-) 
     import matplotlib.colors as mcolors

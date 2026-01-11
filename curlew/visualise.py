@@ -295,16 +295,22 @@ def showModel(M, axs=None, leg_loc=None, title="c)", node_size=3000, font_size=1
         if field.parent2 is not None:
             # domain boundary
             color = domain_boundary_color
-        elif field.bound is not None and field.deformation is not None: 
+        elif field.overprint is not None and field.deformation is not None: 
             # dilative event
             color = dilative_event_color
-        elif field.bound is not None: 
+        elif field.overprint is not None: 
             # generative event
             color = generative_event_color
         elif field.deformation is not None:
             # kinematic event
             color = kinematic_event_color
-        graph.add_node(field.name, label=format_latex_subscript(field.name), color=color)
+        else: # fixed value
+            color = fixed_value_color
+        
+        name = field.name
+        if isinstance(field.field, (int, float)):
+            name += f"={field.field}"
+        graph.add_node(field.name, label=format_latex_subscript(name), color=color)
 
         # Add edges
         if isinstance(field.parent, GeoField):

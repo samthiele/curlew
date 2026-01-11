@@ -357,3 +357,6 @@ def anderson( shape=(1500,1000), offset1=225, offset2=250, **kwargs ):
     C[2].vv = C[2].vv * 0 # ensure value constraints are exactly zero (fault surface = 0)
 
     return C, M # return
+
+def suess( shape=(1500,1000), offset1=225, offset2=250, **kwargs ):
+    pass

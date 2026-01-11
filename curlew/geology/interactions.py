@@ -20,7 +20,7 @@ class Overprint(LearnableBase):
     Base class for combining predictions from two consecutive scalar fields and "overprinting" some older
     scalar values to form unconformities or intrusions.
     """
-    def __init__(self, threshold : Union[str, list] = 0, sharpness=1e4, mode='above'):
+    def __init__(self, threshold : Union[str, list] = 0, sharpness=1e6, mode='above'):
         """
         Create a new "overprint" object for applying overprinting stratigraphic (e.g., unconformities) and
         igneous (e.g., dykes, intrusions) events.
@@ -239,7 +239,8 @@ class FaultOffset( OffsetBase ):
         contact = self.contact
         if isinstance(contact, str):
             contact = G.getIsovalue(contact)
-        s = s - (contact / G.field.mnorm) # force isosurface to be at zero and scale to have ~unit average gradient
+        #s = s - (contact / G.field.mnorm) # force isosurface to be at zero and scale to have ~unit average gradient
+        s = s - contact # force isosurface to be at zero
 
         # get displacement vectors by projecting sigma1 onto tangent to the scalar field
         # [ project onto tangent plane using: sigma1 - sigma1 . gradient ]
@@ -270,9 +271,10 @@ class FaultOffset( OffsetBase ):
         if self.highcurve:
             mask = scale > 0 # only apply correction where slip is significant
             ds2, s2 = self.dss( X[mask,:]+offset[mask,:], G )
-            s2 = s2 / G.field.mnorm # normalise so scalar field approximates a distance field
-            s2 = s2 - (contact / G.field.mnorm) # force isosurface to be at zero
-            delta = s - s2 # - s
+            #s2 = s2 / G.field.mnorm # normalise so scalar field approximates a distance field
+            #s2 = s2 - (contact / G.field.mnorm) # force isosurface to be at zero
+            s2 - s2 - contact # force isosurface to be at zero
+            delta = s[mask] - s2 # - s
             offset[mask,:] = offset[mask,:] - delta[:,None] * ds2
         return offset # add displacements to get undeformed coordinates
 

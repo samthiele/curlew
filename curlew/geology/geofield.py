@@ -121,9 +121,9 @@ class Geode( object ):
         
         # combine scalar values, structure IDs and lithoIDs (if defined)
         args['scalar'] = younger.scalar*weight + self.scalar*iweight
-        args['structureID'] = (younger.structureID*weight + self.structureID*iweight).to(dtype=torch.int)
+        args['structureID'] = torch.round((younger.structureID*weight + self.structureID*iweight)).to(dtype=torch.int) # round to integer
         if (self.lithoID is not None) and (younger.lithoID is not None):
-            args['lithoID'] = torch.round(younger.lithoID*weight + self.lithoID*iweight) # round to integer
+            args['lithoID'] = torch.round(younger.lithoID*weight + self.lithoID*iweight).to(dtype=torch.int) # round to integer
         
         return Geode(**args)
     
@@ -306,7 +306,8 @@ class GeoField( object ):
         
          # pass transform function for determining paleocoordinates to neural field
          # (functools.partial is needed to allow pickling)
-        self.field.transform = functools.partial(apply_child_undeform, sf=self)
+        if not isinstance(self.field, float) and not isinstance(self.field, int):
+            self.field.transform = functools.partial(apply_child_undeform, sf=self)
 
     def copy(self):
         """
@@ -355,6 +356,9 @@ class GeoField( object ):
         details : dict
             A more detailed breakdown of the final loss. 
         """
+
+        assert not (isinstance(self.field, int) or isinstance(self.field, float)), "Cannot fit constant fields."
+
         # get constraints set to use
         if 'C' in kwargs:
             self.field.bind( kwargs.pop('C', self.field.C) )
@@ -414,6 +418,11 @@ class GeoField( object ):
         torch.Tensor
             A tensor of shape (N, output_dim), representing the scalar potential.
         """
+
+        # field is constant -- values are already known! :-)
+        if isinstance(self.field, float) or isinstance(self.field, int): 
+            return torch.full( (len(x),1), float(self.field), device=curlew.device, dtype=curlew.dtype)
+
         # set transform that removes any child deformation
         if undef and (self.child is not None):
             self.field.transform = functools.partial(apply_child_undeform, sf=self) # apply this GeologicalField's undeform function prior to  field.forward.
@@ -425,7 +434,7 @@ class GeoField( object ):
         return self.field.forward( x )
 
     def predict(self, x: np.ndarray, combine=False, to_numpy=True, transform=True, values=None, 
-                      litho : bool = True, batchSize=50000) -> np.ndarray:
+                      litho : bool = True) -> np.ndarray:
         """
         Predict scalar values belonging to this and/or previousGeologicalFields.
 
@@ -447,8 +456,6 @@ class GeoField( object ):
             Pre-computed results of this GeoField (used sometimes to save recomputing). Default is None (values will be computed).
         litho : bool
             True (default) if lithology codes should be computed.
-        batchSize : int
-            Divide arrays larger than this size into chunks (batches) to reduce memory usage.
         """
         
         # check torch types 
@@ -460,16 +467,18 @@ class GeoField( object ):
             x = torch.tensor( x, device=curlew.device, dtype=curlew.dtype)
 
         # operation needs to be done in batches?
-        if (len(x) > batchSize) and (values is None):
-            out = batchEval( x, self.predict, combine=combine, to_numpy=to_numpy, transform=True,
-                                 values=values, litho=litho, batchSize=batchSize )
-            out.grid = grid
-            return out
+        if (len(x) > curlew.batchSize) and (values is None):
+                out = batchEval( x, self.predict, combine=combine, to_numpy=to_numpy, transform=True,
+                                    values=values, litho=litho, batch_size=curlew.batchSize )
+                out.grid = grid
+                return out
         
         if combine and (self.parent is not None): # COMBINE RESULTS FROM MULTIPLE FIELDS?
             if self.parent2 is not None: # DOMAIN BOUNDARIES (essentially use this field as a mask to combine older fields)
                 # predict value of domain scalar field
-                domain = self( x, undef=transform )
+                # TODO - how to deal with cases where transform is False? (older transforms should be applied, but not younger ones)
+                domain = self.predict( x, combine=False, to_numpy=False, transform=True )
+                #domain = self( x, undef=transform )
 
                 # evaluate isosurfaces to get threshold values, if needed (allows self.bound to containt str isosurface names)
                 assert self.overprint is not None, "Overprint must be defined for domain boundary."
@@ -481,7 +490,7 @@ class GeoField( object ):
                 parent2 = self.parent2.predict( x, combine=True, to_numpy=False, transform=True)
 
                 # apply overprint given domain boundary mask and return
-                out = self.overprint.apply( parent, parent2, domain=domain )
+                out = self.overprint.apply( parent, parent2, domain=domain.scalar )
                 out.fields[self.name] = domain # also store the results evaluated from this field
             else: # NORMAL CASE - FAULTS OR OTHER GENERATIVE EVENTS
                 # TODO - how to deal with cases where transform is False? (older transforms should be applied, but not younger ones)
@@ -522,9 +531,12 @@ class GeoField( object ):
                 pass
             
             # determine lithology IDs based on isosurfaces (if defined)
-            lithoID = torch.full( (len(scalar),), -1, device=curlew.device, dtype=torch.int)
-            lithoLookup = {-1 : "Undefined"}
-            if litho:
+            lid = 0
+            if self.llookup is not None:
+                lid = self.llookup.get(self.name, -1)
+            lithoID = torch.full( (len(scalar),), lid, device=curlew.device, dtype=torch.int)
+            lithoLookup = {-1 : "Undefined", lid : self.name }
+            if litho and (self.overprint is not None) and (self.parent2 is None): # only define lithologies for generative events (obviously)
                 isosurfaces = self.getIsovalues()
                 if len(isosurfaces) > 0:
                     keys = np.array(list(isosurfaces.keys()))
@@ -538,7 +550,7 @@ class GeoField( object ):
                             i = self.llookup[k]
                         lithoLookup[i] = k # store link betweein ID and lithology name
                         lithoID[mask] = i # update lithology ID array
-            
+
             # which (temporal) reference was used for these results
             if transform:
                 time='modern'
@@ -923,6 +935,10 @@ class GeoField( object ):
         """
         Compute loss associated with the underlying field and learnable property, deformation or overprint objects.
         """
+
+        # constant fields have no loss
+        if (isinstance(self.field, int) or isinstance(self.field, float)): return torch.tensor(0.0, device=curlew.device), {}
+
         loss, details = self.field.loss() 
         for o in [self.property, self.deformation, self.overprint]:
             if o is not None: 
@@ -935,7 +951,7 @@ class GeoField( object ):
         """
         Zero optimiser associated with the underlying field and learnable property, deformation or overprint objects. 
         """
-        self.field.zero()
+        if not (isinstance(self.field, int) or isinstance(self.field, float)): self.field.zero()
         if self.property is not None: self.property.zero()
         if self.deformation is not None: self.deformation.zero()
         if self.overprint is not None: self.overprint.zero()
@@ -944,7 +960,7 @@ class GeoField( object ):
         """
         Step optimiser associated with the underlying field and learnable property, deformation or overprint objects. 
         """
-        self.field.step()
+        if not (isinstance(self.field, int) or isinstance(self.field, float)): self.field.step()
         if self.property is not None: self.property.step()
         if self.deformation is not None: self.deformation.step()
         if self.overprint is not None: self.overprint.step()
@@ -954,37 +970,5 @@ class GeoField( object ):
         Set the learning rate for the underlying field and learnable property, deformation or overprint objects.
         """
         for o in [self.field, self.property, self.deformation, self.overprint]:
-            if (o is not None) and (o.optim is not None):
+            if (o is not None) and (not(isinstance(self.field, int) or isinstance(self.field, float))) and (o.optim is not None):
                 o.set_rate(lr=lr)
-    
-    # def classify( self, x: np.ndarray, return_vals=False, **kwds ):
-    #     """
-    #     Evaluate the model using `self.predict(x, **kwds)` and then bin
-    #     the resulting scalar values according to the isosurfaces associated
-    #     with this scalar field.
-
-    #     Parameters
-    #     ----------
-    #     x : np.ndarray
-    #         And (N,d) array containing the locations at which to evaluate the model.
-    #     return_vals : bool
-    #         True if evaluated scalar values should be returned as well as classes. Default is False. 
-    #     Returns
-    #     -------
-    #     class_ids : np.ndarray
-    #         Class ID's after classifying according to the defined isosurfaces.
-    #     class_names : np.ndarray
-    #         Array of unit names corresponding to the above class_ids.
-    #     """
-    #     # get and sort isovalues
-    #     iso = np.array( list(self.getIsovalues().values()) )
-    #     ixx = np.argsort(iso)
-    #     inames = np.array( list(self.getIsovalues().keys()) )[ixx]
-    #     pred = self.predict(x, **kwds)
-    #     cids = np.digitize( pred, bins=iso[ixx] )
-
-    #     # return
-    #     if return_vals:
-    #         return cids, inames, pred
-    #     else:
-    #         return cids, inames

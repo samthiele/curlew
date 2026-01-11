@@ -265,7 +265,7 @@ class GeoModel(object):
         # return
         return loss.item(), out
 
-    def predict(self, x : np.ndarray, batchSize=50000):
+    def predict(self, x : np.ndarray):
         """
         Create model predictions at the specified points.
 
@@ -285,23 +285,25 @@ class GeoModel(object):
         # build lithology lookup (to ensure lithologies from different fields get unique IDs)
         self.llookup = {}
         self.eidLookup = { f.eid : f for f in self.fields } # create a lookup table for translating event IDs to GeoField instances
-        n=0
+        n=1 # start at 1, as -1 is 'undefined' and 0 is default for fields with no lithology defined.
         for F in self.fields:
+            self.llookup[F.name] = n # potential lithology created by this field (e.g., constant fields)
+            n = n + 1
             if F.overprint is not None:  # only relevant for generative (overprinting) events [ as these "create" new rocks ]
                 for k in F.isosurfaces.keys():
                     k = f"{F.name}_{k}" # build key using field name and lithology name
                     assert k not in self.llookup, f"All isosurfaces in model must have unique names, but {k} is not unique!"
                     self.llookup[k] = n # assign ID for this lithology
                     n = n + 1 # increment ID
-                F.llookup = self.llookup # link lookup to field so it is used during predict(...).
+            F.llookup = self.llookup # link lookup to field so it is used during predict(...).
 
         # generate predictions
-        out = self.fields[-1].predict( x, combine=True, to_numpy=False, batchSize=batchSize) # automatically recursed back throught the linked list.
+        out = self.fields[-1].predict( x, combine=True, to_numpy=False) # automatically recursed back throught the linked list.
         
         # return
         return out.numpy()
 
-    # def drill( self, start, end, step, batchSize=50000 ):
+    # def drill( self, start, end, step ):
     #     """
     #     Evaluate the model along a line between start and end with an interval of step.
 
@@ -325,7 +327,7 @@ class GeoModel(object):
     #     pos = np.array([start+dir*i for i in range( int(length / step) ) ])
 
     #     # evaluate model
-    #     g = self.predict( pos, batch=batchSize)
+    #     g = self.predict( pos )
 
     #     # find contacts
     #     if False:
@@ -343,7 +345,7 @@ class GeoModel(object):
     #     # return Geode
     #     return g
 
-    # def evaluate( self, grid, topology=False, buffer=None, surfaces=None, batchSize=50000, vb=True):
+    # def evaluate( self, grid, topology=False, buffer=None, surfaces=None, vb=True):
     #     """
     #     Evaluate a *curlew* model on a grid and extract isosurfaces, topology and/or fault buffers.
 
@@ -387,7 +389,7 @@ class GeoModel(object):
     #         if (f.parent2 is not None) or (f.deformation is not None): # ignore stratigraphic fields
     #             if vb:
     #                 print(f"Evaluating field {i}/{len(self.fields)}", end='\r')
-    #             pred = batchEval( gxy, f.predict, batch_size=batchSize, vb=False)[:,0]
+    #             pred = batchEval( gxy, f.predict, vb=False)[:,0]
     #             pred[dmask] = np.nan # remove masked areas
 
     #         # evaluate topology, buffer & recurse

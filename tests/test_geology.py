@@ -89,11 +89,12 @@ def test_hutton():
     assert 'basement_layer1' in lithoNames
     assert 'unconformity_layer1' in lithoNames
     for k,v in pred.lithoLookup.items(): # check that some lithologies exist for each lithology
-        mask = pred.lithoID == k
-        assert np.sum(mask) > 3 
-        for k2,v2 in pred.structureLookup.items():
-            if v2 in v: # name suggest structure matches
-                assert (np.sum(pred.structureID[mask] == k2) / np.sum(mask)) > 0.99 # should be nearly 100% match (some rounding / floating point errors)
+        if '_' in v: # _ indicates these IDs are defined by an isosurface; so should certainly exist in the model
+            mask = pred.lithoID == k
+            assert np.sum(mask) > 3 
+            for k2,v2 in pred.structureLookup.items():
+                if v2 in v: # name suggest structure matches
+                    assert (np.sum(pred.structureID[mask] == k2) / np.sum(mask)) > 0.99 # should be nearly 100% match (some rounding / floating point errors)
         
     # check evaluate gradients function works
     grad, pred2 = s0.gradient( G2.coords(), normalize=True, return_vals=True )
@@ -438,7 +439,7 @@ def test_anderson3D():
         assert np.mean(vals) < 0.1 # should be small
 
         # also test evaluate function (at least, that it runs)
-        out = M.evaluate( G, topology=True, buffer=10., surfaces=True, batchSize=10000)
+        out = M.evaluate( G, topology=True, buffer=10., surfaces=True)
         assert 'topology' in out
         assert 'surfaces' in out
         assert 'buffer' in out
@@ -446,7 +447,7 @@ def test_anderson3D():
         assert np.max( out['topology'] ) == 1 # some hangingwall
         assert np.min( out['topology'] ) == -1 # footwall too
 
-        out = M.evaluate( cxy, topology=True, buffer=10., surfaces=None, batchSize=10000)
+        out = M.evaluate( cxy, topology=True, buffer=10., surfaces=None)
         assert 'topology' in out
         assert 'surfaces' not in out
         assert 'buffer' in out
