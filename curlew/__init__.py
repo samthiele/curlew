@@ -56,7 +56,11 @@ dtype = torch.float64
 """The precision used during pytorch computations. Lower to float32 to save RAM."""
 
 ccmap = None
-"""A colourful (custom) matplotlib colormap taylored for `curlew`. Will only be set if `matplotlib` is installed."""
+"""A colourful (custom) matplotlib (categorical) colormap taylored for `curlew`. Will only be set if `matplotlib` is installed."""
+
+ccramp = None
+"""A colourful (custom) matplotlib (continuous) colormap taylored for `curlew`. Will only be set if `matplotlib` is installed."""
+
 
 batchSize = 512000
 """Divide arrays larger than this size into chunks (batches) to reduce memory usage and avoid out-of-memory crashes."""
@@ -77,7 +81,15 @@ try:
         "#1B768F",  # medium blue 
         "#054862",  # deeper blue (not darkest)
     ]
-    ccmap = mcolors.ListedColormap(colors)
+    ccmap = mcolors.ListedColormap(colors=colors, name='curlew_categorical')
+
+    # Create a continuous colormap
+    ccramp = mcolors.LinearSegmentedColormap.from_list(
+        name="curlew_continuous",
+        colors=colors,
+        N=256  # resolution of the ramp
+    )
+
 except:
     pass
 

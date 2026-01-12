@@ -16,8 +16,10 @@ def get_colors(inp, colormap="viridis", normalize=True, vmin=None, vmax=None):
 
     colormap = mpl.colormaps[colormap]
     if normalize:
-        vmin=np.min(inp)
-        vmax=np.max(inp)
+        if vmin is None:
+            vmin=np.min(inp)
+        if vmax is None:
+            vmax=np.max(inp)
 
     norm = plt.Normalize(vmin, vmax)
     return colormap(norm(inp))[:, :3]
