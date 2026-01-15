@@ -27,7 +27,12 @@ def test_synthetic():
         C, M = f(dims) # create the synthetic "hutton" dataset
         xy = M.grid.coords() # get associated grid points
         g = M.predict(xy) # evaluate model
-
+        assert len(np.unique(g.lithoID)) > 1 # check we have more than one lithology
+        d, c = M.drill( [0,0], dims, step=10) # evaluate model along diagonal drillhole
+        assert len( np.unique(d.lithoID) ) > 1 # assert we intersected some contacts
+        assert len(c.x) > 0 # check we have some contacts
+        assert c.gradient is not None # check gradients were also computed for the contacts
+            
         for _C in C[:-1]: _checkCSet(_C, prop=False) # check sampled constraints are valid
         assert len(xy) == np.prod(dims)
         assert len(g.scalar) == np.prod(dims) # check scalar field is at least the correct size...

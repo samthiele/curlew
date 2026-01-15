@@ -4,7 +4,7 @@ facilitating interactions with the underlying linked-list of GeoField instances
 (that represent each geological structure in the model).
 """
 
-from curlew.geology.geofield import GeoField, apply_child_undeform
+from curlew.geology.geofield import GeoField, Geode, apply_child_undeform
 from curlew.utils import batchEval
 from curlew.geology.interactions import FaultOffset
 
@@ -35,7 +35,7 @@ class GeoModel(object):
     (that represent each geological structure in the model).
     """
 
-    def __init__( self, fields : list, lr=0.01, grid=None ):
+    def __init__( self, fields : list, lr=0.01, grid=None, name=None ):
         """
         Construct a GeoModel from a list of GeoFields.
 
@@ -51,6 +51,8 @@ class GeoModel(object):
         grid : curlew.geometry.Grid | optional
             An optional grid to associate with this GeoModel instance. This will set the `M.grid` variable but is not
             necessary (i.e. can be `null`; which is the default).
+        name : str | optional
+            A string name to associate with this GeoModel. Not really used, but can be useful :-)
         """
         # set parent and child properties of underlying GeoFields
         # (i.e. build our linked list / binary tree of GeoFields)
@@ -80,9 +82,9 @@ class GeoModel(object):
         self.lastEvent = self.fields[-1] # change to evaluate model in some paleo-space
         self.eidLookup = { f.eid : f for f in self.fields } # create a lookup table for translating event IDs to GeoField instances
 
-        # store grid if defined
+        # store "nice-to-have" extras
         self.grid = grid
-        
+        self.name = name
 
     def freeze( self, name=None, geometry=True, params=False ):
         """
@@ -265,7 +267,7 @@ class GeoModel(object):
         # return
         return loss.item(), out
 
-    def predict(self, x : np.ndarray):
+    def predict(self, x : np.ndarray, **kwargs):
         """
         Create model predictions at the specified points.
 
@@ -274,6 +276,10 @@ class GeoModel(object):
         x : np.ndarray | torch.tensor | curlew.geometry.Grid
             An array of shape (N, input_dim) containing the coordinates at which to evaluate
             this GeoModel.
+
+        Keywords
+        --------
+        All keywords are passed directly to `GeoField.predict()`.
 
         Returns
         --------
@@ -298,52 +304,50 @@ class GeoModel(object):
             F.llookup = self.llookup # link lookup to field so it is used during predict(...).
 
         # generate predictions
-        out = self.fields[-1].predict( x, combine=True, to_numpy=False) # automatically recursed back throught the linked list.
+        kwargs['to_numpy'] = kwargs.get('to_numpy', False)
+        kwargs['combine'] = True # this is necessary....
+        out = self.fields[-1].predict( x, **kwargs) # automatically recursed back throught the linked list.
         
         # return
         return out.numpy()
 
-    # def drill( self, start, end, step ):
-    #     """
-    #     Evaluate the model along a line between start and end with an interval of step.
+    def drill( self, start, end, step ):
+        """
+        Evaluate the model along a line between start and end with an interval of step.
 
-    #     Parameters
-    #     -----------
-    #     start : np.ndarray
-    #         The start coordinate of the "drillhole"
-    #     end : np.ndarray
-    #         The end coordinate of the "drillhole"
-    #     step : float
-    #         The distance between points along this line
+        Parameters
+        -----------
+        start : np.ndarray
+            The start coordinate of the "drillhole"
+        end : np.ndarray
+            The end coordinate of the "drillhole"
+        step : float
+            The distance between points along this line
 
-    #     Returns
-    #     ---------
-    #     A Geode instance containing the results given by evaluating the model
-    #     along the drillhole.
-    #     """
-    #     dir = np.array(end) - np.array(start)
-    #     length = np.linalg.norm(dir)
-    #     dir = (dir / length)*step
-    #     pos = np.array([start+dir*i for i in range( int(length / step) ) ])
+        Returns
+        ---------
+        drillholes : Geode
+            A Geode instance containing the results given by evaluating the model along the drillhole.
+        contacts : Geode
+            A Geode instance containing the positions and orientations of contacts intersected along the drillhole.
+        """
+        dir = np.array(end) - np.array(start)
+        length = np.linalg.norm(dir)
+        dir = (dir / length)*step
+        pos = np.array([start+dir*i for i in range( int(length / step) ) ])
 
-    #     # evaluate model
-    #     g = self.predict( pos )
+        # evaluate model along drillholes
+        g = self.predict( pos )
 
-    #     # find contacts
-    #     if False:
-    #         # TODO
-    #         cmask = np.abs( np.diff( cids[:,0], prepend=cids[0,0] ) ) > 0
-    #         ori = self.gradient(pos[cmask], return_vals=False, normalize=True)
-    #         contacts = dict(
-    #             pos=pos[cmask],
-    #             ori=ori,
-    #             scalar=pred[cmask,0],
-    #             fieldID=pred[cmask,1].astype(int),
-    #             classID=cids[cmask,0].astype(int),
-    #             className=inames )
+        # find contacts
+        c = None
+        g.contactMask = np.abs( np.diff( g.lithoID, prepend=g.lithoID[0] ) ) > 0
+        if g.contactMask.any():
+            cpos = pos[g.contactMask]
+            c = self.predict( cpos, gradient=True ) # predict again, at the contact points only
 
-    #     # return Geode
-    #     return g
+        # return Geode
+        return g, c
 
     # def evaluate( self, grid, topology=False, buffer=None, surfaces=None, vb=True):
     #     """

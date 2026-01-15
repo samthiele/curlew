@@ -117,7 +117,7 @@ def format_latex_subscript(name):
     else:
         return f"${name}$"  # fallback if not matching pattern
 
-def plotDrill(hole, ax, ticksize=50, lw=1, vmn=0, vmx=20, cmap="tab20b", noval=False):
+def plotDrill2D(hole, ax, ticksize=50, lw=1, vmn=0, vmx=20, cmap="tab20b", noval=False):
     """
     Plot the specified drillhole on the given axis with color normalization.
     """
@@ -125,7 +125,7 @@ def plotDrill(hole, ax, ticksize=50, lw=1, vmn=0, vmx=20, cmap="tab20b", noval=F
     from matplotlib.colors import Normalize
     import matplotlib.patheffects as pe
     
-    points = np.array([hole['pos'][:, 0], hole['pos'][:, 1]]).T.reshape(-1, 1, 2)
+    points = np.array([hole.x[:, 0], hole.x[:, 1]]).T.reshape(-1, 1, 2)
     segments = np.concatenate([points[:-1], points[1:]], axis=1)
 
     # Normalization to handle vmin/vmax
@@ -134,7 +134,7 @@ def plotDrill(hole, ax, ticksize=50, lw=1, vmn=0, vmx=20, cmap="tab20b", noval=F
     # Plot the borehole
     lc = LineCollection(
         segments, 
-        array=hole['classID'], 
+        array=hole.lithoID, 
         cmap=cmap, 
         norm=norm,
         linewidths=lw
@@ -142,7 +142,7 @@ def plotDrill(hole, ax, ticksize=50, lw=1, vmn=0, vmx=20, cmap="tab20b", noval=F
     t = ax.add_collection(lc)
     t.set_path_effects([pe.Stroke(linewidth=lw+5, foreground='k'), pe.Normal()])
     
-def plotConstraints(ax, C=None, H=None, ll=1, lw=4, scale=0.001, ac="k", vmn=0, vmx=20, cmap="tab20b"):
+def plotConstraints2D(ax, C=None, H=None, ll=1, lw=4, scale=0.001, ac="k", vmn=0, vmx=20, cmap="tab20b"):
     
     if C is not None:
         if (H is None) or (H.value_loss != 0):

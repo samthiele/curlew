@@ -72,6 +72,5 @@ def batchEval( array, function, batch_size = 10000, vb=False, **kwargs):
             return torch.concatenate(results)
 
     else: # easy!
-        return function(batch_data, **kwargs)
-
+        return function(array, **kwargs)
 

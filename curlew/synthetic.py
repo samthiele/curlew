@@ -125,7 +125,12 @@ def steno( shape=(1500,1000), **kwargs ):
     xy = G.coords()
 
     s0 = strati('s0', C=QuadraticField( 'f0', input_dim=2, gradient= (0.00001,1), curve=(-0.00005,0), origin = (1000,500) ) )
-    M = GeoModel([s0], grid=G)
+
+    # add some isosurfaces
+    for y in np.linspace(0, shape[1], 5): # generate 5 contacts
+        s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
+    
+    M = GeoModel([s0], grid=G, name="steno")
 
     s = s0.predict(G)
     C = sample( s, pv='rgb', **kwargs )
@@ -161,7 +166,12 @@ def lehmann( shape=(1500,1000), **kwargs ):
 
     s0 = strati('s0', C=PeriodicField('f0', input_dim=2) ) # Folds
     
-    M = GeoModel([s0], grid=G )
+    M = GeoModel([s0], grid=G, name='lehmann' )
+
+    # add some isosurfaces
+    for y in np.linspace(0, shape[1], 5): # generate 5 contacts
+        s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
+    
     s = M.predict(G)
     C = sample(s, pv='rgb', **kwargs)
     
@@ -193,7 +203,13 @@ def hutton( shape=(1500,1000), **kwargs ):
     s0 = strati('s0', C=PeriodicField( 'f0', input_dim=2 ) ) # Folds
     s1 = strati('s1', C=QuadraticField( 'f1', input_dim=2, gradient=np.array([0.1,0.9]), origin=(1000,500), curve=(-0.00002,0) ), base=0) # uncorformity surface
 
-    M  = GeoModel( [s0,s1], grid=G )
+    # add some isosurfaces
+    for y in np.linspace(0, shape[1], 5): # generate 5 contacts
+        s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
+    for y in np.linspace(0, shape[1], 10): # generate 5 contacts
+        s1.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
+
+    M  = GeoModel( [s0,s1], grid=G, name='hutton' )
     s = M.predict(G)
     C = sample( s, pv='rgb', **kwargs )
     C=[C[1],C[0],C[2]]
@@ -231,7 +247,10 @@ def playfair( shape=(1500,1000), width=50, **kwargs ):
     s1 = sheet( 's1', 
            C=LinearField( 'f1', input_dim=2, origin = [1000,500], gradient=(0.5,0.5) ), contact=(-width,width) )
     
-    M = GeoModel( [s0, s1], grid=G )
+    for y in np.linspace(0, shape[1], 5): # generate 5 contacts
+        s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
+    
+    M = GeoModel( [s0, s1], grid=G, name='playfair' )
     s = M.predict(G)
     
     kwargs['pval'] = kwargs.get('pval', 1.0) # change default to sample all value constraints
@@ -272,7 +291,10 @@ def michell( shape=(1500,1000), offset=100, **kwargs ):
            C=LinearField( 'f1', input_dim=2, origin=(1000,500), gradient=(0.5,0.5)  ),
            offset=offset, sigma1 = [-1,0] )
 
-    M = GeoModel( [s0,s1], grid=G )
+    for y in np.linspace(0, shape[1], 5): # generate 5 contacts
+        s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
+
+    M = GeoModel( [s0,s1], grid=G, name='michell' )
     s = M.predict(G)
     C = sample( s, pv='rgb', **kwargs ) # sample unit and bedding constraints
     kwargs['pval'] = kwargs.get('pval', 1.0) # change default to sample all value constraints
@@ -323,7 +345,6 @@ def anderson( shape=(1500,1000), offset1=225, offset2=250, **kwargs ):
         Geomodel of the synthetic model
     """
     G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
-    xy = G.coords()
 
     s0 = strati('s0', C=QuadraticField( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500)  ) )
     s1 = fault( 's1', 
@@ -333,7 +354,10 @@ def anderson( shape=(1500,1000), offset1=225, offset2=250, **kwargs ):
            C=LinearField( 'f2', input_dim=2, origin=(1050,500), gradient=(-np.cos( np.deg2rad(35) ), np.sin( np.deg2rad(35) ))  ),
            offset=offset2, sigma1 = [0,-1] ) # extensional faults
     
-    M = GeoModel( [s0, s1, s2], grid=G )
+    for y in np.linspace(0, shape[1], 5): # generate 5 contacts
+        s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
+        
+    M = GeoModel( [s0, s1, s2], grid=G, name='anderson' )
     s = M.predict(G)
 
     C = sample( s, pv='rgb', **kwargs )

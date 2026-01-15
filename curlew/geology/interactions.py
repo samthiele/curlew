@@ -98,29 +98,29 @@ class OffsetBase(LearnableBase):
     Class from which all offset classess should inherit. 
     """
 
-    def eval( self, X, G ):
+    def eval( self, x, G ):
         """
         Get displacement vectors for points `X` based on GeoField `G`. This will be called by the GeoField and return the results of self.disp(...).
         """
-        o = self.disp( X, G )
-        G._lastDisp = o # store temporary results on field so these can be later added to the output
+        o = self.disp( x, G )
+        G._lastDisp[id(x)] = o # store temporary results on field so these can be later added to the output
         return o
     
     def learnable(self):
         """ Return true if this offset has learnable parameters (and an optimiser is initialised)."""
         return self.optim is not None
     
-    def dss( self, X, G, normalize=False ):
+    def dss( self, x, G, normalize=False ):
         """
         Evaluate the scalar field gradient (ds) and value (s)  for the points `X` given GeoField `G`. Note that 
-        this assumes `X` is already transformed into the local (paleo) coordinate system relevant for `G`.
+        this assumes `x` is already transformed into the local (paleo) coordinate system relevant for `G`.
         """
         # get gradient of scalar field at X and associated value
-        ds, s = G.gradient( X, normalize=normalize, return_vals=True, transform=False, to_numpy=False, retain_graph=self.learnable() )
+        ds, s = G.gradient( x, normalize=normalize, return_vals=True, transform=False, to_numpy=False, retain_graph=True )
         s = s.scalar
 
         # store temporary results on field so these can be later added to the output
-        G._lastScalar = s
+        G._lastScalar[id(x)] = s
 
         # return gradient
         return ds, s
