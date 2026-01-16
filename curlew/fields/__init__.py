@@ -24,7 +24,7 @@ class BaseSF(LearnableBase):
     Values between 0 and np.inf will be treated differently by different field types. Default is np.inf.
     """
 
-    
+
     def __init__(self, name : str = None, 
                        input_dim: int = 3,
                        output_dim: int = 1,
@@ -141,7 +141,9 @@ class BaseSF(LearnableBase):
             out = out + self.drift(x, transform=False)
 
         # evaluate field
-        if self.level > 0: # can be set to 0 to evaluate only the drift! Some types of field will also use self.level to controll the detail of reconstruction.
+        # N.B. `self.level` can be set to 0 to evaluate only the drift! Some types of field will also use self.level to controll the detail of reconstruction.
+        # N.B.B. Analytical fields will always be evaluated, even at level 0, as these are not interpolations.
+        if (self.level > 0) or isinstance(self, BaseAF):
             out = self.evaluate(x) + out
             if len(out.shape) == 1:
                 out = out[:, None] # add extra dimension if needed (for consistency)
