@@ -15,12 +15,22 @@ class BaseSF(LearnableBase):
     """
     Base class for all implicit (scalar) fields, including interpolated, learned or analytical fields.
     """
+    
+    level = np.inf
+    """
+    The level of reconstruction to apply when evaluating this field. If "0" then only the drift/trend is returned. 
+    If "inf" then the highest level of detail is returned. 
+    
+    Values between 0 and np.inf will be treated differently by different field types. Default is np.inf.
+    """
 
-    def __init__(self, name : str, 
+    
+    def __init__(self, name : str = None, 
                        input_dim: int = 3,
                        output_dim: int = 1,
                        C: CSet = None,
                        H: HSet = None,
+                       drift = 0,
                        transform = None,
                        seed : int = 42, **kwargs ):
         """
@@ -29,7 +39,8 @@ class BaseSF(LearnableBase):
         Parameters
         ----------
         name : str
-            A (ideally unique) name for this neural field. Should typically match the name of the GeoField instance that uses this field.
+            A (ideally unique) name for this neural field. Should typically match the name of the GeoField instance that uses this field. Defaults
+            to the name of this class.
         input_dim : int, optional
             The dimensionality of the input space (e.g., 3 for (x, y, z)).
         output_dim : int, optional
@@ -38,6 +49,10 @@ class BaseSF(LearnableBase):
             Constraint sent used for learned or interpolated fields. Default is None.
         H : HSet
             Hyperparameters used to tune the loss function for this NF. Default is None.
+        drift : int | float | BaseSF
+            A constant integer or float (to use a constant value as the drift), or another BaseSF instance (e.g., an AnalyticalField) that
+            defines the trend/drift of this field. This trend/drift will be evaluated at each input coordinate and added to the output of the 
+            field during the forward call, meaning learnable fields (interpolators) learn a residual relative to this drift. Default is 0 (no drift).
         transform : callable
             A function that transforms input coordinates prior to evaulation. Must take exactly one argument as input (a tensor of positions) and return the transformed positions. 
         seed : callable, optional
@@ -51,6 +66,8 @@ class BaseSF(LearnableBase):
         """
         super().__init__()
         self.name = name
+        if self.name is None:
+            self.name = str(type(self).__name__) # default name is the name of the field type
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.transform = transform
@@ -62,6 +79,7 @@ class BaseSF(LearnableBase):
         if C is not None:
             self.bind(C)
         
+        self.drift = drift # can be a constant or another field; evaluated during forward pass
         self.mnorm = 0 # cache the average field gradient (can be useful for quick/rough normalisation)
         self.nnorm = 0 # number of evaluations used to compute average gradient
         self.initField( **kwargs ) # call child class init to build the network
@@ -103,7 +121,7 @@ class BaseSF(LearnableBase):
             A tensor of shape (N, input_dim), where N is the batch size.
         transform : bool
             If True (default), any defined transform function is applied before encoding and evaluating the field for `x`.
-
+            
         Returns
         -------
         torch.Tensor
@@ -115,11 +133,18 @@ class BaseSF(LearnableBase):
 
         # TODO - apply global anisotropy transform matrix?
 
-        # evaluate
-        out = self.evaluate(x)
-        if len(out.shape) == 1:
-            out = out[:, None] # add extra dimension if needed (for consistency)
-        
+        # evaluate drift
+        out = 0
+        if isinstance(self.drift, (int, float)):
+            out = out + self.drift
+        elif isinstance(self.drift, BaseSF):
+            out = out + self.drift(x, transform=False)
+
+        # evaluate field
+        if self.level > 0: # can be set to 0 to evaluate only the drift! Some types of field will also use self.level to controll the detail of reconstruction.
+            out = self.evaluate(x) + out
+            if len(out.shape) == 1:
+                out = out[:, None] # add extra dimension if needed (for consistency)
         return out
     
     def bind( self, C ):
