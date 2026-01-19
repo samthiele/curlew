@@ -150,7 +150,7 @@ class NFF(BaseNF):
             x = self._encode_rff(x)
 
         # Pass through all layers and return
-        out = self.mlp( x )
+        out = self.scale * self.mlp( x )
 
         return out
 

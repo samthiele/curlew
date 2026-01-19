@@ -311,6 +311,7 @@ class BaseNF(BaseSF):
             transform = None,
             seed = 42,
             vloss = nn.MSELoss(),
+            scale = 1e2,
             **kwargs
         ):
             """
@@ -332,7 +333,14 @@ class BaseNF(BaseSF):
                 The random seed to use for any random operations.
             vloss : callable, optional
                 The loss function to use for value fitting. Default is mean squared error (`nn.MSELoss()`).
-            
+            scale : float, optional
+                A scaling factor to apply to outputs of the neural field, as often these struggle to learn functions with a large (>1) amplitude. Default is 1e2. 
+                
+                This value should be approximately equal to the expected range (max - min) of the scalar field that is being learned. It can be especially important when using a 
+                drift (trend), as it determines the extent to which the model initialisation is determined by the drift. Larger values should allow the model to deviate farther from the trend.
+                Also note that this term also tends to control the magnitude of residuals (to value or (in)equality constraints), so will also interact with the learning rate.
+                
+                N.B. The actual implementation of this scale depends on the neural field method being used.
 
             Keywords
             ---------
@@ -345,6 +353,7 @@ class BaseNF(BaseSF):
             # store neural field specific properties
             self.closs = torch.nn.CosineSimilarity() # needed by some loss functions
             self.vloss = vloss # loss function to use for value fitting
+            self.scale = scale
 
     ## LEARNING
     def loss(self, transform=True) -> torch.Tensor:
