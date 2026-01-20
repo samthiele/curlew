@@ -7,6 +7,8 @@ facilitating interactions with the underlying linked-list of GeoField instances
 from curlew.geology.geofield import GeoField, Geode, apply_child_undeform
 from curlew.utils import batchEval
 from curlew.geology.interactions import FaultOffset
+from curlew.core import Transform
+from curlew.geometry import Grid
 
 import numpy as np
 import torch
@@ -35,7 +37,7 @@ class GeoModel(object):
     (that represent each geological structure in the model).
     """
 
-    def __init__( self, fields : list, lr=0.01, grid=None, name=None ):
+    def __init__( self, fields : list, transform=None, grid=None, name=None):
         """
         Construct a GeoModel from a list of GeoFields.
 
@@ -45,9 +47,10 @@ class GeoModel(object):
             A list of GeoField instances representing geological events, from oldest to youngest. This list 
             can include domain boundaries if needed, but non-domain fields (e.g., faults, stratigraphy, etc.)
             should not be older than these.
-        lr : float | optional 
-            The learning rate to use for any optimised parameters outside of the neural fields. This
-            includes e.g., fault offsets.
+        transform : `curlew.core.Transform`
+            A Transform object defining the transform from global coordinates to model coordinates. This will be applied
+            to all `x` when `self.predict(x)` is called, and can handle e.g., converting UTM to some model coordinate system.
+            Defaults to an identity matrix (no transform).
         grid : curlew.geometry.Grid | optional
             An optional grid to associate with this GeoModel instance. This will set the `M.grid` variable but is not
             necessary (i.e. can be `null`; which is the default).
@@ -81,6 +84,12 @@ class GeoModel(object):
         self.fields = self.fields[::-1] # we want the youngest field last, so reverse the list
         self.lastEvent = self.fields[-1] # change to evaluate model in some paleo-space
         self.eidLookup = { f.eid : f for f in self.fields } # create a lookup table for translating event IDs to GeoField instances
+
+        # coordinate systems
+        if transform is None:
+            self.T = Transform(self.fields[0].field.input_dim) # thunk -- leave this as None and skip compute? (slightly faster)
+        else:
+            self.T = transform
 
         # store "nice-to-have" extras
         self.grid = grid
@@ -267,7 +276,7 @@ class GeoModel(object):
         # return
         return loss.item(), out
 
-    def predict(self, x : np.ndarray, **kwargs):
+    def predict(self, x : np.ndarray, coords="global", **kwargs):
         """
         Create model predictions at the specified points.
 
@@ -276,7 +285,11 @@ class GeoModel(object):
         x : np.ndarray | torch.tensor | curlew.geometry.Grid
             An array of shape (N, input_dim) containing the coordinates at which to evaluate
             this GeoModel.
-
+        coords : str
+            Specify which coordinate system `x` is in. If `coords == "global"` (default), then any defined
+            model transform will be applied (to derive model coordinates). If `coords=="model"` then this
+            transform will not be applied.
+        
         Keywords
         --------
         All keywords are passed directly to `GeoField.predict()`.
@@ -302,12 +315,26 @@ class GeoModel(object):
                     self.llookup[k] = n # assign ID for this lithology
                     n = n + 1 # increment ID
             F.llookup = self.llookup # link lookup to field so it is used during predict(...).
+        
+        grid = None
+        if isinstance(x, Grid):
+            grid = x
+            x = grid.coords()
+
+        # apply transform to x
+        if "global" in coords.lower():
+            x = self.T(x) # transform from world to model coordinates
 
         # generate predictions
         kwargs['to_numpy'] = kwargs.get('to_numpy', False)
         kwargs['combine'] = True # this is necessary....
         out = self.fields[-1].predict( x, **kwargs) # automatically recursed back throught the linked list.
         
+        out.grid = grid
+        if "global" in coords.lower():
+            out.x = x # replace with global coords
+            out.crs = "global"
+         
         # return
         return out.numpy()
 

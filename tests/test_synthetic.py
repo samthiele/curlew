@@ -25,6 +25,7 @@ def test_synthetic():
     dims = (2001,1001)  # dimensions used for each of our 2D models
     for f in [steno, hutton, michell, playfair, anderson, lehmann]: # suess
         C, M = f(dims) # create the synthetic "hutton" dataset
+        print(M.name)
         xy = M.grid.coords() # get associated grid points
         g = M.predict(xy) # evaluate model
         assert len(np.unique(g.lithoID)) > 1 # check we have more than one lithology
@@ -46,6 +47,7 @@ def test_synthetic():
         # check the evaluated scalar values match 
         for sid,n in g.structureLookup.items():
             mask = (g.structureID == sid)
+            #print(n, mask.shape, g.scalar.shape, g.fields[n].shape)
             assert np.percentile( np.abs( g.scalar[mask] - g.fields[n][mask] ), 99) < 1e-6 # almost all values should match
 
         # check stackValues function

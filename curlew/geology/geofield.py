@@ -33,8 +33,8 @@ class Geode( object ):
     Attributes:
         x (torch.tensor or np.ndarray): (N,o) array of value constraint positions (in modern-day coordinates).
         grid (curlew.geometry.Grid): A `curlew.geometry.Grid` class if points (`x`) were sampled from a regular grid.
-        time (str) : A string denoting the temporal coordinate reference used for `x`. Will be `'modern'` if
-                            a final result (in modern coordinates), or the name of a specific `GeoField` if result is in paleocoordinates.
+        crs (str) : A string denoting the coordinate reference used for `x`. Will be `'modern'` if
+                    a final result (in modern coordinates), or the name of a specific `GeoField` if result is in field coordinates.
         lithoID (torch.tensor or np.ndarray): (N,) array of lithology classes defined by isosurfaces described in the relevant `GeoField` instance(s).
         lithoLookup (dict): A dictionary where keys are lithoID integers and values are the name of the associated isosurfaces.
         structureID (torch.tensor or np.ndarray): (N,) array of structure IDs denoting the index of the `GeoField` responsible for each lithology / value
@@ -50,7 +50,7 @@ class Geode( object ):
     # local constraints
     x : torch.tensor = None # array of the positions at which points were evaluated
     grid : Grid = None # grid of points at which model was evaluated
-    time : str = None # temporal coordinate system (modern or paleo) associated to these points
+    crs : str = None # temporal coordinate system (modern or paleo) associated to these points
 
     lithoID : torch.tensor = None
     lithoLookup : dict = field(default_factory=dict)
@@ -104,7 +104,7 @@ class Geode( object ):
         iweight = 1-weight
 
         # combine basic attributes
-        args = dict(x=younger.x, grid=younger.grid, time=younger.time, # always take these from the younger object
+        args = dict(x=younger.x, grid=younger.grid, crs=younger.crs, # always take these from the younger object
                     lithoLookup={**self.lithoLookup, **younger.lithoLookup},
                     structureLookup={**self.structureLookup, **younger.structureLookup},
                     fields={**self.fields, **younger.fields},
@@ -573,11 +573,11 @@ class GeoField( object ):
 
             # which (temporal) reference was used for these results
             if transform:
-                time='modern'
+                crs="model" # model coordinates
             else:
-                time=self.name
+                crs=self.name # field coordinates
 
-            out = Geode(x=x, grid=grid, time=time, 
+            out = Geode(x=x, grid=grid, crs=crs, 
                         lithoID=lithoID, lithoLookup=lithoLookup,
                         scalar=scalar, gradient=grad, structureID=structureID, structureLookup=structureLookup,
                         property=property, propertyNames=propertyNames, 

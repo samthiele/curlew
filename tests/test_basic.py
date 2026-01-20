@@ -46,7 +46,120 @@ def test_basic():
         C0 = C.filter( f )
         for a0,a1 in zip([C0.vp, C0.gp, C0.iq[1][i][0], C0.iq[1][i][1]], [C.vp, C.gp, C.iq[1][i][0], C.iq[1][i][1]]):
             assert len(a1) - len(a0) == 1
-            
+
+def test_transform():
+    from curlew.core import Transform
+    import numpy as np
+    import torch
+
+    # check initialisation with identity matrix
+    T_id_np = Transform(2)
+    pts2_np = np.array([
+        [0.0, 0.0],
+        [1.0, 2.0],
+        [3.0, 4.0],
+    ])
+    assert np.allclose(pts2_np, T_id_np(pts2_np)) # should be no change!
+
+    T_id_np = Transform(3)
+    pts3_np = np.array([
+        [1.0, 1.0, 1.0],
+        [2.0, 3.0, 4.0],
+    ])
+    assert np.allclose(pts3_np, T_id_np(pts3_np)) # should be no change!
+    assert np.allclose(pts3_np, T_id_np.inverse()(T_id_np(pts3_np)))
+
+    # -------------------------------------------------
+    # NumPy 2D – translation
+    # -------------------------------------------------
+    T2_np = Transform(
+        np.array([
+            [1.0, 0.0, 10.0],
+            [0.0, 1.0,  5.0],
+            [0.0, 0.0,  1.0],
+        ])
+    )
+
+    pts2_np = np.array([
+        [0.0, 0.0],
+        [1.0, 2.0],
+        [3.0, 4.0],
+    ])
+
+    expected2_np = np.array([
+        [10.0,  5.0],
+        [11.0,  7.0],
+        [13.0,  9.0],
+    ])
+
+    out2_np = T2_np(pts2_np)
+    assert np.allclose(out2_np, expected2_np)
+    assert np.allclose(pts2_np, T2_np.inverse()(out2_np))
+
+    # -------------------------------------------------
+    # NumPy 3D – scaling
+    # -------------------------------------------------
+    T3_np = Transform(
+        np.array([
+            [2.0, 0.0, 0.0, 0.0],
+            [0.0, 3.0, 0.0, 0.0],
+            [0.0, 0.0, 4.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+    )
+    pts3_np = np.array([
+        [1.0, 1.0, 1.0],
+        [2.0, 3.0, 4.0],
+    ])
+    expected3_np = np.array([
+        [2.0,  3.0,  4.0],
+        [4.0,  9.0, 16.0],
+    ])
+    out3_np = T3_np.apply(pts3_np)
+    assert np.allclose(out3_np, expected3_np)
+    assert np.allclose(pts3_np, T3_np.inverse()(out3_np))
+
+    # Torch 2D – translation
+    T2_t = Transform(
+        torch.tensor([
+            [1.0, 0.0, 2.0],
+            [0.0, 1.0, 3.0],
+            [0.0, 0.0, 1.0],
+        ])
+    )
+    pts2_t = torch.tensor([
+        [1.0, 1.0],
+        [2.0, 2.0],
+    ])
+    expected2_t = torch.tensor([
+        [3.0, 4.0],
+        [4.0, 5.0],
+    ])
+    out2_t = T2_t(pts2_t)
+    assert torch.allclose(out2_t, expected2_t)
+    assert np.allclose(pts2_t, T2_t.inverse()(out2_t))
+
+    # Torch 3D – translation
+    T3_t = Transform(
+        torch.tensor([
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 2.0],
+            [0.0, 0.0, 1.0, 3.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+    )
+    pts3_t = torch.tensor([
+        [0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0],
+    ])
+    expected3_t = torch.tensor([
+        [1.0, 2.0, 3.0],
+        [2.0, 3.0, 4.0],
+    ])
+    out3_t = T3_t.apply(pts3_t)
+    assert torch.allclose(out3_t, expected3_t)
+    assert np.allclose(pts3_t, T3_t.inverse()(out3_t))
+
 def test_geometry():
     from curlew.geometry import grid, section, _extrude_array
 

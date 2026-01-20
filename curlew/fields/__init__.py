@@ -3,7 +3,7 @@ Import core neural field types from other python files, and define the "base" NF
 """
 
 import curlew
-from curlew.core import CSet, HSet, LearnableBase
+from curlew.core import CSet, HSet, LearnableBase, Transform
 import numpy as np
 import torch
 import torch.nn as nn
@@ -24,7 +24,6 @@ class BaseSF(LearnableBase):
     Values between 0 and np.inf will be treated differently by different field types. Default is np.inf.
     """
 
-
     def __init__(self, name : str = None, 
                        input_dim: int = 3,
                        output_dim: int = 1,
@@ -32,6 +31,7 @@ class BaseSF(LearnableBase):
                        H: HSet = None,
                        drift = 0,
                        transform = None,
+                       local = None,
                        seed : int = 42, **kwargs ):
         """
         Initialise a new scalar field.
@@ -55,6 +55,10 @@ class BaseSF(LearnableBase):
             field during the forward call, meaning learnable fields (interpolators) learn a residual relative to this drift. Default is 0 (no drift).
         transform : callable
             A function that transforms input coordinates prior to evaulation. Must take exactly one argument as input (a tensor of positions) and return the transformed positions. 
+        local : `curlew.core.Transform`, optional
+            A Transform object defining the transform from (possibly undeformed) field coordinates to the local coordinates passed into the neural or analytical field
+            representing this scalar field. This will be applied during the forward call, and can be used to e.g., implement global anisotropy, or tweak the 
+            represented structures by adding a constant offset or rotation. Defaults to an identity matrix (no transform).
         seed : callable, optional
             A random seed to (optinally) use for any random operations, if child classess wish.
 
@@ -82,6 +86,12 @@ class BaseSF(LearnableBase):
         self.drift = drift # can be a constant or another field; evaluated during forward pass
         self.mnorm = 0 # cache the average field gradient (can be useful for quick/rough normalisation)
         self.nnorm = 0 # number of evaluations used to compute average gradient
+
+        if local is None:
+            self.T = Transform(input_dim)
+        else:
+            self.T = local
+
         self.initField( **kwargs ) # call child class init to build the network
     
     def initField(self, **kwargs):
@@ -121,6 +131,9 @@ class BaseSF(LearnableBase):
             A tensor of shape (N, input_dim), where N is the batch size.
         transform : bool
             If True (default), any defined transform function is applied before encoding and evaluating the field for `x`.
+            `x` should thus be expressed in model coordinates that will first be reconstructed into field coordinates using
+            the defined transform function. Note that this should not be confused with the `curlew.core.Transform` object (`self.T`)
+            used to then convert field coordinates to local coordinates.
             
         Returns
         -------
@@ -131,7 +144,7 @@ class BaseSF(LearnableBase):
         if transform and self.transform is not None:
             x = self.transform(x)
 
-        # TODO - apply global anisotropy transform matrix?
+        x = self.T(x) # apply local transform to achieve e.g., global anisotropy
 
         # evaluate drift
         out = 0
