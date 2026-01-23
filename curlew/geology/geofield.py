@@ -41,8 +41,8 @@ class Geode( object ):
                                                   in the model result.
         structureLookup (dict): A dictionary where keys are structureIDs and values give the name of the corresponding `GeoField`.
         scalar (torch.tensor or np.ndarray): (N,) array of the scalar values evaluated at each `x`.
-        property (torch.tensor or np.ndarray): (N,d) array of property values derived at each `x`.
-        propertyNames (list): List of `d` property names corresponding to each dimension of `self.property`.
+        properties (torch.tensor or np.ndarray): (N,d) array of property values derived at each `x`.
+        propertyNames (list): List of `d` property names corresponding to each dimension of `self.properties`.
         fields (dict): Dict containing the individual scalar fields evaluated at each `x` for each `GeoField` instance in the model.
         offsets (dict): Dict containing the individual displacement fields evaluated at each `x` for each `GeoField` instance in the model.
     """
@@ -60,14 +60,14 @@ class Geode( object ):
 
     scalar : torch.tensor = None # scalar field values
     gradient : torch.tensor = None # gradient field values (often left as None)
-    property : torch.tensor = None # forward (property) predictions
+    properties : torch.tensor = None # forward (property) predictions
     propertyNames : list = field(default_factory=list)
 
     fields : dict = field(default_factory=dict) # individual scalar fields (Keyed by GeoField name)
     offsets : dict = field(default_factory=dict) # individual displacement fields (Keyed by GeoField name)
 
     @classmethod
-    def concat(cls, geodes ):
+    def concat(cls, geodes):
         """
         Concatenate an ordered list of Geodes. Used when e.g., evaluating large models in chunks.
         """
@@ -122,14 +122,13 @@ class Geode( object ):
                 args['gradient'] = younger.gradient*weight[:,None] + args['gradient']*iweight[:,None]
 
         # combine property predictions (if not None)
-        if self.property is not None:
+        if self.properties is not None:
             args['propertyNames'] = self.propertyNames
-            args['property'] = self.property.copy() # default to the older property values
-            if younger.property is not None: # overprint with younger values if defined
-                args['property'] = younger.property*weight + args['property']*iweight
-        elif younger.property is not None:
-            args['propertyNames'] = younger.propertyNames
-            args['property'] = younger.property*weight
+            assert np.all(np.array(self.propertyNames) == np.array(younger.propertyNames)),\
+                f'Property names for {list(self.fields.keys())[0]} do not match {list(younger.fields.keys())[0]}.'
+            assert younger.properties is not None,\
+                f"Properties must be defined for all generative fields. {list(younger.fields.keys())[0]} is missing."
+            args['properties'] = younger.properties*weight[:,None] + self.properties*iweight[:,None]
         
         # combine scalar values, structure IDs and lithoIDs (if defined)
         args['scalar'] = younger.scalar*weight + self.scalar*iweight
@@ -139,7 +138,7 @@ class Geode( object ):
         
         return Geode(**args)
     
-    def stackValues( self, mn=0, mx=1):
+    def stackValues(self, mn=0, mx=1):
         """
         Scale scalar values so that they vary between mn and mx for each structural field, and then add offsets 
         so that there are no overlaps between structures. This can be useful for e.g., plotting or isosurface 
@@ -238,9 +237,9 @@ class Geode( object ):
             if a is not None:
                 attrs.append(a)
                 attr_names.append(n)
-        if R.property is not None:
+        if R.properties is not None:
             attr_names += R.propertyNames
-            attrs += R.property
+            attrs += R.properties
         attrs = np.vstack( attrs )
         savePLY( path, xyz=R.x, attr=attrs, names=attr_names )
 
@@ -261,7 +260,7 @@ class GeoField( object ):
                  type : BaseNF, 
                  deformation : OffsetBase = None, 
                  overprint : Overprint = None, 
-                 property=None,
+                 propertyField=None,
                  eid=-1,
                  **kwargs ):
         """
@@ -278,9 +277,9 @@ class GeoField( object ):
             returns an array X0 of shape (N,ndim) that represents the pre-deformation coordinates of X1.
         overprint : curlew.interactions.Overprint, None
             A function that combines the results of this GeologicalField with previous ones.
-        property : curlew.geology.forward.ForwardModelBase, None
+        propertyField : curlew.geology.property.PropertyModelBase, None
             A custom forward function that translates the implicit scalar field values into estimates of some measured
-            property (e.g., density, mineralogy, etc.). See `curlew.geology.forward` for details, including implementations
+            property (e.g., density, mineralogy, etc.). See `curlew.geology.property` for details, including implementations
             of constant and learnable forward models. If None, property predictions will not be computed.
         eid : int
             A unique integer denoting the ID of this GeoField (and the associated geological event). If -1 (default), this will 
@@ -301,7 +300,7 @@ class GeoField( object ):
         # to (in combination) determine how this geological field interacts with others
         self.deformation = deformation # deformation function, if defined
         self.overprint = overprint # overprint function, if defined
-        self.property = property # forward (property) prediction, if defined
+        self.propertyField = propertyField # forward (property) prediction, if defined
 
         self.isosurfaces = {} # this will hold any added isosurfaces
         self.llookup = None # this will be defined if lithology IDs have been defined
@@ -401,7 +400,7 @@ class GeoField( object ):
         # fit
         try:
             out = self.field.fit(epochs, C=C0, transform=False, 
-                                 opt=[self.deformation, self.overprint, self.property], # include possibly learnable elements in these
+                                 opt=[self.deformation, self.overprint, self.propertyField], # include possibly learnable elements in these
                                  **kwargs)
         finally:
             if C0.grid is not None:
@@ -443,7 +442,7 @@ class GeoField( object ):
             self.field.transform = None # don't do any transform in field.forward
 
         # evaluate the underlying field
-        return self.field.forward( x )
+        return self.field.forward(x)
 
     def predict(self, x: np.ndarray, combine=False, to_numpy=True, transform=True, values=None, 
                       litho : bool = True, gradient : bool = False) -> np.ndarray:
@@ -535,20 +534,13 @@ class GeoField( object ):
             if scalar.ndim==0: # if only evaluating one location, ensure result is a vector
                 scalar = torch.tensor([scalar.detach()], dtype=curlew.dtype, device=curlew.device)
             structureID = torch.full( (len(scalar),), self.eid, device=curlew.device, dtype=torch.int)
-            structureLookup = {self.eid : self.name }
+            structureLookup = {self.eid : self.name}
 
             # evaluate gradient at the chosen positions
             grad = None
             if gradient:
                 grad = self.gradient( x, # needs to be copied to avoid multiple passes through gradient tree
                                      return_vals=False, normalize=True, to_numpy=False, transform=transform, retain_graph=True )
-                
-            # evaluate property (prediction) field if defined
-            property=None
-            propertyNames=[]
-            if self.property is not None:
-                # TODO -- apply property model if defined
-                pass
             
             # determine lithology IDs based on isosurfaces (if defined)
             lid = 0
@@ -562,7 +554,7 @@ class GeoField( object ):
                     keys = np.array(list(isosurfaces.keys()))
                     values = np.array(list(isosurfaces.values()))
                     ixx = np.argsort(values) # sort these to ensure isosurfaces are applied from smallest to largest
-                    for i,(k,v) in enumerate(zip( keys[ixx], values[ixx])):
+                    for i,(k,v) in enumerate(zip(keys[ixx], values[ixx])):
                         k = f"{self.name}_{k}" # include field name in k to help ensure it is unique!
                         mask = scalar >= v # isosurface is formation top
                         if self.llookup is not None:
@@ -579,9 +571,13 @@ class GeoField( object ):
 
             out = Geode(x=x, grid=grid, crs=crs, 
                         lithoID=lithoID, lithoLookup=lithoLookup,
-                        scalar=scalar, gradient=grad, structureID=structureID, structureLookup=structureLookup,
-                        property=property, propertyNames=propertyNames, 
+                        scalar=scalar, gradient=grad,
+                        structureID=structureID, structureLookup=structureLookup,
                         fields={self.name : scalar}, offsets={})
+
+            # evaluate property (prediction) field if defined
+            if self.propertyField is not None:
+                out = self.propertyField.predict(geode=out) # Takes in a Geode and returns updated Geode
 
         # check if this field has a defined displacement field (e.g., dyke opening vectors or fault offsets)
         if id(x) in self._lastDisp:
@@ -663,44 +659,6 @@ class GeoField( object ):
         else:
             # return gradient array only
             return grad_out
-
-    # N.B. THE FOLLOWING FUNCTION IS NOT STRICTLY CORRECT AND ONLY WORKS FOR COMLETELY LINEAR FIELDS
-    # def deform(self, x: torch.Tensor) -> torch.Tensor:
-    #     """
-    #     Apply deformation (displacements) to the passed set of coordinates.
-
-    #     Translates from paleo-coordinates (i.e. coordinates at the time of this event) to present-day coordinates, 
-    #     for example, by applying child fault offsets.
-
-    #     Parameters
-    #     ----------
-    #     x : torch.Tensor, np.ndarray
-    #         A tensor of shape (N, input_dim).
-
-    #     Returns
-    #     -------
-    #     torch.Tensor
-    #         A tensor of shape (N, input_dim), containing the deformed coordinates.
-    #     """
-    #     tonp = False
-    #     if isinstance( x, np.ndarray ):
-    #         x = torch.tensor( x, device=curlew.device, dtype=curlew.dtype)
-    #         tonp = True
-
-    #     # apply any child deformation(s)
-    #     if self.child is not None:
-    #         x = self.child.deform( x )
-
-    #     # handle our own displacement
-    #     out = x
-    #     if self._displace is not None:
-    #         out = self._displace(x, inverse=True) # apply this GeologicalField's displacement (if defined).
-
-    #     # cast to numpy if needed
-    #     if tonp:
-    #         return out.cpu().detach().numpy()
-    #     else:
-    #         return out
 
     def undeform(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -963,7 +921,7 @@ class GeoField( object ):
         if (isinstance(self.field, int) or isinstance(self.field, float)): return torch.tensor(0.0, device=curlew.device), {}
 
         loss, details = self.field.loss() 
-        for o in [self.property, self.deformation, self.overprint]:
+        for o in [self.propertyField, self.deformation, self.overprint]:
             if o is not None: 
                 ll, dets = o.loss()
                 loss = loss + ll
@@ -975,7 +933,7 @@ class GeoField( object ):
         Zero optimiser associated with the underlying field and learnable property, deformation or overprint objects. 
         """
         if not (isinstance(self.field, int) or isinstance(self.field, float)): self.field.zero()
-        if self.property is not None: self.property.zero()
+        if self.propertyField is not None: self.propertyField.zero()
         if self.deformation is not None: self.deformation.zero()
         if self.overprint is not None: self.overprint.zero()
 
@@ -984,7 +942,7 @@ class GeoField( object ):
         Step optimiser associated with the underlying field and learnable property, deformation or overprint objects. 
         """
         if not (isinstance(self.field, int) or isinstance(self.field, float)): self.field.step()
-        if self.property is not None: self.property.step()
+        if self.propertyField is not None: self.propertyField.step()
         if self.deformation is not None: self.deformation.step()
         if self.overprint is not None: self.overprint.step()
     
@@ -992,6 +950,44 @@ class GeoField( object ):
         """
         Set the learning rate for the underlying field and learnable property, deformation or overprint objects.
         """
-        for o in [self.field, self.property, self.deformation, self.overprint]:
+        for o in [self.field, self.propertyField, self.deformation, self.overprint]:
             if (o is not None) and (not(isinstance(self.field, int) or isinstance(self.field, float))) and (o.optim is not None):
                 o.set_rate(lr=lr)
+
+    # N.B. THE FOLLOWING FUNCTION IS NOT STRICTLY CORRECT AND ONLY WORKS FOR COMLETELY LINEAR FIELDS
+    # def deform(self, x: torch.Tensor) -> torch.Tensor:
+    #     """
+    #     Apply deformation (displacements) to the passed set of coordinates.
+
+    #     Translates from paleo-coordinates (i.e. coordinates at the time of this event) to present-day coordinates, 
+    #     for example, by applying child fault offsets.
+
+    #     Parameters
+    #     ----------
+    #     x : torch.Tensor, np.ndarray
+    #         A tensor of shape (N, input_dim).
+
+    #     Returns
+    #     -------
+    #     torch.Tensor
+    #         A tensor of shape (N, input_dim), containing the deformed coordinates.
+    #     """
+    #     tonp = False
+    #     if isinstance( x, np.ndarray ):
+    #         x = torch.tensor( x, device=curlew.device, dtype=curlew.dtype)
+    #         tonp = True
+
+    #     # apply any child deformation(s)
+    #     if self.child is not None:
+    #         x = self.child.deform( x )
+
+    #     # handle our own displacement
+    #     out = x
+    #     if self._displace is not None:
+    #         out = self._displace(x, inverse=True) # apply this GeologicalField's displacement (if defined).
+
+    #     # cast to numpy if needed
+    #     if tonp:
+    #         return out.cpu().detach().numpy()
+    #     else:
+    #         return out

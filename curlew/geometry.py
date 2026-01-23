@@ -219,6 +219,7 @@ class Grid(object):
         self.matrix = np.eye(self.ndim+1)
         if center is not None: # define grid origin
             self.matrix[:self.ndim, self.ndim] = np.array(center)
+            self.tformed_axes = [self.axes[i] + center[i] for i in range(len(center))]
         if rotation is not None: # define grid rotation matrix
             self.matrix[:self.ndim, :self.ndim] = rotation
         self.center = self.matrix[:self.ndim, self.ndim] # store for convenience
@@ -238,7 +239,7 @@ class Grid(object):
         coords = np.meshgrid(*self.axes, indexing='ij')
         grid = np.array([c.T for c in coords[::-1]]).T
         grid = grid[...,::-1]
-        points = grid.reshape((-1, self.ndim) )
+        points = grid.reshape((-1, self.ndim))
 
         # apply transform matrix
         if transform:

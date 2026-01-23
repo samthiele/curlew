@@ -59,7 +59,7 @@ class GeoModel(object):
         """
         # set parent and child properties of underlying GeoFields
         # (i.e. build our linked list / binary tree of GeoFields)
-        _linkF( fields)
+        _linkF(fields)
 
         # traverse back down linked list / tree and define IDs
         def traverse( node, i = 1):
@@ -121,8 +121,8 @@ class GeoModel(object):
             f.field.frozen = geometry # freeze geometry?
             if f.deformation is not None: # freeze potentially learnable properties?
                 f.deformation.frozen = params
-            if f.property is not None: # freeze potentially learnable properties?
-                f.property.frozen = params
+            if f.propertyField is not None: # freeze potentially learnable properties?
+                f.propertyField.frozen = params
             if f.overprint is not None: # freeze potentially learnable properties?
                 f.overprint.frozen = params
 
@@ -175,10 +175,10 @@ class GeoModel(object):
         for f in self.fields:
             f.step()
 
-    def fit(self, epochs, learning_rate=None, early_stop=(100,1e-4), best=True, vb=True, prefix='Training'):
+    def fit(self, epochs, learning_rate=None, early_stop=(100, 1e-4), best=True, vb=True, prefix='Training'):
         """
         Train all GeoFields in this model to fit the specified constraints
-        simeltaneously.
+        simultaneously.
 
         Parameters
         ----------
@@ -326,9 +326,9 @@ class GeoModel(object):
             x = self.T(x) # transform from world to model coordinates
 
         # generate predictions
-        kwargs['to_numpy'] = kwargs.get('to_numpy', False)
+        kwargs['to_numpy'] = kwargs.get('to_numpy', True)
         kwargs['combine'] = True # this is necessary....
-        out = self.fields[-1].predict( x, **kwargs) # automatically recursed back throught the linked list.
+        out = self.fields[-1].predict(x, **kwargs) # automatically recursed back throught the linked list.
         
         out.grid = grid
         if "global" in coords.lower():
@@ -336,7 +336,7 @@ class GeoModel(object):
             out.crs = "global"
          
         # return
-        return out.numpy()
+        return out
 
     def drill( self, start, end, step ):
         """
