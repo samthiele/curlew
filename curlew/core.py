@@ -12,8 +12,6 @@ from typing import Union
 import torch.optim as optim
 import torch.nn as nn
 
-ArrayLike = Union[np.ndarray, "torch.Tensor"]
-
 class LearnableBase(nn.Module):
     """
     Base class for all learnable curlew objects.
@@ -370,118 +368,226 @@ class HSet:
                     setattr(self, k, kwargs.get(k, 0 ) )
         return self
     
-@dataclass(frozen=False)
-class Transform:
+@dataclass
+class Geode( object ):
     """
-    Homogeneous transform supporting:
-      - 3x3 matrices for 2D points
-      - 4x4 matrices for 3D points
+    An "egg-like" class containing all the juicy outputs of a curlew model.
+
+    Attributes:
+        x (torch.tensor or np.ndarray): (N,o) array of value constraint positions (in modern-day coordinates).
+        grid (curlew.geometry.Grid): A `curlew.geometry.Grid` class if points (`x`) were sampled from a regular grid.
+        crs (str) : A string denoting the coordinate reference used for `x`. Will be `'modern'` if
+                    a final result (in modern coordinates), or the name of a specific `GeoField` if result is in field coordinates.
+        lithoID (torch.tensor or np.ndarray): (N,) array of lithology classes defined by isosurfaces described in the relevant `GeoField` instance(s).
+        lithoLookup (dict): A dictionary where keys are lithoID integers and values are the name of the associated isosurfaces.
+        structureID (torch.tensor or np.ndarray): (N,) array of structure IDs denoting the index of the `GeoField` responsible for each lithology / value
+                                                  in the model result.
+        structureLookup (dict): A dictionary where keys are structureIDs and values give the name of the corresponding `GeoField`.
+        scalar (torch.tensor or np.ndarray): (N,) array of the scalar values evaluated at each `x`.
+        properties (torch.tensor or np.ndarray): (N,d) array of property values derived at each `x`.
+        propertyNames (list): List of `d` property names corresponding to each dimension of `self.properties`.
+        fields (dict): Dict containing the individual scalar fields evaluated at each `x` for each `GeoField` instance in the model.
+        offsets (dict): Dict containing the individual displacement fields evaluated at each `x` for each `GeoField` instance in the model.
     """
-    matrix: ArrayLike
 
-    def __post_init__(self):
+    # local constraints
+    x : torch.tensor = None # array of the positions at which points were evaluated
+    grid : Grid = None # grid of points at which model was evaluated
+    crs : str = None # temporal coordinate system (modern or paleo) associated to these points
+
+    lithoID : torch.tensor = None
+    lithoLookup : dict = field(default_factory=dict)
+
+    structureID : torch.tensor = None
+    structureLookup : dict = field(default_factory=dict)
+
+    scalar : torch.tensor = None # scalar field values
+    gradient : torch.tensor = None # gradient field values (often left as None)
+    properties : torch.tensor = None # forward (property) predictions
+    propertyNames : list = field(default_factory=list)
+
+    fields : dict = field(default_factory=dict) # individual scalar fields (Keyed by GeoField name)
+    offsets : dict = field(default_factory=dict) # individual displacement fields (Keyed by GeoField name)
+
+    @classmethod
+    def concat(cls, geodes):
         """
-        Validate inputs
+        Concatenate an ordered list of Geodes. Used when e.g., evaluating large models in chunks.
         """
-        if isinstance(self.matrix, int): # special case -- identity transforms can be initialised as Transform(2) or Transform(3).
-            self.matrix = np.eye(self.matrix+1)
+        args = {}
+        for g in geodes:
+            for k in dir(g):
+                if ('_' not in k) and not callable(getattr(g, k)):
+                    attr = getattr(g, k)
+                    if attr is not None:
+                        if k in args:
+                            if isinstance(attr, torch.Tensor ):
+                                args[k] = torch.concat([args[k], attr])
+                            elif isinstance(attr, np.ndarray ):
+                                args[k] = np.concatenate([args[k], attr])
+                            elif isinstance(attr, dict):
+                                temp = {**args[k], **attr}
+                                for k2,v in args[k].items(): # also concatenate any relevant dict entries
+                                    if k2 in attr:
+                                        if isinstance(v, torch.Tensor ):
+                                            temp[k2] = torch.concat( [v, attr[k2]] )
+                                        elif isinstance(v, np.ndarray ):
+                                            temp[k2] = np.concatenate( [v, attr[k2]] )
+                                args[k] = temp
+                        else:
+                            args[k] = attr
+        return Geode(**args)
 
-        mat = self.matrix
-
-        if isinstance(mat, torch.Tensor):
-            shape = tuple(mat.shape)
-            self.matrix = mat.detach().cpu().numpy() # always store as a numpy array internally
-        elif isinstance(mat, np.ndarray):
-            shape = mat.shape
-        else:
-            raise TypeError("matrix must be a numpy array or torch tensor")
-        if shape not in [(3, 3), (4, 4)]: # must be a transform matrix for 2D or 3D vectors.
-            raise ValueError("Transform matrix must be 3x3 or 4x4")
-
-    def apply(self, points: ArrayLike) -> ArrayLike:
+    def combine(self, younger, weight):
         """
-        Apply the transform to an (N,2) or (N,3) array of points. Can
-        handle both numpy arrays and pytorch tensors.
+        Combine the results from this Geode with results from a (typically younger) one, using the 
+        specified weights. Both Geodes must be evaluated at the same coordinates.
         """
-        if isinstance(points, torch.Tensor):
-            return self._apply_torch(points)
-        elif isinstance(points, np.ndarray):
-            return self._apply_numpy(points)
-        else:
-            raise TypeError("points must be a numpy array or torch tensor")
+        assert len(self.x) == len(younger.x), "Both Geodes must be evaluated at the same coordinates."
+        iweight = 1-weight
 
-    def __call__(self, points: ArrayLike) -> ArrayLike:
-        """Alias for apply()."""
-        return self.apply(points)
+        # combine basic attributes
+        args = dict(x=younger.x, grid=younger.grid, crs=younger.crs, # always take these from the younger object
+                    lithoLookup={**self.lithoLookup, **younger.lithoLookup},
+                    structureLookup={**self.structureLookup, **younger.structureLookup},
+                    fields={**self.fields, **younger.fields},
+                    offsets={**self.offsets, **younger.offsets} )
 
-    def inverse(self) -> "Transform":
+        # combine gradients (if not None)
+        if self.gradient is not None:
+            if isinstance(self.gradient, np.ndarray):
+                args['gradient'] = self.gradient.copy() # copy (numpy)
+            else:
+                args['gradient'] = self.gradient.clone() # clone (pytorch)
+            if younger.gradient is not None: # overprint with younger values if defined
+                if len(younger.gradient) == 2:
+                    pass
+                args['gradient'] = younger.gradient*weight[:,None] + args['gradient']*iweight[:,None]
+
+        # combine property predictions (if not None)
+        if self.properties is not None:
+            args['propertyNames'] = self.propertyNames
+            assert np.all(np.array(self.propertyNames) == np.array(younger.propertyNames)),\
+                f'Property names for {list(self.fields.keys())[0]} do not match {list(younger.fields.keys())[0]}.'
+            assert younger.properties is not None,\
+                f"Properties must be defined for all generative fields. {list(younger.fields.keys())[0]} is missing."
+            args['properties'] = younger.properties*weight[:,None] + self.properties*iweight[:,None]
+
+        # combine scalar values, structure IDs and lithoIDs (if defined)
+        args['scalar'] = younger.scalar*weight + self.scalar*iweight
+        args['structureID'] = torch.round((younger.structureID*weight + self.structureID*iweight)).to(dtype=torch.int) # round to integer
+        if (self.lithoID is not None) and (younger.lithoID is not None):
+            args['lithoID'] = torch.round(younger.lithoID*weight + self.lithoID*iweight).to(dtype=torch.int) # round to integer
+
+        return Geode(**args)
+
+    def stackValues(self, mn=0, mx=1):
         """
-        Return a Transform representing the inverse operation.
+        Scale scalar values so that they vary between mn and mx for each structural field, and then add offsets 
+        so that there are no overlaps between structures. This can be useful for e.g., plotting or isosurface 
+        extraction.
+
+        Parameters
+        ----------
+        mn : float, optional
+            The minimum value to scale the scalar values to, by default 0. 
+        mx : float, optional
+            The maximum value to scale the scalar values to, by default 1.
+
+        Returns
+        -------
+        curlew.geology.geofield.Geode
+            A new Geode where the scalar values are scaled to the range [mn, mx] for each structure and offset
+            to remove overlaps.
         """
-        mat = self.matrix
+        out = self.numpy()
 
-        if mat.shape[0] != mat.shape[1]:
-                raise ValueError("Transform matrix must be square") # duh!
+        # get the unique structure IDs
+        ids = np.unique(out.structureID)
 
-        if isinstance(mat, torch.Tensor): # torch
-            try:
-                inv = torch.linalg.inv(mat)
-            except RuntimeError as e:
-                raise ValueError("Transform matrix is not invertible") from e # bugger.
-            return Transform(inv)
-        elif isinstance(mat, np.ndarray): # numpy 
-            try:
-                inv = np.linalg.inv(mat)
-            except np.linalg.LinAlgError as e:
-                raise ValueError("Transform matrix is not invertible") from e
-            return Transform(inv)
+        # create a new array to hold the stacked values
+        stacked = np.zeros_like(out.scalar)
 
-        else:
-            raise TypeError("matrix must be a numpy array or torch tensor")
+        # loop over each structure ID
+        for i, id in enumerate(ids):
+            # get the indices of the current structure ID
+            idx = np.where(out.structureID == id)[0]
 
+            # scale the scalar values to the range [mn, mx]
+            sf = out.scalar[idx]
+            if np.max(sf) - np.min(sf) == 0:
+                # if all values are the same, set them to mn
+                scaled_values = np.full_like(sf, mn)
+            else:
+                # scale the values to the range [mn, mx]        
+                scaled_values = mn + (mx - mn) * (sf - np.min(sf)) / (np.max(sf) - np.min(sf))
 
-    def _apply_numpy(self, points: np.ndarray) -> np.ndarray:
+            # add an offset based on the index of the structure ID
+            stacked[idx] = scaled_values + i * (mx - mn)
+
+        out.scalar = stacked
+        return out
+
+    def torch(self):
         """
-        Apply function for numpy arrays.
+        Return a copy of these results cast to pytorch tensors (where relevant). 
         """
-        if points.ndim != 2:
-            raise ValueError("points must have shape (N, D)")
+        args = {}
+        for k in dir(self):
+            if '_' not in k and not callable(getattr(self, k)):
+                attr = getattr(self, k)
+                if attr is not None:
+                    if isinstance( attr, np.ndarray ) or isinstance( attr, list ): # convert nd array or list types to tensor
+                        attr = torch.tensor( attr, device=curlew.device, dtype=curlew.dtype )
+                    elif isinstance(attr, dict):
+                        for key in attr.keys(): # also convert any dict entries
+                            if isinstance( attr[key], np.ndarray ) or isinstance( attr[key], list ):
+                                attr[key] = torch.tensor( attr[key], device=curlew.device, dtype=curlew.dtype )
+                args[k] = attr
+        return Geode(**args)
 
-        n, d = points.shape
-        mat = np.asarray(self.matrix)
-
-        if mat.shape == (3, 3) and d != 2:
-            raise ValueError("3x3 transform requires (N,2) points")
-        if mat.shape == (4, 4) and d != 3:
-            raise ValueError("4x4 transform requires (N,3) points")
-
-        ones = np.ones((n, 1), dtype=points.dtype)
-        homo = np.concatenate([points, ones], axis=1)   # (N, D+1)
-
-        transformed = (mat @ homo.T).T                   # (N, D+1)
-
-        w = transformed[:, -1:]
-        return transformed[:, :-1] / w
-
-    def _apply_torch(self, points: "torch.Tensor") -> "torch.Tensor":
+    def numpy(self):
         """
-        Apply function for pytorch tensors.
+        Return a copy of these constraints cast to numpy arrays if necessary.
         """
-        if points.ndim != 2:
-            raise ValueError("points must have shape (N, D)")
+        args = {}
+        for k in dir(self):
+            if '_' not in k and not callable(getattr(self, k)):
+                attr = getattr(self, k)
+                if attr is not None:
+                    if isinstance(attr, torch.Tensor ):
+                        attr = attr.cpu().detach().numpy()
+                    elif isinstance(attr, dict): # also convert any dict entries
+                        for key in attr.keys():
+                            if isinstance( attr[key], torch.Tensor ):
+                                attr[key] = attr[key].cpu().detach().numpy()
+                args[k] = attr
+        return Geode(**args)
 
-        n, d = points.shape
-        mat = torch.tensor( self.matrix, dtype=points.dtype, device=points.device)
+    def toPLY( self, path ):
+        """
+        Quickly save this result to a PLY file for visualisation in a 3D viewer (e.g., CloudCompare).
+        """
+        from curlew.io import savePLY
+        from pathlib import Path
+        path = Path(path)
+        R = self.numpy()
+        assert R.x is not None, "Coordinates must be defined to save PLY"
+        attrs = []
+        attr_names = []
+        for n in ['lithoID', 'structureID', 'scalar']:
+            a = R.__getattribute__(n)
+            if a is not None:
+                attrs.append(a)
+                attr_names.append(n)
+        if R.properties is not None:
+            attr_names += R.propertyNames
+            attrs += R.properties
+        attrs = np.vstack( attrs )
+        savePLY( path, xyz=R.x, attr=attrs, names=attr_names )
 
-        if mat.shape == (3, 3) and d != 2:
-            raise ValueError("3x3 transform requires (N,2) points")
-        if mat.shape == (4, 4) and d != 3:
-            raise ValueError("4x4 transform requires (N,3) points")
-
-        ones = torch.ones((n, 1), dtype=points.dtype, device=points.device)
-        homo = torch.cat([points, ones], dim=1)           # (N, D+1)
-
-        transformed = (mat @ homo.T).T                    # (N, D+1)
-
-        w = transformed[:, -1:].clamp(min=1e-12)
-        return transformed[:, :-1] / w
+    def toCSV( self, path ):
+        """
+        Quickly save this result to a CSV file for easy interoperability.
+        """
+        pass # TODO

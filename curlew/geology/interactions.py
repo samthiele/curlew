@@ -97,7 +97,6 @@ class OffsetBase(LearnableBase):
     """
     Class from which all offset classess should inherit. 
     """
-
     def eval( self, x, G ):
         """
         Get displacement vectors for points `X` based on GeoField `G`. This will be called by the GeoField and return the results of self.disp(...).
@@ -116,6 +115,9 @@ class OffsetBase(LearnableBase):
         this assumes `x` is already transformed into the local (paleo) coordinate system relevant for `G`.
         """
         # get gradient of scalar field at X and associated value
+        # note that Transform = False here as the displacements are naturally defined
+        # by the gradients in field coordinates (i.e. younger events do not effect the displacement associated with 
+        # this event)
         ds, s = G.gradient( x, normalize=normalize, return_vals=True, transform=False, to_numpy=False, retain_graph=True )
         s = s.scalar
 

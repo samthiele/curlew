@@ -48,7 +48,7 @@ def test_basic():
             assert len(a1) - len(a0) == 1
 
 def test_transform():
-    from curlew.core import Transform
+    from curlew.geometry import Transform
     import numpy as np
     import torch
 

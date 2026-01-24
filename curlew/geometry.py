@@ -3,13 +3,15 @@ Utility functions for generating basic geometries (grids, sections, etc.) and
 performing other simple geometric tasks. 
 """
 
+from dataclasses import dataclass
 import numpy as np
 import torch
 import curlew
 
 # TODO - add functions for converting angle pairs (e.g., strike, dip) to vectors
 
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Union
+ArrayLike = Union[np.ndarray, "torch.Tensor"]
 
 def poisson_disk_indices_2d(
     x: np.ndarray,
@@ -668,5 +670,122 @@ def blended_wave( x, f=0.5, A=1, T=2*np.pi ):
     y1 = triangle_wave(x, A=A, T=T, n_terms=1) # sinusoid wave 
     y2 = triangle_wave(x, A=A, T=T, n_terms=11) # triangle wave 
     return (1-f)*y1 + f*y2
+
+
+@dataclass(frozen=False)
+class Transform:
+    """
+    Homogeneous transform supporting:
+      - 3x3 matrices for 2D points
+      - 4x4 matrices for 3D points
+    """
+    matrix: ArrayLike
+
+    def __post_init__(self):
+        """
+        Validate inputs
+        """
+        if isinstance(self.matrix, int): # special case -- identity transforms can be initialised as Transform(2) or Transform(3).
+            self.matrix = np.eye(self.matrix+1)
+
+        mat = self.matrix
+
+        if isinstance(mat, torch.Tensor):
+            shape = tuple(mat.shape)
+            self.matrix = mat.detach().cpu().numpy() # always store as a numpy array internally
+        elif isinstance(mat, np.ndarray):
+            shape = mat.shape
+        else:
+            raise TypeError("matrix must be a numpy array or torch tensor")
+        if shape not in [(3, 3), (4, 4)]: # must be a transform matrix for 2D or 3D vectors.
+            raise ValueError("Transform matrix must be 3x3 or 4x4")
+
+    def apply(self, points: ArrayLike) -> ArrayLike:
+        """
+        Apply the transform to an (N,2) or (N,3) array of points. Can
+        handle both numpy arrays and pytorch tensors.
+        """
+        if isinstance(points, torch.Tensor):
+            return self._apply_torch(points)
+        elif isinstance(points, np.ndarray):
+            return self._apply_numpy(points)
+        else:
+            raise TypeError("points must be a numpy array or torch tensor")
+
+    def __call__(self, points: ArrayLike) -> ArrayLike:
+        """Alias for apply()."""
+        return self.apply(points)
+
+    def inverse(self) -> "Transform":
+        """
+        Return a Transform representing the inverse operation.
+        """
+        mat = self.matrix
+
+        if mat.shape[0] != mat.shape[1]:
+                raise ValueError("Transform matrix must be square") # duh!
+
+        if isinstance(mat, torch.Tensor): # torch
+            try:
+                inv = torch.linalg.inv(mat)
+            except RuntimeError as e:
+                raise ValueError("Transform matrix is not invertible") from e # bugger.
+            return Transform(inv)
+        elif isinstance(mat, np.ndarray): # numpy 
+            try:
+                inv = np.linalg.inv(mat)
+            except np.linalg.LinAlgError as e:
+                raise ValueError("Transform matrix is not invertible") from e
+            return Transform(inv)
+
+        else:
+            raise TypeError("matrix must be a numpy array or torch tensor")
+
+
+    def _apply_numpy(self, points: np.ndarray) -> np.ndarray:
+        """
+        Apply function for numpy arrays.
+        """
+        if points.ndim != 2:
+            raise ValueError("points must have shape (N, D)")
+
+        n, d = points.shape
+        mat = np.asarray(self.matrix)
+
+        if mat.shape == (3, 3) and d != 2:
+            raise ValueError("3x3 transform requires (N,2) points")
+        if mat.shape == (4, 4) and d != 3:
+            raise ValueError("4x4 transform requires (N,3) points")
+
+        ones = np.ones((n, 1), dtype=points.dtype)
+        homo = np.concatenate([points, ones], axis=1)   # (N, D+1)
+
+        transformed = (mat @ homo.T).T                   # (N, D+1)
+
+        w = transformed[:, -1:]
+        return transformed[:, :-1] / w
+
+    def _apply_torch(self, points: "torch.Tensor") -> "torch.Tensor":
+        """
+        Apply function for pytorch tensors.
+        """
+        if points.ndim != 2:
+            raise ValueError("points must have shape (N, D)")
+
+        n, d = points.shape
+        mat = torch.tensor( self.matrix, dtype=points.dtype, device=points.device)
+
+        if mat.shape == (3, 3) and d != 2:
+            raise ValueError("3x3 transform requires (N,2) points")
+        if mat.shape == (4, 4) and d != 3:
+            raise ValueError("4x4 transform requires (N,3) points")
+
+        ones = torch.ones((n, 1), dtype=points.dtype, device=points.device)
+        homo = torch.cat([points, ones], dim=1)           # (N, D+1)
+
+        transformed = (mat @ homo.T).T                    # (N, D+1)
+
+        w = transformed[:, -1:].clamp(min=1e-12)
+        return transformed[:, :-1] / w
 
 

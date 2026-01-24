@@ -3,13 +3,17 @@ Import core neural field types from other python files, and define the "base" NF
 """
 
 import curlew
-from curlew.core import CSet, HSet, LearnableBase, Transform
+from curlew.core import CSet, HSet, LearnableBase, Geode
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 import copy
+from curlew.geometry import Transform
+
+from typing import Optional, List, Tuple, Union
+ArrayLike = Union[np.ndarray, "torch.Tensor"]
 
 class BaseSF(LearnableBase):
     """
@@ -25,7 +29,7 @@ class BaseSF(LearnableBase):
     """
 
     def __init__(self, name : str = None, 
-                       input_dim: int = 3,
+                       input_dim: int = None,
                        output_dim: int = 1,
                        C: CSet = None,
                        H: HSet = None,
@@ -42,7 +46,7 @@ class BaseSF(LearnableBase):
             A (ideally unique) name for this neural field. Should typically match the name of the GeoField instance that uses this field. Defaults
             to the name of this class.
         input_dim : int, optional
-            The dimensionality of the input space (e.g., 3 for (x, y, z)).
+            The dimensionality of the input space (e.g., 3 for [x, y, z], 2 for [x,y]). If None (default) then `curlew.default_dim` is used.
         output_dim : int, optional
             Dimensionality of the output (usually 1 for a scalar potential).
         C : CSet
@@ -72,7 +76,10 @@ class BaseSF(LearnableBase):
         self.name = name
         if self.name is None:
             self.name = str(type(self).__name__) # default name is the name of the field type
-        self.input_dim = input_dim
+        if input_dim is None:
+            self.input_dim = curlew.default_dim
+        else:
+            self.input_dim = input_dim
         self.output_dim = output_dim
         self.transform = transform
         self.seed = seed # seed to use for any random operations
@@ -88,7 +95,7 @@ class BaseSF(LearnableBase):
         self.nnorm = 0 # number of evaluations used to compute average gradient
 
         if local is None:
-            self.T = Transform(input_dim)
+            self.T = Transform(self.input_dim)
         else:
             self.T = local
 
@@ -181,32 +188,6 @@ class BaseSF(LearnableBase):
                     o = [0]*self.input_dim
                     o[i] = C.delta
                     C._offset.append( torch.tensor( o, device=curlew.device, dtype=curlew.dtype) )
-
-    ## MODEL EVALUATION
-    def predict(self, X, to_numpy=True, transform=True ):
-        """
-        Create model predictions at the specified points. 
-
-        Parameters
-        ----------
-        X : np.ndarray
-            An array of shape (N, input_dim) containing the coordinates at which to evaluate
-            this neural field.
-        to_numpy : bool
-            True if the results should be cast to a numpy array rather than a `torch.Tensor`.
-        transform : bool
-            If True, any defined transform function is applied before encoding and evaluating the field for `x`.
-
-        Returns
-        --------
-        S : An array of shape (N,1) containig the predicted scalar values
-        """
-        if not isinstance(X, torch.Tensor):
-            X = torch.tensor( X, device=curlew.device, dtype=curlew.dtype)
-        S = self(X, transform=transform)
-        if to_numpy:
-            return S.cpu().detach().numpy()
-        return S
     
     def reset_mnorm(self):
         """Reset accumulation of average gradient magnitude"""
@@ -319,7 +300,7 @@ class BaseNF(BaseSF):
             name : str,
             H: HSet,
             C : CSet = None,
-            input_dim: int = 3,
+            input_dim: int = None,
             output_dim: int = 1,
             transform = None,
             seed = 42,
@@ -337,7 +318,7 @@ class BaseNF(BaseSF):
             C : CSet, optinoal
                 Constraint sent used when learning this implicit field. Default is None (can be set using `field.bind(...)`).
             input_dim : int, optional
-                The dimensionality of the input space (e.g., 3 for (x, y, z)).
+                The dimensionality of the input space (e.g., 3 for (x, y, z)). If None (default), then `curlew.default_dim` will be used.
             output_dim : int, optional
                 Dimensionality of the output (usually 1 for a scalar potential).
             transform : callable

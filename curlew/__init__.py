@@ -55,6 +55,9 @@ device = 'cpu' # can be changed to set device to e.g., gpu
 dtype = torch.float64
 """The precision used during pytorch computations. Lower to float32 to save RAM."""
 
+default_dim = 3
+"""The default input dimensionality (2D or 3D) to use when creating new models. Default is 3."""
+
 ccmap = None
 """A colourful (custom) matplotlib (categorical) colormap taylored for `curlew`. Will only be set if `matplotlib` is installed."""
 

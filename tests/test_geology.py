@@ -2,6 +2,10 @@ import numpy as np
 from curlew.geology.geomodel import GeoModel
 from curlew.geometry import grid
 from curlew.fields.fourier import NFF
+import curlew
+
+curlew.default_dim = 2 # specify that these tests run in 2D by default
+
 def test_hutton():
     """
     Run the hutton model as a test.
@@ -26,7 +30,6 @@ def test_hutton():
                 H=H, # interpolator hyperparameters
                 type=NFF,
                 base=-np.inf, # basal surface (important for unconformities)
-                input_dim=2, # field input coordinate dimensions (2D in our case)
                 hidden_layers=[32,], # hidden layers in the multi-layer perceptron that parameterises our field
                 rff_features=64, # number of random sin and cos features to create for each scale 
                 length_scales=[500,]) # the length scales in our model
@@ -37,7 +40,6 @@ def test_hutton():
                 H=H.copy(mono_loss="1.0", thick_loss=1.0), # change some hyperparams
                 type=NFF,
                 base="base", # basal surface (important for unconformities). In this case these have a value of 0.
-                input_dim=2, # field input coordinate dimensions (2D in our case)
                 hidden_layers=[32], # hidden layers in the multi-layer perceptron that parameterises our field
                 rff_features=64, # number of random sin and cos features to create for each scale 
                 length_scales=[2000,]) # the length scales in our model
@@ -147,7 +149,6 @@ def test_playfair():
                 H=H, # interpolator hyperparameters
                 type=NFF,
                 base=-np.inf, # basal surface (important for unconformities)
-                input_dim=2, # field input coordinate dimensions (2D in our case)
                 hidden_layers=[8,], # hidden layers in the multi-layer perceptron that parameterises our field
                 rff_features=32, # number of random sin and cos features to create for each scale 
                 length_scales=[2000]) # the length scales in our model
@@ -162,7 +163,6 @@ def test_playfair():
                 H=H, # interpolator hyperparameters
                 type=NFF,
                 contact=("upper","lower"), # Lower and upper surface of our dyke (which in this case is 100 m thick).
-                input_dim=2, # field input coordinate dimensions (2D in our case)
                 hidden_layers=[8,], # hidden layers in the multi-layer perceptron that parameterises our field
                 rff_features=32, # number of random sin and cos features to create for each scale 
                 length_scales=[2000,]) # the length scales in our model
@@ -209,7 +209,6 @@ def test_michell():
                 H=H, # interpolator hyperparameters
                 type=NFF,
                 base=-np.inf, # basal surface (important for unconformities)
-                input_dim=2, # field input coordinate dimensions (2D in our case)
                 hidden_layers=[16,], # hidden layers in the multi-layer perceptron that parameterises our field
                 rff_features=32, # number of random sin and cos features to create for each scale 
                 length_scales=[2000]) # the length scales in our model
@@ -225,7 +224,6 @@ def test_michell():
                 sigma1=(-1,0), # horizontal stress
                 offset=(250,0,300), # Initial slip estimate, minimum slip, maximum slip
                 width=0, # brittle fault
-                input_dim=2, # field input coordinate dimensions (2D in our case)
                 hidden_layers=[16,], # hidden layers in the multi-layer perceptron that parameterises our field
                 rff_features=32, # number of random sin and cos features to create for each scale 
                 length_scales=[6000,]) # the length scales in our model
@@ -303,7 +301,6 @@ def test_anderson():
     H = HSet( value_loss=1, grad_loss=1,
             mono_loss='0.1', thick_loss="1.0")
     params = dict(
-        input_dim=2, # field input coordinate dimensions
         hidden_layers=[8,], # hidden layers
         rff_features=32, # number of fourier features
         length_scales=[4000]
@@ -357,7 +354,6 @@ def test_anderson3D():
     C, _ = anderson(dims) # create the synthetic "hutton" dataset
     C = C[:-1] # drop value constraints as they're not needed
 
-
     # extrude to make 3D test dataset
     from curlew.geometry import extrude
     C3D = extrude( C, step=(0,200,0), n=3 )
@@ -378,7 +374,7 @@ def test_anderson3D():
             mono_loss='0.1', thick_loss="1.0")
     params = dict(
         type=NFF,
-        input_dim=3, # field input coordinate dimensions
+        input_dim=3, # explicitly make these fields 3D [ we could also just change `curlew.default_dim` ]
         hidden_layers=[8,], # hidden layers
         rff_features=32, # number of fourier features
         length_scales=[4000]

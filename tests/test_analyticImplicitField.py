@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 
 def test_ALF():
     from curlew.fields.analytical import LinearField
@@ -9,7 +10,7 @@ def test_ALF():
                   step = [2 for _i in range(i)] )
         x = G.coords()
         s0 = LinearField(name='f0', input_dim=i, gradient=np.ones(i), normalise=False )
-        field = s0.predict( x ).squeeze()
+        field = s0.forward( torch.tensor(x) ).squeeze()
 
         # gradient = 1,1,1 -- so we know the answer
         # (is the sum of the coordinates)
@@ -22,7 +23,7 @@ def test_ALF():
             grad[j] = 2
             s0 = LinearField(name='f0', input_dim=i, 
                      gradient=grad, origin=orig )
-            field = s0.predict( x ).squeeze()
+            field = s0.forward( torch.tensor(x) ).squeeze()
             assert (field == 2*(x[:,j] + 1)).all()
 
 def test_multi():

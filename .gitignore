@@ -21,6 +21,7 @@ sandbox
 
 # VS Code
 .vscode/
+.VSCodeCounter
 
 # MACOSX
 .DS_STORE

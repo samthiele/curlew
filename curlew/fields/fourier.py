@@ -18,17 +18,6 @@ class NFF(BaseNF):
     A generic neural field that maps input coordinates to some value or values. See the other
     child classes in this module (e.g., fourier, geoinr, etc.) for specific implementations.
 
-    Parameters
-    ----------
-    H : HSet
-        Hyperparameters used to tune the loss function for this NF.
-    input_dim : int, optional
-        The dimensionality of the input space (e.g., 3 for (x, y, z)).
-    output_dim : int, optional
-        Dimensionality of the scalar output (usually 1 for a scalar potential).
-    transform : callable
-        A function that transforms input coordinates prior to predictions. Must take exactly one argument as input (a tensor of positions) and return the transformed positions. 
-
     Attributes
     ----------
     use_rff : bool

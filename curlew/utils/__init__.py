@@ -63,7 +63,7 @@ def batchEval( array, function, batch_size = 10000, vb=False, **kwargs):
             results.append(function(batch_data, **kwargs))
 
         # Concatenate all results into a single array
-        from curlew.geology.geofield import Geode # needs to be here to avoid circular import
+        from curlew.core import Geode # needs to be here to avoid circular import
         if isinstance(results[0], Geode):
             return Geode.concat( results ) # concatenate and return
         elif isinstance(results[0], np.ndarray):

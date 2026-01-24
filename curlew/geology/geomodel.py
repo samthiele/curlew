@@ -3,12 +3,13 @@ A class representing a time-aware geological model and
 facilitating interactions with the underlying linked-list of GeoField instances
 (that represent each geological structure in the model).
 """
-
-from curlew.geology.geofield import GeoField, Geode, apply_child_undeform
+import curlew
+from curlew.geology.geofield import GeoField
+from curlew.fields import BaseSF
 from curlew.utils import batchEval
 from curlew.geology.interactions import FaultOffset
-from curlew.core import Transform
-from curlew.geometry import Grid
+from curlew.core import Geode
+from curlew.geometry import Grid, Transform
 
 import numpy as np
 import torch
@@ -85,9 +86,11 @@ class GeoModel(object):
         self.lastEvent = self.fields[-1] # change to evaluate model in some paleo-space
         self.eidLookup = { f.eid : f for f in self.fields } # create a lookup table for translating event IDs to GeoField instances
 
-        # coordinate systems
+        self.input_dim = self.fields[0].input_dim # get dimensionality of model from one of the fields in the model
+        for f in self.fields: # check dimensionalities all match
+            assert f.input_dim == self.input_dim, f"Field {f.name} has a dimensionality of {f.input_dim} not {self.input_dim}."
         if transform is None:
-            self.T = Transform(self.fields[0].field.input_dim) # thunk -- leave this as None and skip compute? (slightly faster)
+            self.T = Transform(self.input_dim) # thunk -- leave this as None and skip compute? (slightly faster)
         else:
             self.T = transform
 
