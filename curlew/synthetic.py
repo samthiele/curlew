@@ -200,19 +200,25 @@ def hutton( shape=(1500,1000), **kwargs ):
     G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
     #xy = G.coords()
 
-    s0 = strati('s0', C=PeriodicField( 'f0', input_dim=2 ) ) # Folds
-    s1 = strati('s1', C=QuadraticField( 'f1', input_dim=2, gradient=np.array([0.1,0.9]), origin=(1000,500), curve=(-0.00002,0) ), base=0) # uncorformity surface
+    #s0 = strati('s0', C=PeriodicField( 'f0', input_dim=2 ) ) # Folds
+    s0 = strati('s0', C=QuadraticField( 'f1', input_dim=2, gradient=np.array([0,1]), origin=(0,0), curve=(-0.00002,0) )) # base series
+    d1 = fold('d1', origin=np.array([0,0]), 
+                    extension=np.array([0,1]), # vertical extension
+                    compression=np.array([1,0.3]), # almost horizontal compression
+                    wavelength=2000, 
+                    amplitude=250, sharpness=0.7)
+    s1 = strati('s1', C=QuadraticField( 'f1', input_dim=2, gradient=np.array([0.1,0.9]), origin=(1000,500), curve=(-0.00002,0) ), base=0) # unconformable series
 
     # add some isosurfaces
-    for y in np.linspace(0, shape[1], 5): # generate 5 contacts
+    for y in np.linspace(0, shape[1], 5): # generate contacts
         s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
-    for y in np.linspace(0, shape[1], 10): # generate 5 contacts
+    for y in np.linspace(0, shape[1], 10): # generate contacts
         s1.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
 
-    M  = GeoModel( [s0,s1], grid=G, name='hutton' )
+    M  = GeoModel( [s0,d1,s1], grid=G, name='hutton' )
     s = M.predict(G)
     C = sample( s, pv='rgb', **kwargs )
-    C=[C[1],C[0],C[2]]
+    C=[C[2],C[0],C[3]] # ignore fold event when generating constraints
 
     return C, M
 

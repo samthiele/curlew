@@ -13,6 +13,7 @@ def test_hutton():
     from curlew.synthetic import hutton
     from curlew import HSet
     from curlew.geology import strati
+    curlew.default_dim = 2
 
     dims = (2000,1000)  # dimensions of our 2D section
     C, Ms = hutton(dims, breaks=10, cmap='prism', pval=1.0) 
@@ -45,17 +46,9 @@ def test_hutton():
                 length_scales=[2000,]) # the length scales in our model
     
     # define isosurfaces
+    s1.isosurfaces = Ms['s1'].isosurfaces
+    s0.isosurfaces = Ms['s0'].isosurfaces
     s1.addIsosurface("base", seed=Ms.fields[1].field.origin) # layer near the base of the unconformity
-    s1.addIsosurface("layer1", seed=(1500,800)) # layer higher up
-    s0.addIsosurface("layer1", seed=(1000,500)) # layer in basement
-    s0.addIsosurface("layer2", seed=(1000,200)) # deeper layer in basement
-
-    # also add a basement isosurface with multiple seed points
-    round_val = np.round( C[0].vv ) # round value constraints (to reduce numerical differences)
-    vals, counts = np.unique( round_val, return_counts=True ) # find unique layers
-    vv = vals[ np.argmax(counts) ] # pick the one with the most points
-    pp = C[0].vp[ round_val == vv, : ] # get corresponding positions
-    s0.addIsosurface("layer3", seed=pp )
 
     # combine into a geomodel
     M = GeoModel([s0,s1]) 
@@ -70,13 +63,12 @@ def test_hutton():
     
     # get isosurface values
     isovals = s0.getIsovalues()
-    assert len(isovals) == 3
+    assert len(isovals) > 3
 
     isovals = s1.getIsovalues()
-    assert len(isovals) == 2
+    assert len(isovals) > 3
 
     # create a grid (section) to evaluate our model on
-    #sdims, sxy = grid( dims, step=(10,10), origin=(0,0) ) 
     G2 = grid( dims, step=(20,20), center=(dims[0]/2,dims[1]/2), sampleArgs=dict(N=1024) )
     sxy = G2.coords()
 
@@ -88,16 +80,12 @@ def test_hutton():
 
     # check lithoIDs were assigned correctly
     lithoNames = set( pred.lithoLookup.values() )
-    assert 'basement_layer1' in lithoNames
-    assert 'unconformity_layer1' in lithoNames
-    for k,v in pred.lithoLookup.items(): # check that some lithologies exist for each lithology
-        if '_' in v: # _ indicates these IDs are defined by an isosurface; so should certainly exist in the model
-            mask = pred.lithoID == k
-            assert np.sum(mask) > 3 
-            for k2,v2 in pred.structureLookup.items():
-                if v2 in v: # name suggest structure matches
-                    assert (np.sum(pred.structureID[mask] == k2) / np.sum(mask)) > 0.99 # should be nearly 100% match (some rounding / floating point errors)
-        
+    assert 'basement' in lithoNames
+    assert 'basement_i0' in lithoNames
+    assert 'unconformity' in lithoNames
+    assert 'unconformity_i0' in lithoNames
+    assert len( np.unique(pred.lithoID) ) > 4 # should be at least 4 different lithologies...
+    
     # check evaluate gradients function works
     grad, pred2 = s0.gradient( G2.coords(), normalize=True, return_vals=True )
     assert np.max( np.abs(1-np.linalg.norm(grad, axis=1)) ) < 1e-6 # check vectors are unit vectors

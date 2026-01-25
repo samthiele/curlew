@@ -267,7 +267,7 @@ def get_positions(M, G, node, first_x=0, first_y=0, step_x=10, step_y=5, pos=Non
 
     return pos
 
-def showModel(M, axs=None, leg_loc=None, title="c)", node_size=3000, font_size=18):
+def showModel(M, axs=None, leg_loc=None, title="Model tree", node_size=3000, font_size=18):
     """
     Visualize the model tree of a GeoModel.
 
@@ -357,11 +357,7 @@ def showModel(M, axs=None, leg_loc=None, title="c)", node_size=3000, font_size=1
                for color, label in legend_labels.items()]
     ax_legend.legend(handles=handles, loc='center', fontsize=12)
     
-    if axs is None:
-        plt.close(fig)
-        return fig
-    else:
-        pass
+    return fig, fig.get_axes()
 
 def colour( sf, cmap='tab20', breaks=19 ):
     """

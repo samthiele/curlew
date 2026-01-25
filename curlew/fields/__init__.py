@@ -149,9 +149,16 @@ class BaseSF(LearnableBase):
         """
         # apply transform if needed
         if transform and self.transform is not None:
-            x = self.transform(x)
+            x = self.transform(x, end=transform)
+        
+        # unwrap geode if x is a geode instance
+        geode = None
+        if isinstance(x, Geode):
+            geode = x # store geode
+            x = geode.x # extract coordinates
 
-        x = self.T(x) # apply local transform to achieve e.g., global anisotropy
+        # apply local transform to achieve e.g., global anisotropy
+        x = self.T(x) 
 
         # evaluate drift
         out = 0
@@ -167,7 +174,13 @@ class BaseSF(LearnableBase):
             out = self.evaluate(x) + out
             if len(out.shape) == 1:
                 out = out[:, None] # add extra dimension if needed (for consistency)
-        return out
+
+        # put back into geode?
+        if geode:
+            geode.scalar = out.squeeze()
+            return geode
+        else:
+            return out # no need
     
     def bind( self, C ):
         """

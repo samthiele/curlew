@@ -279,7 +279,7 @@ class Grid(object):
         if transform and (self._cache is not None): # we need to apply a transform?
             # N.B. assumes that if self._cache is defined then this contains
             # pre-computed transformed grid point positions
-            coords = transform(coords)
+            coords = transform(coords, end=None)
         return coords
 
     def sample(self, N=4096, poissonDisk=None, tensor=False):

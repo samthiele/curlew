@@ -242,7 +242,7 @@ def fold( name, *, origin, compression, extension, wavelength, amplitude=1.0, sh
     compression = compression / np.linalg.norm(compression) # direction of principal compression
     compression *= (2 * np.pi) / wavelength  # scale normal vector to give appropriate wavelength 
     fa = LinearField( name, input_dim=len(compression), 
-              origin=origin, gradient=compression )
+              origin=origin, gradient=compression ) # TODO; allow also interpolated fields here
     
     # evaluate fold strain
     if estStrain:

@@ -91,6 +91,9 @@ class Overprint(LearnableBase):
         # combine results and return an updated Geode object
         return parent.combine( child, mask )
 
+    def __repr__(self):
+        return f"Overprint(mode='{self.mode}', thresh={self.thresh})"
+
 # OFFSETTING RELATIONS - functions used to move things around (kinematic fields; these are the real shakers and movers).
 # ------------------------------------------------------------------------------------------------------------------------
 class OffsetBase(LearnableBase):
@@ -102,7 +105,6 @@ class OffsetBase(LearnableBase):
         Get displacement vectors for points `X` based on GeoField `G`. This will be called by the GeoField and return the results of self.disp(...).
         """
         o = self.disp( x, G )
-        G._lastDisp[id(x)] = o # store temporary results on field so these can be later added to the output
         return o
     
     def learnable(self):
@@ -120,9 +122,6 @@ class OffsetBase(LearnableBase):
         # this event)
         ds, s = G.gradient( x, normalize=normalize, return_vals=True, transform=False, to_numpy=False, retain_graph=True )
         s = s.scalar
-
-        # store temporary results on field so these can be later added to the output
-        G._lastScalar[id(x)] = s
 
         # return gradient
         return ds, s
@@ -183,6 +182,9 @@ class SheetOffset( OffsetBase ):
         # offset points by aperture in the gradient direction
         return a * self.aperture * ds
     
+    def __repr__(self):
+        return f"SheetOffset(contact={self.contact}, aperture={self.aperture})"
+
 class FaultOffset( OffsetBase ):
     """
     Calculate offsets for a scalar field representing an infinite sheet intrusion (dyke or sill).
@@ -279,7 +281,10 @@ class FaultOffset( OffsetBase ):
             delta = s[mask] - s2 # - s
             offset[mask,:] = offset[mask,:] - delta[:,None] * ds2
         return offset # add displacements to get undeformed coordinates
-
+    
+    def __repr__(self):
+        return f"FaultOffset(contact={self.contact}, offset={self.offset}, width={self.width}, shortening={self.sigma1})"
+    
 class FoldOffset( OffsetBase ):
     """
     Calculate offsets from a scalar field (SF) representing distance along a fold series.
