@@ -28,7 +28,7 @@ def _initF( name, C, **kwargs):
         f = GeoField( name, type=type(C), field=C, **kwargs ) # create our GeoField using predefined Field
     return f
 
-def strati( name, *, C, base = -np.inf, sharpness=1e4, mode="above", **kwargs):
+def strati( name, *, C, base = -np.inf, sharpness=1e5, mode="above", **kwargs):
     """
     Create a GeoField representing a stratigraphic series (base stratigraphy or unconformity).
 
@@ -65,7 +65,7 @@ def strati( name, *, C, base = -np.inf, sharpness=1e4, mode="above", **kwargs):
     o = Overprint(threshold=base, sharpness=sharpness, mode=mode)
     return _initF( name, C=C, overprint=o, **kwargs)
 
-def sheet(name, *, C, contact=(-1,1), aperture=2, **kwargs):
+def sheet(name, *, C, contact=(-1,1), aperture=2, sharpness=1e5, **kwargs):
     """
     Create a GeoField representing a sheet intrusion (dyke, sill or vein).
 
@@ -80,6 +80,9 @@ def sheet(name, *, C, contact=(-1,1), aperture=2, **kwargs):
         the intrusion.
     aperture : float
         The aperture (Mode I opening) of the dyke. Used to displace surrounding rocks.
+    sharpness : float
+        Multiple used to change the sharpness of the inequality when using differentiable pytorch
+        tensors (as the inequality operator is replaced with a sigmoid functions).
     
     Keywords
     ----------
@@ -90,8 +93,6 @@ def sheet(name, *, C, contact=(-1,1), aperture=2, **kwargs):
     ---------
     A `curlew.geology.GeoField` instance for the created structure.
     """
-    sharpness = 10000
-
     if isinstance(contact, float) or isinstance(contact, int):
         contact = (-contact, contact) # define as upper and lower surface (assuming symmetry)
     offset = SheetOffset(contact=contact, aperture=aperture)
