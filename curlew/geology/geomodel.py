@@ -24,9 +24,9 @@ def _linkF( fields ):
     Link the list of fields (to the final element in the list).
     """
     for i in range(len(fields)):
-        fields[i].parent = None  # start from a clean slate
-        fields[i].parent2 = None
-        fields[i].child = None
+        if fields[i].parent2 is None:
+            fields[i].parent = None  # start from a clean slate
+            fields[i].child = None
         if not isinstance( fields[i], GeoField ):
             continue # skip ints, floats etc.
         if (i > 0) and (fields[i].parent is None):
