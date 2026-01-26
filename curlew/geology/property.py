@@ -54,9 +54,9 @@ class ConstantProperty(PropertyModelBase):
         # Save the names
         self.propertyNames = propertyNames
         if noData is not None:
-            self.noData = torch.tensor(noData) * torch.ones(len(propertyNames))
+            self.noData = torch.tensor(noData, device=curlew.device, dtype=curlew.dtype)*torch.ones(len(propertyNames), device=curlew.device, dtype=curlew.dtype)
         else:
-            self.noData = torch.nan * torch.ones(len(propertyNames))
+            self.noData = torch.nan * torch.ones(len(propertyNames), device=curlew.device, dtype=curlew.dtype)
 
         # Remake the propDict to store parameters if learnable
         if learnable:
@@ -90,7 +90,7 @@ class ConstantProperty(PropertyModelBase):
         lithoID = geode.lithoID
         lithoLookup = geode.lithoLookup
 
-        outputTensor = torch.ones((geode.scalar.shape[0], len(self.propertyNames))) # Dimensions of (N, P)
+        outputTensor = torch.ones((geode.scalar.shape[0], len(self.propertyNames)), dtype=curlew.dtype, device=curlew.device) # Dimensions of (N, P)
         # Loop through the unique lithoIDs and populate the output tensor
         for i in torch.unique(lithoID):
             currentProp = self.propDict.get(lithoLookup[i.item()], self.noData)

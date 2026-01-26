@@ -8,7 +8,7 @@ import curlew
 from curlew.core import CSet
 from curlew.geology.geofield import GeoField
 from curlew.geology.interactions import Overprint, SheetOffset, FaultOffset, FoldOffset
-from curlew.geology.geomodel import _linkF
+from curlew.geology.geomodel import _linkF, GeoModel
 from curlew.geometry import blended_wave
 from curlew.fields.analytical import LinearField
 

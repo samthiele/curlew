@@ -229,7 +229,7 @@ class GeoField( object ):
         return value
 
     def predict(self, x: ArrayLike, combine=False, to_numpy=True, transform=True, values=None, 
-                      litho : bool = True, gradient : bool = False) -> np.ndarray:
+                      litho : bool = True, props=True, gradient : bool = False) -> np.ndarray:
         """
         Predict scalar values belonging to this and/or previousGeologicalFields.
 
@@ -251,6 +251,8 @@ class GeoField( object ):
             Pre-computed results of this GeoField (used sometimes to save recomputing). Default is None (values will be computed).
         litho : bool
             True (default) if lithology codes should be computed.
+        props : bool
+            True (default) if properties should be computed when a `propertyField` is defined.
         gradient : bool
             True if the gradient at each `x` should also be calculated. Default is False.
         """
@@ -358,9 +360,8 @@ class GeoField( object ):
                 out.crs=transform.name # field coordinates
 
             # evaluate property (prediction) field if defined
-            if self.propertyField is not None:
-                out.properties = self.propertyField.predict(geode=out) # Takes in a Geode and returns updated Geode
-                out.propertyNames = list(self.propertyField.propertyNames) # make sure this is a copy...
+            if (self.propertyField is not None) and props:
+                out = self.propertyField.predict(geode=out) # Takes in a Geode and returns updated Geode
             
         # return
         if to_numpy:
@@ -594,7 +595,7 @@ class GeoField( object ):
                     v = v + g * offset # offset seed points by specified distance in gradient direction
 
                 # evaluate (and average) value at seed points
-                i = np.mean( self.predict( v, litho=False ).scalar )
+                i = np.mean( self.predict( v, litho=False, props=False ).scalar )
             else:
                 i = v # easy! 
                 if offset != 0: # not so easy...
