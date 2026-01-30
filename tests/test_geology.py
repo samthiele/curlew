@@ -209,7 +209,7 @@ def test_michell():
                 C=C[1], # constraints for this field
                 H=H, # interpolator hyperparameters
                 type=NFF,
-                sigma1=(-1,0), # horizontal stress
+                shortening=(-1,0), # horizontal stress
                 offset=(250,0,300), # Initial slip estimate, minimum slip, maximum slip
                 width=0, # brittle fault
                 hidden_layers=[16,], # hidden layers in the multi-layer perceptron that parameterises our field
@@ -303,7 +303,7 @@ def test_anderson():
                 type=NFF,
                 C=C[1], # constraints
                 H=H, # hyperparameters
-                sigma1=(0,1), # vertical sigma 1
+                shortening=(0,1), # vertical sigma 1
                 learn_sigma=False,
                 offset=(-200,-100,-400),
                 width=1e-6,
@@ -312,7 +312,7 @@ def test_anderson():
                 type=NFF,
                 C=C[2], # constraints
                 H=H, # hyperparameters
-                sigma1=(0,1), # vertical sigma 1
+                shortening=(0,1), # vertical sigma 1
                 learn_sigma=False,
                 offset=(-200,-100,-400),
                 width=1e-6,
@@ -375,7 +375,7 @@ def test_anderson3D():
     s1 = fault('fault1', # older fault field
                 C=C3D[1], # constraints
                 H=H, # hyperparameters
-                sigma1=(0,0,1), # vertical sigma 1
+                shortening=(0,0,1), # vertical sigma 1
                 learn_sigma=False,
                 offset=(-200,-100,-400),
                 width=1e-6,
@@ -383,7 +383,7 @@ def test_anderson3D():
     s2 = fault('fault2', # younger fault field
                 C=C3D[2], # constraints
                 H=H, # hyperparameters
-                sigma1=(0,0,1), # vertical sigma 1
+                shortening=(0,0,1), # vertical sigma 1
                 learn_sigma=False,
                 offset=(-200,-100,-400),
                 width=1e-6,

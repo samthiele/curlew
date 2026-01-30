@@ -107,7 +107,7 @@ def plot2D( sxy, grid, C=None, ticksize=50, lw=1, cmap='rainbow', levels=None, a
 def format_latex_subscript(name):
     """
     Converts 'f2' to LaTeX format '$f_2$'. 
-    Works with multiple letters and digits (e.g., 'sigma12' → '$\\sigma_{12}$').
+    Works with multiple letters and digits (e.g., 'shortening2' → '$\\sigma_{12}$').
     """
     import re
 

@@ -28,7 +28,7 @@ def _initF( name, C, **kwargs):
         f = GeoField( name, type=type(C), field=C, **kwargs ) # create our GeoField using predefined Field
     return f
 
-def strati( name, *, C, base = -np.inf, sharpness=1e5, mode="above", **kwargs):
+def strati( name, *, C, base = -np.inf, mode="above", **kwargs):
     """
     Create a GeoField representing a stratigraphic series (base stratigraphy or unconformity).
 
@@ -48,9 +48,6 @@ def strati( name, *, C, base = -np.inf, sharpness=1e5, mode="above", **kwargs):
         The overprinting mode. Options are:
             - `"above"`: replace all regions greater than the provided threshold). Useful for e.g., unconformities.
             - `"below"`: replace all regions less than than the provided threshold). Useful for e.g., intrusions.
-    sharpness : float
-        Multiple used to change the sharpness of the inequality when using differentiable pytorch
-        tensors (as the inequality operator is replaced with a sigmoid functions).
 
     Keywords
     ----------
@@ -62,10 +59,10 @@ def strati( name, *, C, base = -np.inf, sharpness=1e5, mode="above", **kwargs):
     A `curlew.geology.GeoField` instance for the created structure.
     """
     # build object for unconformable overprinting
-    o = Overprint(threshold=base, sharpness=sharpness, mode=mode)
+    o = Overprint(threshold=base, mode=mode)
     return _initF( name, C=C, overprint=o, **kwargs)
 
-def sheet(name, *, C, contact=(-1,1), aperture=2, sharpness=1e5, **kwargs):
+def sheet(name, *, C, contact=(-1,1), aperture=2, **kwargs):
     """
     Create a GeoField representing a sheet intrusion (dyke, sill or vein).
 
@@ -75,14 +72,11 @@ def sheet(name, *, C, contact=(-1,1), aperture=2, sharpness=1e5, **kwargs):
         A name for the created stratigraphic series (and GeoField that represents it).
     C : CSet | curlew.fields.analytical.AF | curlew.fields.NF
         The constraints or predefined field used to constrain this geological structure.
-    contact : tuple
+    contact : tuple | list [ tuple ]
         A tuple of floats specifying the scalar values for the (upper, lower) sides of 
-        the intrusion.
-    aperture : float
-        The aperture (Mode I opening) of the dyke. Used to displace surrounding rocks.
-    sharpness : float
-        Multiple used to change the sharpness of the inequality when using differentiable pytorch
-        tensors (as the inequality operator is replaced with a sigmoid functions).
+        the intrusion, or a list of (upper, lower) tuples if multiple dykes are defined.
+    aperture : float | list
+        The aperture (Mode I opening) of the dyke, or a list thereof. Used to displace surrounding rocks.
     
     Keywords
     ----------
@@ -95,13 +89,23 @@ def sheet(name, *, C, contact=(-1,1), aperture=2, sharpness=1e5, **kwargs):
     """
     if isinstance(contact, float) or isinstance(contact, int):
         contact = (-contact, contact) # define as upper and lower surface (assuming symmetry)
-    offset = SheetOffset(contact=contact, aperture=aperture)
+    if not isinstance(contact, list):
+        contact = [contact]
+    if not isinstance(aperture, list):
+        aperture = [aperture]
     
-    o = Overprint(threshold=contact, sharpness=sharpness, mode='in')
+    offset = []
+    overprint = []
+    for _c, _a in zip(contact, aperture):
+        offset.append( SheetOffset(contact=_c, aperture=_a) )
+        overprint.append( Overprint(threshold=_c, mode='in')  )
+    if len(offset) == 1:
+        offset = offset[0]
+        overprint = overprint[0]
 
-    return _initF( name, C=C, deformation=offset, overprint=o, **kwargs)
+    return _initF( name, C=C, deformation=offset, overprint=overprint, **kwargs)
 
-def fault(name, *, C, sigma1, learn_sigma=False, offset=0, contact=0, width=0, highcurve=False, **kwargs):
+def fault(name, *, C, shortening, learn_sigma=False, contact=0, offset=0, width=0, highcurve=False, **kwargs):
     """
     Create a GeoField representing a fault, shear zone or (optionally) dilatant shear vein.
 
@@ -111,19 +115,22 @@ def fault(name, *, C, sigma1, learn_sigma=False, offset=0, contact=0, width=0, h
         A name for the created stratigraphic series (and GeoField that represents it).
     C : CSet | curlew.fields.analytical.AF | curlew.fields.NF
         The constraints or predefined field used to constrain this geological structure.
-    sigma1 : np.ndarray
+    shortening : np.ndarray
         A numpy array of shape (n,) defining the principal compressive stress vector. This
         is used to resolve the slip direction, by projection onto the tangent of the fault's
         interpolated scalar field. Defaults to vertical.
     learn_sigma : bool
-        True if sigma1 should be converted to a learnable parameter. Default is False.
-    offset : float | tuple
+        True if shortening should be converted to a learnable parameter. Default is False.
+    contact : float | str | list
+        The value (or name) defining the fault (iso)surface. Default is zero. Multi-faults (i.e. parallel
+        faults with different displacements and locations but with geometry defined by a single implicit
+        function) can be constructed by making `contact`, `offset` and `width` a list with one entry for
+        each fault surface.
+    offset : float | tuple | list
         The mode-2 slip on this (shear) fault. If a float is passed, 
         the offset will be fixed. If a tuple containing (initial, minimum, maximum) is
         passed then the offset will be learned, by constrained to the specified range.
-    contact : float | str
-        The value (or name) defining the fault (iso)surface. Default is zero.
-    width : float | tuple
+    width : float | tuple | list
         The width of ductile deformation associated with this fault. If a float is passed
         then this will specify the width of ductile deformation (using a sigmoid function),
         such that large widths can be used for shear zones and small values of width
@@ -146,35 +153,50 @@ def fault(name, *, C, sigma1, learn_sigma=False, offset=0, contact=0, width=0, h
     ---------
     A `curlew.geology.GeoField` instance for the created structure.
     """
+    # shortening
+    if shortening is None: 
+        shortening = np.zeros( f.field.input_dim )
+        shortening[-1] = -1 # default is vertical vector
+    shortening = torch.tensor( shortening, device=curlew.device, dtype=curlew.dtype) 
     
-    # sigma1
-    if sigma1 is None: 
-        sigma1 = np.zeros( f.field.input_dim )
-        sigma1[-1] = -1 # default is vertical vector
-    sigma1 = torch.tensor( sigma1, device=curlew.device, dtype=curlew.dtype) 
-    
-    # build offset object
-    O = FaultOffset(sigma1=sigma1, offset=offset, contact=contact, 
-                         width=width, highcurve=highcurve )
-
-    # handle constant or learnable offsets and/or slip direction
-    init=False
-    if isinstance( offset, tuple):
-        offset, smin, smax = offset # shear (mode II) offset
-        #f.field.offset = nn.Parameter( torch.tensor( offset, device=curlew.device, dtype=curlew.dtype) ) # will now be changed by optimiser!
-        O.offset = nn.Parameter( torch.tensor( offset, device=curlew.device, dtype=curlew.dtype) ) # will now be changed by optimiser!
-        O.offset_min = smin
-        O.offset_max = smax
-        init=True
+    if isinstance(contact, list) or isinstance(contact, tuple) or isinstance(contact, np.ndarray):
+        if not (isinstance(offset, list) or isinstance(offset, tuple) or isinstance(offset, np.ndarray)):
+            offset = [offset for i in contact] # listify
+        if not (isinstance(width, list) or isinstance(width, tuple) or isinstance(width, np.ndarray)):
+            width = [width for i in contact] # listify
+        assert len(offset) == len(contact)
+        assert len(width) == len(contact)
     else:
-        O.offset = torch.tensor(offset, device=curlew.device, dtype=curlew.dtype)
-    if learn_sigma:
-        O.sigma1 = nn.Parameter( O.sigma1 )
-        init=True
-    
-    if init: # initialise the optimiser to include the new parameters
-        O.init_optim(lr=kwargs.get('learning_rate', 1e-1))
+        contact = [contact] # listify
+        offset = [offset]
+        width = [width]
 
+    # build offset object(s)
+    O = []
+    for _c,_o, _w in zip(contact, offset, width):
+        offs = FaultOffset(shortening=shortening, offset=_o, contact=_c, 
+                            width=_w, highcurve=highcurve )
+
+        # handle constant or learnable offsets and/or slip direction
+        init=False
+        if isinstance( _o, tuple):
+            _o, smin, smax = _o # shear (mode II) offset
+            offs.offset = nn.Parameter( torch.tensor( _o, device=curlew.device, dtype=curlew.dtype) ) # will now be changed by optimiser!
+            offs.offsetRange = (smin, smax) # use min and max to constrain the range of values allowed
+            init=True
+        else:
+            offs.offset = torch.tensor(_o, device=curlew.device, dtype=curlew.dtype)
+        if learn_sigma:
+            offs.shortening = nn.Parameter( offs.shortening )
+            init=True
+        
+        if init: # initialise the optimiser to include the new parameters
+            offs.init_optim(lr=kwargs.get('learning_rate', 1e-1))
+        O.append(offs)
+    
+    if len(O) == 1:
+        O = O[0] # un-listify for single fault surfaces
+    
     # build field
     f = _initF( name, C=C, deformation=O, **kwargs)
 
@@ -268,7 +290,7 @@ def fold( name, *, origin, compression, extension, wavelength, amplitude=1.0, sh
     return GeoField( name, None, field=fa, # use pre-existing (analytical) field rather than creating a new one
                     deformation=defo )
 
-def domainBoundary( name, *, C, bound = 0, gt = 0, lt = 1, sharpness=1e4, mode="below", **kwargs ):
+def domainBoundary( name, *, C, bound = 0, gt = 0, lt = 1, mode="below", **kwargs ):
     """
     Create a GeoField representing a domain boundary, in which different sub-models are modelled on either side of the boundary. 
     This can be very useful for modelling e.g., sedimentary basins, where the basin fill is modelled on one side of the boundary (onlap relations), 
@@ -293,9 +315,6 @@ def domainBoundary( name, *, C, bound = 0, gt = 0, lt = 1, sharpness=1e4, mode="
         The overprinting mode. Options are:
             - `"above"`: replace all regions greater than the provided threshold). Useful for e.g., unconformities.
             - `"below"`: replace all regions less than than the provided threshold). Useful for e.g., intrusions.
-    sharpness : float
-        Multiple used to change the sharpness of the inequality when using differentiable pytorch
-        tensors (as the inequality operator is replaced with a sigmoid functions).
     
     Keywords
     ----------
@@ -309,7 +328,7 @@ def domainBoundary( name, *, C, bound = 0, gt = 0, lt = 1, sharpness=1e4, mode="
     """
 
     # create field representing domain boundary
-    o = Overprint(threshold=bound, sharpness=sharpness, mode=mode)
+    o = Overprint(threshold=bound, mode=mode)
     f = _initF( name, C=C, overprint=o, **kwargs)
 
     # define parent / child relationships for domain boundary field

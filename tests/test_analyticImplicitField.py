@@ -54,7 +54,7 @@ def test_multi():
     s3 = fault( 'fault', C=LinearField( 'fault', input_dim=2, 
                                 origin=np.array([600,0]),
                                 gradient=np.array([-1,-1]), normalise=True ),
-                sigma1=np.array([0,1]), 
+                shortening=np.array([0,1]), 
                 offset=60.0, 
                 width=(1, 1/50, 0.4) )
     
@@ -120,7 +120,7 @@ def test_fold():
     s4 = fault( 'fault', C=LinearField( 'fault', input_dim=2, 
                                 origin=np.array([600,0]),
                                 gradient=np.array([-1,-1]), normalise=True ),
-                sigma1=np.array([0,1]), 
+                shortening=np.array([0,1]), 
                 offset=250.0, 
                 width=(1, 50, 0.4) )
 

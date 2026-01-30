@@ -55,7 +55,7 @@ class GeoField( object ):
             A name for this event.
         type : child class of `curlew.fields.BaseNF` (e.g., `curlew.fields.fourier.NFF`). This determines the type of neural or 
                 analytical field used to paramaterise this scalar field.
-        deformation : function, None
+        deformation : curlew.interactions.Deformation, list, None
             A function that translates the values of this scalar field into vector displacements, such that f(X1, self) 
             returns an array X0 of shape (N,ndim) that represents the pre-deformation coordinates of X1.
         overprint : curlew.interactions.Overprint, None
@@ -298,12 +298,16 @@ class GeoField( object ):
 
                 # GENERATIVE EVENTS (OVERPRINT OLDER FIELDS)
                 if self.overprint is not None: 
-                    # evaluate isosurfaces to get threshold values
-                    # (allows self.bound to containt str isosurface names)
-                    self.overprint.thresh = self.getIsovalues(values=self.overprint.threshold)
-
                     # apply overprinting operation
-                    out = self.overprint.apply( parent, child, domain=None )
+                    if isinstance(self.overprint, list):
+                        out = parent
+                        for o in self.overprint: # apply multiple overprint inequalities
+                            o.thresh = self.getIsovalues(values=o.threshold)
+                            out = o.apply( out, child )
+                    else:
+                        # evaluate isosurfaces to get threshold values
+                        self.overprint.thresh = self.getIsovalues(values=self.overprint.threshold)
+                        out = self.overprint.apply( parent, child, domain=None )
                 
                 # NO OVERPRINT DEFINED (PURELY KINEMATIC EVENTS LIKE FAULTS)
                 else:
@@ -498,13 +502,25 @@ class GeoField( object ):
         if self.deformation is None:
             offset = torch.zeros_like(x) # no deformation
         else:
-            if isinstance(x, Geode):
-                offset = self.deformation.eval(x.x, self)
+            if isinstance(x, Geode): # We are evaluating a full Geode object
+                if not isinstance(self.deformation, list):
+                    offset = self.deformation.eval(x.x, self) # just one deformation function
+                else:
+                    offset = self.deformation[0].eval(x.x, self) # evaluate first offset function
+                    if len(self.deformation) > 1: # evaluate remaining offset functions
+                        for d in self.deformation[1:]:
+                            offset = offset + d.eval(x.x, self)
                 x.offsets[self.name] = offset # store offset in Geode
                 return x
-            else:
-                offset = self.deformation.eval(x, self)
-
+            else: # we are just evaluating a bunch of points
+                if not isinstance(self.deformation, list):
+                    offset = self.deformation.eval(x, self)
+                else:
+                    offset = self.deformation[0].eval(x, self) # evaluate first offset function
+                    if len(self.deformation) > 1: # evaluate remaining offset functions
+                        for d in self.deformation[1:]:
+                            offset = offset + d.eval(x, self)            
+        
         if tonp: # cast to numpy if needed
             return offset.detach().cpu().numpy() # return as numpy array
         else:

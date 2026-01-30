@@ -218,7 +218,7 @@ def hutton( shape=(1500,1000), **kwargs ):
     M  = GeoModel( [s0,d1,s1], grid=G, name='hutton' )
     s = M.predict(G)
     C = sample( s, pv='rgb', **kwargs )
-    C=[C[2],C[0],C[3]] # ignore fold event when generating constraints
+    C=[C[1],C[0],C[2]] # ignore fold event when generating constraints
 
     return C, M
 
@@ -295,7 +295,7 @@ def michell( shape=(1500,1000), offset=100, **kwargs ):
     s0 = strati('s0', C=QuadraticField( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500)  ) )
     s1 = fault( 's1', 
            C=LinearField( 'f1', input_dim=2, origin=(1000,500), gradient=(0.5,0.5)  ),
-           offset=offset, sigma1 = [-1,0] )
+           offset=offset, shortening = [-1,0] )
 
     for y in np.linspace(0, shape[1], 5): # generate 5 contacts
         s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
@@ -355,10 +355,10 @@ def anderson( shape=(1500,1000), offset1=225, offset2=250, **kwargs ):
     s0 = strati('s0', C=QuadraticField( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500)  ) )
     s1 = fault( 's1', 
            C=LinearField( 'f1', input_dim=2, origin=(950,550), gradient=(np.cos( np.deg2rad(35) ), np.sin( np.deg2rad(35) ))  ),
-           offset=offset1, sigma1 = [0,-1] )  # extensional faults
+           offset=offset1, shortening = [0,-1] )  # extensional faults
     s2 = fault( 's2', 
            C=LinearField( 'f2', input_dim=2, origin=(1050,500), gradient=(-np.cos( np.deg2rad(35) ), np.sin( np.deg2rad(35) ))  ),
-           offset=offset2, sigma1 = [0,-1] ) # extensional faults
+           offset=offset2, shortening = [0,-1] ) # extensional faults
     
     for y in np.linspace(0, shape[1], 5): # generate 5 contacts
         s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
