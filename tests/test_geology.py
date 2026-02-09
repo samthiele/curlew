@@ -33,7 +33,7 @@ def test_hutton():
                 base=-np.inf, # basal surface (important for unconformities)
                 hidden_layers=[32,], # hidden layers in the multi-layer perceptron that parameterises our field
                 rff_features=64, # number of random sin and cos features to create for each scale 
-                length_scales=[500,]) # the length scales in our model
+                length_scales=[500/2*np.pi,]) # the length scales in our model
 
     # define interpolator for unconformity field
     s1 = strati('unconformity', # name of created geological neural field (GNF)
@@ -43,7 +43,7 @@ def test_hutton():
                 base="base", # basal surface (important for unconformities). In this case these have a value of 0.
                 hidden_layers=[32], # hidden layers in the multi-layer perceptron that parameterises our field
                 rff_features=64, # number of random sin and cos features to create for each scale 
-                length_scales=[2000,]) # the length scales in our model
+                length_scales=[2000/2*np.pi,]) # the length scales in our model
     
     # define isosurfaces
     s1.isosurfaces = Ms['s1'].isosurfaces
@@ -139,7 +139,7 @@ def test_playfair():
                 base=-np.inf, # basal surface (important for unconformities)
                 hidden_layers=[8,], # hidden layers in the multi-layer perceptron that parameterises our field
                 rff_features=32, # number of random sin and cos features to create for each scale 
-                length_scales=[2000]) # the length scales in our model
+                length_scales=[2000/2*np.pi]) # the length scales in our model
     
     # define interpolator for unconformity field
     H = HSet( value_loss=1, # strength of penalty for mismatch between value constraints and field outputs
@@ -153,7 +153,7 @@ def test_playfair():
                 contact=("upper","lower"), # Lower and upper surface of our dyke (which in this case is 100 m thick).
                 hidden_layers=[8,], # hidden layers in the multi-layer perceptron that parameterises our field
                 rff_features=32, # number of random sin and cos features to create for each scale 
-                length_scales=[2000,]) # the length scales in our model
+                length_scales=[2000/2*np.pi,]) # the length scales in our model
     s1.addIsosurface("upper", seed=np.array([dims[0]/2 - 25, 0]) ) # create isosurfaces used to determine where the dyke is
     s1.addIsosurface("lower", seed=np.array([dims[0]/2 + 25, 0]) )
 

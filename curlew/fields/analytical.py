@@ -6,7 +6,7 @@ these can also be used to build geological models.
 import numpy as np
 import curlew
 import torch
-from curlew.geometry import blended_wave
+from curlew.geometry import blended_wave, Transform
 from curlew.fields import BaseAF
 
 class LinearField( BaseAF ):
@@ -103,7 +103,7 @@ class QuadraticField( BaseAF ):
         """
         return torch.sum( (x - self.origin[None,:]) * self.grad[None,:] + self.curve[None,:] * ((x - self.origin[None,:]))**2, axis=-1 )
 
-class PeriodicField( BaseAF ):
+class PeriodicField(BaseAF):
     """
     Analytical periodic field, used to represent e.g., folded geometries.
 
@@ -177,8 +177,10 @@ class PeriodicField( BaseAF ):
 # Softramp listric faults
 class ListricField(BaseAF):
     """
-    Analytical softramp field to represent listric fault geometries. The geometry is defined using a modified hyperbolic tangent function to control curvature and asymptotic behavior.
-    It inherits from analytical fields implementing specificgeometrical functions.
+    Analytical softramp field to represent listric fault geometries. The geometry is defined using a modified hyperbolic
+    tangent function to control curvature and asymptotic behavior.
+
+    It inherits from analytical fields implementing specific geometrical functions.
 
     Parameters (passed as keyword arguments through constructor)
     ---------------------------------------------------------------
@@ -230,3 +232,67 @@ class ListricField(BaseAF):
             den = np.log(2) * (1 + 2**(-self.k * (coords[:, 0] - self.origin[0])))
             return torch.cat([num/den, torch.ones_like(coords[:, 1])], dim=-1)
         return listric_grad_func
+
+class EllipsoidalField(BaseAF):
+    """
+    A dimension-agnostic analytical field for N-dimensional hyper-ellipsoids.
+    Using the Transform function within the BaseSF class, applies an affine transform
+    to the coordinates to morph the distance field into an ellipsoidal field such that
+    the value at the center is always 1 and falls off to zero.
+
+    The zero isosurface exists at a distance of 1 in the pre-transformed coordinates; hence
+    it exists at the ellipsoid described by the axes and directions.
+    """
+    def initField(self,
+                  origin: np.ndarray = None,
+                  axes: np.ndarray = None,
+                  directions: np.ndarray = None):
+        
+        # 1. Determine dimensionality from input parameters or default
+        if origin is not None:
+            dim = len(origin)
+        elif axes is not None:
+            dim = len(axes)
+        else:
+            dim = getattr(self, "input_dim", 3) # Fallback to 3D
+
+        # Store dimension
+        self.dim = dim
+
+        # Setup Center (Vector v)
+        if origin is None:
+            origin = np.zeros(dim)
+        self.origin = torch.tensor(origin, dtype=curlew.dtype, device=curlew.device)
+
+        # Setup Scaling (Diagonal Matrix D)
+        if axes is None:
+            axes = np.ones(dim)
+        axes_t = torch.tensor(axes, dtype=curlew.dtype, device=curlew.device)
+        D = torch.diag(axes_t)
+
+        # Setup Rotation/Orientation (Matrix R)
+        if directions is None:
+            R = torch.eye(dim, dtype=curlew.dtype, device=curlew.device)
+        else:
+            # directions should be (dim, dim)
+            R = torch.tensor(directions, dtype=curlew.dtype, device=curlew.device)
+            # Ensure the basis vectors are unit length (normalization)
+            R = R / torch.linalg.norm(R, dim=-1, keepdim=True)
+
+        # The Shape Matrix M = R @ D @ R.T
+        M = R @ D @ R.T # This is the top left section of the affine transform
+        # The translation is concatenated based on the origin
+        T_matrix = torch.cat([M, self.origin.unsqueeze(1)], dim=1)
+        T_matrix = torch.cat([T_matrix, torch.cat(
+                                                 [torch.zeros(self.dim, dtype=curlew.dtype, device=curlew.device),
+                                                 torch.ones(1, device=curlew.device, dtype=curlew.dtype)]).unsqueeze(0)], dim=0)
+        # We need to invert the transform matrix (as we move from world to field coordinates)
+        self.T = Transform(matrix=T_matrix).inverse()
+
+    def evaluate(self, x: torch.Tensor):
+        """
+        """
+        # Return the norm of the transformed position (the distance from the origin morphed to the ellipse)
+        # We subtract it from 1 to make it fall off to zero at the boundary.
+        # N.B. We need the clamp to avoid negatives
+        return torch.clamp(1 - torch.linalg.norm(x, dim=1), min=0)

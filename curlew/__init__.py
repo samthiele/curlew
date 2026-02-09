@@ -44,7 +44,7 @@ Kamath, A.V., Thiele, S.T., Moulard, M., Grose, L., Tolosana-Delgado, R., Hillie
 
 """
 import torch
-
+import numpy as np
 from curlew.fields import BaseNF
 from curlew.geology.geomodel import GeoModel
 from curlew.geology.geofield import GeoField
@@ -92,6 +92,18 @@ try:
         colors=colors,
         N=256  # resolution of the ramp
     )
+
+    # create a shuffled version for visualising stratigraphies
+    _colors = ccramp(np.linspace(0, 1, 255))[:, :3]
+    _step = 25 # block shuffle
+    for i in np.arange(0,len(_colors), step=_step):
+        if i + _step*2 > len(_colors):
+            break
+        ixx = np.random.choice(np.arange(i,i+_step*2), _step*2, replace=False)
+        _colors[i:(i+_step*2), :] = _colors[ixx, :]
+
+    # Create a new colormap
+    ccstrat = mcolors.ListedColormap(_colors, name="curlew_stratigraphic")
 
 except:
     pass

@@ -21,10 +21,10 @@ def _checkCSet( C, dims=2, val=True, grad=True, ori=True, prop=True ):
         assert len(C.pv) > 0
 
 def test_synthetic():
-    from curlew.synthetic import steno, hutton, michell, playfair, anderson, lehmann, suess
-    dims = (2001,1001)  # dimensions used for each of our 2D models
-    for f in [steno, hutton, michell, playfair, anderson, lehmann]: # suess
-        C, M = f(dims) # create the synthetic "hutton" dataset
+    from curlew.synthetic import steno, hutton, michell, playfair, anderson, lehmann, walker #seuss
+    dims = (2001, 1001)  # dimensions used for each of our 2D models
+    for f in [steno, hutton, michell, walker, playfair, anderson, lehmann]: # seuss
+        C, M = f(dims) # create the synthetic dataset
         print(M.name)
         xy = M.grid.coords() # get associated grid points
         g = M.predict(xy) # evaluate model

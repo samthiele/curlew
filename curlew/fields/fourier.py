@@ -73,8 +73,8 @@ class NFF(BaseNF):
             torch.manual_seed(self.seed)
 
             # Weight and bias for RFF
-            self.weight_matrix = [torch.randn(self.input_dim, rff_features, device=curlew.device, dtype=curlew.dtype ) for i in range(len(length_scales))]
-            self.bias_vector = 2 * torch.pi * torch.rand(rff_features, device=curlew.device, dtype=curlew.dtype )
+            self.weight_matrix = [2*torch.pi*torch.randn(self.input_dim, rff_features, device=curlew.device, dtype=curlew.dtype ) for i in range(len(length_scales))]
+            # self.bias_vector = 2 * torch.pi * torch.rand(rff_features, device=curlew.device, dtype=curlew.dtype )
             if not stochastic_scales:
                 for i in range(len(length_scales)): # make direction vectors (weights) have a length of 1
                     self.weight_matrix[i] /= torch.norm(self.weight_matrix[i], dim=0)[None,:] # normalise so projection vectors are unit length
@@ -161,7 +161,7 @@ class NFF(BaseNF):
         """
         outputs = []
         for i in range(len(self.length_scales)):
-            proj = coords @ (self.weight_matrix[i] / self.length_scales[i]) + self.bias_vector
+            proj = coords @ (self.weight_matrix[i] / self.length_scales[i]) # + self.bias_vector
             cos_part = torch.cos(proj)
             sin_part = torch.sin(proj)
             outputs.append(torch.cat([cos_part, sin_part], dim=-1))

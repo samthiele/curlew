@@ -190,7 +190,7 @@ class FaultOffset( OffsetBase ):
     Calculate offsets for a scalar field representing an infinite sheet intrusion (dyke or sill).
     """
 
-    def __init__(self, shortening, offset=0, offsetRange=(-np.inf,np.inf), contact=0, width=1e-5, modifier=None, highcurve=False, polarity=1):
+    def __init__(self, shortening, offset=0, offsetRange=None, contact=0, width=1e-5, modifier=None, highcurve=False, polarity=1):
         """
         Initialise a new FaultOffset object.
 
@@ -205,7 +205,7 @@ class FaultOffset( OffsetBase ):
             the first element is a learnable parameter, and the second two give the allowed
             range of values, such that `offset = torch.clamp( offset[0], offset[1], offset[2] )`.
         offsetRange : tuple
-            A tuple specifying the minimum and maximum allowed offset. Used if offset is a learnable parameter, 
+            A tuple specifying the minimum and maximum allowed offset. Must be defined if offset is a learnable parameter, 
             such that `applied_offset = torch.clamp( offset, min(offsetRange), max(offsetRange))
         contact : float | str
             The isosurface value (or name) defining the value used to define the fault surface. Default is zero.

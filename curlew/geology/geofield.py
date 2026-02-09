@@ -220,7 +220,7 @@ class GeoField( object ):
                 value = x
                 value.scalar = torch.full( (len(x.x),), float(self.field), device=curlew.device, dtype=curlew.dtype)
             else:
-                value.scalar = torch.full( (len(x),1), float(self.field), device=curlew.device, dtype=curlew.dtype)
+                value = torch.full( (len(x),1), float(self.field), device=curlew.device, dtype=curlew.dtype)
         else:
             value = self.field.forward(x, transform=undef) # evaluate the underlying field
         

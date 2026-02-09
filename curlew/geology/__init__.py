@@ -92,7 +92,8 @@ def sheet(name, *, C, contact=(-1,1), aperture=2, **kwargs):
     if not isinstance(contact, list):
         contact = [contact]
     if not isinstance(aperture, list):
-        aperture = [aperture]
+        aperture = [aperture for c in contact]
+    assert len(contact) == len(aperture)
     
     offset = []
     overprint = []
