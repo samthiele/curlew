@@ -223,7 +223,7 @@ class ListricField(BaseAF):
             return coords[:, 1] - self.y_f - (self.y_s - self.y_f)*(torch.log2(1 + 2**(-self.k * (coords[:, 0] - self.origin[0]))))
         return listric_func
     
-    def listric_grad(self): # TODO - ask Akshay why this is so weird?
+    def listric_grad(self):
         """
         Return the gradient of the scalar field.
         """
@@ -296,3 +296,96 @@ class EllipsoidalField(BaseAF):
         # We subtract it from 1 to make it fall off to zero at the boundary.
         # N.B. We need the clamp to avoid negatives
         return torch.clamp(1 - torch.linalg.norm(x, dim=1), min=0)
+
+class RectangularPrismField(BaseAF):
+    """
+    A dimension-agnostic analytical field for N-dimensional Rectangular Prisms (Hyper-rectangles).
+    
+    Using the Transform function within the BaseSF class, it applies an affine transform
+    to map world coordinates to a canonical 'unit cube' space.
+    
+    The zero isosurface exists at the boundary of the prism defined by the axes (half-extents)
+    and directions. Ideally, 'axes' should define the half-width, half-height, etc.
+    """
+    def initField(self,
+                  origin: np.ndarray = None,
+                  axes: np.ndarray = None,
+                  directions: np.ndarray = None,
+                  mask: bool = False
+                  ):
+        
+        # 1. Determine dimensionality
+        if origin is not None:
+            dim = len(origin)
+        elif axes is not None:
+            dim = len(axes)
+        else:
+            dim = getattr(self, "input_dim", 3)
+
+        self.dim = dim
+        self.mask = mask
+
+        # Setup Center
+        if origin is None:
+            origin = np.zeros(dim)
+        self.origin = torch.tensor(origin, dtype=curlew.dtype, device=curlew.device)
+
+        # Setup Scaling (Half-extents)
+        if axes is None:
+            axes = np.ones(dim)
+        axes_t = torch.tensor(axes, dtype=curlew.dtype, device=curlew.device)
+        D = torch.diag(axes_t)
+
+        # Setup Rotation/Orientation
+        if directions is None:
+            R = torch.eye(dim, dtype=curlew.dtype, device=curlew.device)
+        else:
+            if directions.shape == (dim - 1, dim):
+                # If we have only dim-1 directions, we assume the last one is the cross product of the others
+                directions = np.vstack([directions, np.cross(directions[0], directions[1])])
+            elif directions.shape != (dim, dim):
+                raise ValueError(f"Directions should be of shape ({dim}, {dim}) or ({dim-1}, {dim}), but got {directions.shape}")
+            R = torch.tensor(directions, dtype=curlew.dtype, device=curlew.device)
+            # Normalize basis vectors
+            R = R / torch.linalg.norm(R, dim=-1, keepdim=True)
+
+        # Construct the Shape Matrix M = R @ D @ R.T
+        # This scales the space along the specific direction vectors
+        M = R @ D
+        
+        # Construct full Affine Transform
+        T_matrix = torch.cat([M, self.origin.unsqueeze(1)], dim=1)
+        
+        # Add the homogenous row [0, 0, ... 1]
+        homogenous_row = torch.cat(
+            [torch.zeros(self.dim, dtype=curlew.dtype, device=curlew.device),
+             torch.ones(1, device=curlew.device, dtype=curlew.dtype)]
+        ).unsqueeze(0)
+        
+        T_matrix = torch.cat([T_matrix, homogenous_row], dim=0)
+
+        # Invert to get World -> Field transform
+        self.T = Transform(matrix=T_matrix).inverse()
+
+    def evaluate(self, x: torch.Tensor):
+        """
+        Evaluates the field intensity using the L-Infinity norm (max absolute difference).
+        
+        In the canonical space, the prism is a unit hypercube [-1, 1].
+        We calculate the maximum distance along any axis from the center.
+        """
+        # 1. Calculate absolute values of the coordinates (in canonical space)
+        abs_x = torch.abs(x)
+        
+        # 2. Find the maximum value along the dimension axis (L_infinity norm)
+        # torch.max returns a named tuple (values, indices), we just want values.
+        # This represents the distance from center to the nearest face in unit space.
+        chebyshev_dist = torch.max(abs_x, dim=1).values
+        
+        # 3. Calculate falloff
+        # Inside the box, dist < 1.0, so result is positive.
+        # On the boundary, dist = 1.0, result is 0.
+        if self.mask:
+            return torch.clamp(1 - chebyshev_dist, min=0)
+        else:
+            return 1 - chebyshev_dist
