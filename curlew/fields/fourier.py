@@ -10,7 +10,6 @@ import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 import copy
-
 from curlew.fields import BaseNF
 
 class NFF(BaseNF):
@@ -22,13 +21,11 @@ class NFF(BaseNF):
     ----------
     use_rff : bool
         Indicates whether random Fourier feature encoding is applied.
-    weight_matrix : torch.Tensor or None
-        RFF weight matrix of shape (input_dim, rff_features) if RFF is used, else None.
-    bias_vector : torch.Tensor or None
-        RFF bias vector of shape (rff_features,) if RFF is used, else None.
+    fourier_projection : torch.Tensor or None
+        RFF projection matrix of shape (input_dim, rff_features * num_scales) if RFF is used, else None.
     length_scales : torch.Tensor or None
         Length scales for RFF if used, else None.
-    mlp : nn.ModuleList
+    mlp : nn.Sequential
         A sequence of linear layers (and optional activation) forming the MLP.
     """
 
@@ -72,15 +69,19 @@ class NFF(BaseNF):
             # Seed for reproducibility
             torch.manual_seed(self.seed)
 
-            # Weight and bias for RFF
-            self.weight_matrix = [2*torch.pi*torch.randn(self.input_dim, rff_features, device=curlew.device, dtype=curlew.dtype ) for i in range(len(length_scales))]
-            # self.bias_vector = 2 * torch.pi * torch.rand(rff_features, device=curlew.device, dtype=curlew.dtype )
-            if not stochastic_scales:
-                for i in range(len(length_scales)): # make direction vectors (weights) have a length of 1
-                    self.weight_matrix[i] /= torch.norm(self.weight_matrix[i], dim=0)[None,:] # normalise so projection vectors are unit length
-
-            # store length scales as a tensor (these will be multiplied by our weight matrix later)
-            self.length_scales = torch.tensor(length_scales, device=curlew.device, dtype=curlew.dtype)
+            # Single combined projection matrix for all length scales (vectorised RFF)
+            combined_weights = []
+            for i in range(len(length_scales)):
+                w = 2*torch.pi*torch.randn(self.input_dim,
+                                           rff_features, 
+                                           device=curlew.device, 
+                                           dtype=curlew.dtype)
+                if not stochastic_scales:
+                    w = w / torch.norm(w, dim=0, keepdim=True)
+                combined_weights.append(w / length_scales[i])
+            projection = torch.cat(combined_weights, dim=1)
+            self.register_buffer("fourier_projection", projection)
+            self.length_scales = length_scales # store, just in case we need it later
             
         # -------------------- MLP Construction -------------------- #
         # Determine input dimension for the MLP
@@ -100,7 +101,8 @@ class NFF(BaseNF):
         for i in range(len(self.dims) - 2):
             layers.append(nn.Linear(self.dims[i], self.dims[i + 1],
                                     device=curlew.device, dtype=curlew.dtype))
-            layers.append(activation)
+            if self.activation is not None:
+                layers.append(self.activation)
 
         # Final layer
         layers.append(nn.Linear(self.dims[-2], self.dims[-1],
@@ -111,7 +113,7 @@ class NFF(BaseNF):
         for layer in self.mlp:
             if isinstance(layer, nn.Linear):
                 nn.init.xavier_normal_(layer.weight)
-
+                
         # push onto device
         self.to(curlew.device)
 
@@ -146,8 +148,7 @@ class NFF(BaseNF):
     def _encode_rff(self, coords: torch.Tensor) -> torch.Tensor:
         """
         Encodes the input coordinates using random Fourier features with the specified
-        length scales. For each length scale, we compute cos(W/scale * x + b) and
-        sin(W/scale * x + b) and concatenate them.
+        length scales. Single matrix multiply for all scales, then cos/sin applied once.
 
         Parameters
         ----------
@@ -159,13 +160,8 @@ class NFF(BaseNF):
         torch.Tensor
             Encoded tensor of shape (N, 2 * rff_features * num_scales).
         """
-        outputs = []
-        for i in range(len(self.length_scales)):
-            proj = coords @ (self.weight_matrix[i] / self.length_scales[i]) # + self.bias_vector
-            cos_part = torch.cos(proj)
-            sin_part = torch.sin(proj)
-            outputs.append(torch.cat([cos_part, sin_part], dim=-1))
-        return torch.cat(outputs, dim=-1)
+        proj = coords @ self.fourier_projection
+        return torch.cat([torch.cos(proj), torch.sin(proj)], dim=-1)
 
 # import other child classes for easy access
 from curlew.fields.analytical import BaseAF, LinearField

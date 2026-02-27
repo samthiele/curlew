@@ -58,21 +58,31 @@ dtype = torch.float64
 default_dim = 3
 """The default input dimensionality (2D or 3D) to use when creating new models. Default is 3."""
 
+compile = False 
+"""Whether to compile the model using torch.compile. This can significantly speed up larger models when using a GPU."""
+
 ccmap = None
 """A colourful (custom) matplotlib (categorical) colormap taylored for `curlew`. Will only be set if `matplotlib` is installed."""
 
 ccramp = None
 """A colourful (custom) matplotlib (continuous) colormap taylored for `curlew`. Will only be set if `matplotlib` is installed."""
 
+ccstrat = None
+"""A shuffled version of ccmap, useful for plotting stratigraphic fields as though they have many layers in them. """
 
 batchSize = 512000
 """Divide arrays larger than this size into chunks (batches) to reduce memory usage and avoid out-of-memory crashes."""
 
+mpl=False
 try:
     # Define curlew colormap :-) 
     import matplotlib.colors as mcolors
+    mpl = True
+except:
+    pass
 
-    # Define the colors extracted manually from the provided logo image
+if mpl:
+    # Define a custom / pretty colour ramp for curlew models
     colors = [
         "#A6340B",  # rich red (not darkest)
         "#E35B0E",  # vibrant orange-red
@@ -86,14 +96,14 @@ try:
     ]
     ccmap = mcolors.ListedColormap(colors=colors, name='curlew_categorical')
 
-    # Create a continuous colormap
+    # Also as a continuous colormap
     ccramp = mcolors.LinearSegmentedColormap.from_list(
         name="curlew_continuous",
         colors=colors,
         N=256  # resolution of the ramp
     )
 
-    # create a shuffled version for visualising stratigraphies
+    # and a shuffled version for visualising stratigraphies
     _colors = ccramp(np.linspace(0, 1, 255))[:, :3]
     _step = 25 # block shuffle
     for i in np.arange(0,len(_colors), step=_step):
@@ -104,9 +114,6 @@ try:
 
     # Create a new colormap
     ccstrat = mcolors.ListedColormap(_colors, name="curlew_stratigraphic")
-
-except:
-    pass
 
 # import things we want to expose under the `curlew` namespace
 from curlew import core

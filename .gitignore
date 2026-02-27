@@ -19,6 +19,9 @@ share/python-wheels/
 MANIFEST
 sandbox
 
+# benchmarks
+.benchmarks/
+
 # VS Code
 .vscode/
 .VSCodeCounter

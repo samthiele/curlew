@@ -26,6 +26,11 @@ def _initF( name, C, **kwargs):
         f = GeoField( name, **kwargs ) # create our GeoField
     else:  # predifined field
         f = GeoField( name, type=type(C), field=C, **kwargs ) # create our GeoField using predefined Field
+    
+    # compile the field to booooost performance
+    if curlew.compile and isinstance(f.field, nn.Module):
+        f.field.compile()
+        
     return f
 
 def strati( name, *, C, base = -np.inf, mode="above", **kwargs):

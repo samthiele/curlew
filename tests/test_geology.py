@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from curlew.geology.geomodel import GeoModel
 from curlew.geometry import grid
 from curlew.fields.fourier import NFF
@@ -453,3 +454,123 @@ def test_isosurfaces():
     # test isovalue offset
     assert (f1.getIsovalue('fault', offset=1.0) - np.linalg.norm( f1.field.grad )) < 1e-6
     assert (-f1.getIsovalue('fault', offset=-1.0) - np.linalg.norm( f1.field.grad )) < 1e-6
+
+
+def test_anchors():
+    """Check that anchors are stored, transformed to paleo via getAnchor, and injected into the field during evaluation."""
+    from curlew.synthetic import michell
+
+    dims = (2000, 1000)
+    C, _ = michell(dims, offset=100)
+    C = C[:-1]
+
+    from curlew import HSet
+    from curlew.geology import strati, fault
+
+    G = grid(dims, step=(50, 50), center=(dims[0] / 2, dims[1] / 2), sampleArgs=dict(N=256))
+    for _c in C:
+        _c.grid = G
+        _c.delta = 10
+
+    H = HSet(value_loss=1, grad_loss=1, mono_loss="0.1", thick_loss="1.0")
+    s0 = strati(
+        "basement",
+        C=C[0],
+        H=H,
+        type=NFF,
+        base=-np.inf,
+        hidden_layers=[8],
+        rff_features=32,
+        length_scales=[2000],
+    )
+    s1 = fault(
+        "fault",
+        C=C[1],
+        H=H,
+        type=NFF,
+        shortening=(-1, 0),
+        offset=(100, 0, 300),
+        width=0,
+        hidden_layers=[8],
+        rff_features=32,
+        length_scales=[6000],
+    )
+    M = GeoModel([s0, s1])
+    M.prefit(epochs=10, best=True, vb=False)
+
+    # Add anchors in modern-day coordinates
+    pt_modern = np.array([dims[0] / 2, 400.0])
+    s1.addAnchor("centre", pt_modern)
+    s1.addAnchor("other", [100.0, 200.0])
+
+    assert "centre" in s1.anchors
+    assert "other" in s1.anchors
+    np.testing.assert_array_almost_equal(s1.anchors["centre"], pt_modern)
+
+    # getAnchor returns numpy by default; for s1 (youngest, child is None) it returns the point unchanged
+    paleo_centre = s1.getAnchor("centre")[0]
+    assert hasattr(paleo_centre, "shape")
+    assert paleo_centre.shape == (1, 2)
+    paleo_other = s1.getAnchor("other")[0]
+    assert paleo_other.shape == (1, 2)
+    np.testing.assert_allclose(
+        np.asarray(paleo_centre),
+        pt_modern[None, :],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    # For s0 (has child s1), getAnchor uses child.undeform so it should match s0.undeform
+    s0.addAnchor("centre", pt_modern)
+    pt_batch = np.asarray(pt_modern)
+    if pt_batch.ndim == 1:
+        pt_batch = pt_batch[None, :]
+    pt_t = torch.tensor(pt_batch, device=curlew.device, dtype=curlew.dtype)
+    np.testing.assert_allclose(
+        s0.getAnchor("centre")[0],
+        s0.undeform(pt_t).detach().cpu().numpy(),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    # During evaluation, field should receive anchor_{name} as tensors (to_numpy=False)
+    x = np.array([[dims[0] / 2, 500.0]])
+    _ = s1.predict(x, combine=False, to_numpy=False)
+    assert hasattr(s1.field, "centre"), "field should have anchor_centre after evaluation"
+    assert hasattr(s1.field, "other"), "field should have anchor_other after evaluation"
+    np.testing.assert_allclose(
+        getattr(s1.field, "centre").detach().cpu().numpy(),
+        s1.getAnchor("centre")[0],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    # Direction anchor: position + direction (normalised in reconstructed space)
+    s1.addAnchor("axis", position=[500.0, 300.0], direction=[3.0, 4.0])
+    assert isinstance(s1.anchors["axis"], dict)
+    assert s1.anchors["axis"]["normalize"] is True
+    pos_axis, dir_axis = s1.getAnchor("axis")
+    assert dir_axis is not None
+    np.testing.assert_allclose(np.linalg.norm(dir_axis), 1.0, rtol=1e-5, atol=1e-5)
+    # Stored end = position + direction = [503, 304]; for s1 (no child) recon = same
+    np.testing.assert_allclose(pos_axis, [[500.0, 300.0]], rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(dir_axis, [[3.0 / 5.0, 4.0 / 5.0]], rtol=1e-5, atol=1e-5)
+
+    # Direction anchor: start + end (not normalised)
+    s1.addAnchor("segment", start=[0.0, 0.0], end=[100.0, 0.0])
+    assert s1.anchors["segment"]["normalize"] is False
+    pos_seg, dir_seg = s1.getAnchor("segment")
+    assert dir_seg is not None
+    np.testing.assert_allclose(dir_seg, [[100.0, 0.0]], rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(pos_seg, [[0.0, 0.0]], rtol=1e-5, atol=1e-5)
+
+    # During evaluation, direction anchors inject name and name_direction
+    _ = s1.predict(x, combine=False, to_numpy=False)
+    assert hasattr(s1.field, "axis") and hasattr(s1.field, "axis_direction")
+    assert hasattr(s1.field, "segment") and hasattr(s1.field, "segment_direction")
+
+    # Invalid addAnchor combinations raise
+    with np.testing.assert_raises(ValueError):
+        s1.addAnchor("bad", position=[0, 0], start=[0, 0], end=[1, 1])
+    with np.testing.assert_raises(ValueError):
+        s1.addAnchor("bad2")

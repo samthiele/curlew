@@ -18,5 +18,6 @@ setup(
     long_description_content_type="text/markdown",
     include_package_data=True,
     install_requires=['numpy', 'torch', 'tqdm'],
+    extras_require={'benchmark': ['pytest-benchmark']},
     package_data = {"":["*.png","*.ttl"]}
 )

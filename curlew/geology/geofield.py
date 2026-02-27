@@ -86,6 +86,7 @@ class GeoField( object ):
         self.propertyField = propertyField # forward (property) prediction, if defined
 
         self.isosurfaces = {} # this will hold any added isosurfaces
+        self.anchors = {} # named anchor points in modern-day coordinates (paleo positions via getAnchor)
         self.llookup = None # this will be defined if lithology IDs have been defined
                             # (when GeoFields are combined into a GeoModel).
 
@@ -185,6 +186,14 @@ class GeoField( object ):
             # retro-deform other constraints
             C0 = C.numpy().transform( self.child.undeform )
         
+        # inject paleo-coordinate anchors so the field can use them during training if needed
+        for name in self.anchors:
+            pos, direction = self.getAnchor(name, to_numpy=False)            
+            if direction is not None: # anchor represents a direction
+                setattr(self.field, name, direction)
+            elif pos is not None: # anchor represents a position
+                setattr(self.field, name, pos)
+
         # fit
         try:
             out = self.field.fit(epochs, C=C0, transform=False, 
@@ -222,6 +231,12 @@ class GeoField( object ):
             else:
                 value = torch.full( (len(x),1), float(self.field), device=curlew.device, dtype=curlew.dtype)
         else:
+            # inject paleo-coordinate anchors as parameters so the field can use them if needed
+            for name in self.anchors:
+                pos, direction = self.getAnchor(name, to_numpy=False)
+                setattr(self.field, name, pos)
+                if direction is not None:
+                    setattr(self.field, name + "_direction", direction)
             value = self.field.forward(x, transform=undef) # evaluate the underlying field
         
         if isinstance(value, Geode):
@@ -565,6 +580,118 @@ class GeoField( object ):
         """
         if name in self.isosurfaces:
             del self.isosurfaces[name]
+
+    def addAnchor( self, name: str, position: ArrayLike = None, *, direction: ArrayLike = None, start: ArrayLike = None, end: ArrayLike = None ):
+        """
+        Add an anchor point or direction to this GeoField. Coordinates are in modern-day (present) coordinates.
+        During evaluation they are transformed to reconstructed (paleo) coordinates via undeform and
+        exposed on the underlying field (position as ``name``, direction if applicable as ``name + '_direction'``).
+
+        One of the following must be given:
+
+        - **Position only**: ``position`` → anchor is a single point (same as legacy ``addAnchor(name, point)``).
+        - **Position + direction**: ``position`` and ``direction`` → two positions are stored (position and
+          position + direction). In reconstructed coordinates the direction vector is (end_recon - start_recon)
+          and is **normalised**.
+        - **Start + end**: ``start`` and ``end`` → two positions are stored. In reconstructed coordinates
+          the direction vector is (end_recon - start_recon) and is **not** normalised.
+
+        Parameters
+        ----------
+        name : str
+            A name used to refer to this anchor (used for the field parameter).
+        position : array-like, optional
+            Single position (x, y, [z]) in modern-day coordinates. If given alone, defines a position anchor.
+            If given with ``direction``, base point for a direction anchor.
+        direction : array-like, optional
+            Direction vector. Used with ``position``; stored as second point = position + direction.
+            Reconstructed direction is normalised.
+        start : array-like, optional
+            Start position for a direction anchor. Must be used with ``end``.
+        end : array-like, optional
+            End position for a direction anchor. Must be used with ``start``. Reconstructed direction
+            (end - start in paleo coordinates) is not normalised.
+        """
+        has_pos = position is not None
+        has_dir = direction is not None
+        has_start = start is not None
+        has_end = end is not None
+
+        if has_pos and not has_dir and not has_start and not has_end:
+            # Position-only anchor (legacy behaviour)
+            self.anchors[name] = np.asarray(position)
+            return
+        if has_pos and has_dir and not has_start and not has_end:
+            # Position + direction: store two points; direction in reconstructed space will be normalised
+            start_pt = np.asarray(position)
+            end_pt = np.asarray(position) + np.asarray(direction)
+            self.anchors[name] = {"start": start_pt, "end": end_pt, "normalize": True}
+            return
+        if has_start and has_end and not has_pos and not has_dir:
+            # Start + end: store two points; direction in reconstructed space will not be normalised
+            self.anchors[name] = {"start": np.asarray(start), "end": np.asarray(end), "normalize": False}
+            return
+        # Invalid combination
+        raise ValueError(
+            "addAnchor requires one of: position only; position and direction; or start and end."
+        )
+
+    def getAnchor( self, name: str, to_numpy: bool = True):
+        """
+        Return the anchor position (and optionally direction) in reconstructed coordinates for this GeoField.
+        If ``self.child`` is not None, applies ``self.child.undeform`` to transform from
+        modern-day to this field's reference frame; otherwise uses the stored point(s) as-is.
+
+        Parameters
+        ----------
+        name : str
+            Name of the anchor (as given to addAnchor).
+        to_numpy : bool, optional
+            If True (default), return numpy array(s); if False, return torch.Tensor(s).
+            Pass False when setting parameters on the underlying field (e.g. in forward).
+        
+        Returns
+        -------
+        position: np.ndarray | torch.Tensor | None
+            Position of shape (1, input_dim).
+        direction: np.ndarray | torch.Tensor | None
+            Direction of shape (1, input_dim), if a direction anchor is defined.
+        """
+        assert name in self.anchors, f"Anchor '{name}' not found."
+        stored = self.anchors[name]
+
+        def to_torch(arr):
+            a = np.asarray(arr)
+            if a.ndim == 1:
+                a = a[None, :]
+            return torch.tensor(a, device=curlew.device, dtype=curlew.dtype)
+
+        def undeform_pt(pt):
+            t = to_torch(pt)
+            if self.child is not None:
+                t = self.child.undeform(t)
+            return t
+
+        if isinstance(stored, dict):
+            # Direction anchor: start, end [, normalize]
+            start_recon = undeform_pt(stored["start"])
+            end_recon = undeform_pt(stored["end"])
+            diff = end_recon - start_recon
+            if stored.get("normalize", False):
+                norm = torch.norm(diff, dim=-1, keepdim=True) + 1e-8
+                diff = diff / norm
+            pos_out = start_recon
+            dir_out = diff
+            if to_numpy:
+                pos_out = pos_out.cpu().detach().numpy()
+                dir_out = dir_out.cpu().detach().numpy()
+            return pos_out, dir_out
+        else:
+            # Position-only anchor
+            pt = undeform_pt(stored)
+            if to_numpy:
+                pt = pt.cpu().detach().numpy()
+            return pt, None
 
     def getIsovalue( self, name, offset=0):
         """
