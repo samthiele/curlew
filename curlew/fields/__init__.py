@@ -416,10 +416,12 @@ class BaseNF(BaseSF):
                 # to compute the divergence of the normalised field and so penalise bubbles (local maxima and minima)
                 #hess = torch.zeros((gridL.shape[0], self.input_dim, self.input_dim), device=curlew.device, dtype=curlew.dtype)
                 ndiv = torch.zeros((gridL.shape[0]), device=curlew.device, dtype=curlew.dtype)
+                hess = torch.zeros((gridL.shape[0], self.input_dim, self.input_dim), device=curlew.device, dtype=curlew.dtype)
                 for j in range(self.input_dim):
                     # compute hessian
                     grad_pos = self.gradient(gridL + C._offset[j], normalize=False, transform=False, accumulate=True, retain_graph=True, create_graph=True)
                     grad_neg = self.gradient(gridL - C._offset[j], normalize=False, transform=False, accumulate=True, retain_graph=True, create_graph=True)
+                    hess[:, j, j] = (grad_pos[:, j] - grad_neg[:, j])/(2*C.delta)
                     #for i in range(self.input_dim):
                     #    hess[:, i, j] = (grad_pos[:, i] - grad_neg[:, i])/(2*C.delta)
 
@@ -441,7 +443,8 @@ class BaseNF(BaseSF):
 
                 # compute derived thickness and monotonocity loss
                 if isinstance(H.mono_loss, str) or (H.mono_loss > 0):
-                    L['mono_loss'] = torch.mean(ndiv**2) # (normalised) divergence should be close to 0
+                    #L['mono_loss'] = torch.mean(ndiv**2) # (normalised) divergence should be close to 0
+                    L['mono_loss'] = torch.mean(torch.abs(hess))
                 if isinstance(H.thick_loss, str) or (H.thick_loss > 0):
                     # L['thick_loss'] = torch.mean( torch.linalg.det(hess)**2 ) # determinant should be close to 0 [ breaks in 2D, as the trace and determinant can't both be 0 unless all is 0!]
                     L['thick_loss'] = L['thick_loss'] / (2*self.input_dim) # normalise to get average (doesn't change anything, but makes values easier to interpret)
