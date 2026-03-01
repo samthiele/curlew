@@ -773,14 +773,14 @@ class Transform:
             raise ValueError("points must have shape (N, D)")
 
         n, d = points.shape
-        mat = torch.tensor( self.matrix, dtype=points.dtype, device=points.device)
+        mat = torch.tensor( self.matrix, dtype=curlew.dtype, device=curlew.device)
 
         if mat.shape == (3, 3) and d != 2:
             raise ValueError("3x3 transform requires (N,2) points")
         if mat.shape == (4, 4) and d != 3:
             raise ValueError("4x4 transform requires (N,3) points")
 
-        ones = torch.ones((n, 1), dtype=points.dtype, device=points.device)
+        ones = torch.ones((n, 1), dtype=curlew.dtype, device=curlew.device)
         homo = torch.cat([points, ones], dim=1)           # (N, D+1)
 
         transformed = (mat @ homo.T).T                    # (N, D+1)

@@ -9,12 +9,15 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
-import copy
 from curlew.geometry import Transform
 
 from typing import Optional, List, Tuple, Union
 ArrayLike = Union[np.ndarray, "torch.Tensor"]
 
+# float neg and pos infinity (used in loss function)
+ninf = float('-inf')
+inf = float('inf')
+            
 class BaseSF(LearnableBase):
     """
     Base class for all implicit (scalar) fields, including interpolated, learned or analytical fields.
@@ -201,7 +204,28 @@ class BaseSF(LearnableBase):
                     o = [0]*self.input_dim
                     o[i] = C.delta
                     C._offset.append( torch.tensor( o, device=curlew.device, dtype=curlew.dtype) )
-    
+
+        # pre-allocate inequality clamp tensors
+        # (layout matches loss: one block of ns per inequality)
+        if C.iq is not None:
+            ns = C.iq[0]
+            n_iq = len(C.iq[1])
+            total_ns = ns * n_iq
+            C._iq_low_clamp = torch.empty(total_ns, dtype=curlew.dtype, device=curlew.device)
+            C._iq_high_clamp = torch.empty(total_ns, dtype=curlew.dtype, device=curlew.device)
+            offset = 0
+            for _start, _end, iq in C.iq[1]:
+                if '=' in iq:
+                    C._iq_low_clamp[offset : offset + ns] = ninf
+                    C._iq_high_clamp[offset : offset + ns] = inf
+                elif '<' in iq:
+                    C._iq_low_clamp[offset : offset + ns] = 0.0
+                    C._iq_high_clamp[offset : offset + ns] = inf
+                elif '>' in iq:
+                    C._iq_low_clamp[offset : offset + ns] = ninf
+                    C._iq_high_clamp[offset : offset + ns] = 0.0
+                offset += ns
+
     def reset_mnorm(self):
         """Reset accumulation of average gradient magnitude"""
         self.mnorm = 0
@@ -379,7 +403,6 @@ class BaseNF(BaseSF):
         L = {}
         for k in ['value_loss', 'grad_loss', 'ori_loss', 'thick_loss', 'mono_loss', 'flat_loss', 'iq_loss']:
             L[k] = 0
-        total_loss = 0
 
         # LOCAL LOSS FUNCTIONS
         # -----------------------------
@@ -412,42 +435,49 @@ class BaseNF(BaseSF):
             if  isinstance(H.thick_loss, str) or isinstance(H.mono_loss, str) or isinstance(H.flat_loss, str) or \
                 (H.thick_loss > 0) or (H.mono_loss > 0) or (H.flat_loss > 0):
 
-                # numerically compute the hessian of our scalar field from the gradient vectors
-                # to compute the divergence of the normalised field and so penalise bubbles (local maxima and minima)
-                #hess = torch.zeros((gridL.shape[0], self.input_dim, self.input_dim), device=curlew.device, dtype=curlew.dtype)
-                ndiv = torch.zeros((gridL.shape[0]), device=curlew.device, dtype=curlew.dtype)
-                hess = torch.zeros((gridL.shape[0], self.input_dim, self.input_dim), device=curlew.device, dtype=curlew.dtype)
-                for j in range(self.input_dim):
-                    # compute hessian
-                    grad_pos = self.gradient(gridL + C._offset[j], normalize=False, transform=False, accumulate=True, retain_graph=True, create_graph=True)
-                    grad_neg = self.gradient(gridL - C._offset[j], normalize=False, transform=False, accumulate=True, retain_graph=True, create_graph=True)
-                    hess[:, j, j] = (grad_pos[:, j] - grad_neg[:, j])/(2*C.delta)
-                    #for i in range(self.input_dim):
-                    #    hess[:, i, j] = (grad_pos[:, i] - grad_neg[:, i])/(2*C.delta)
+                # Numerically compute the Hessian and normalised divergence from gradient vectors
+                # (single batched gradient call over all shifted grids)
+                d = self.input_dim
+                N = gridL.shape[0]
+                delta = C.delta
+                offsets = torch.stack(C._offset, dim=0)  # (d, d)
+                all_pos = gridL.unsqueeze(0) + offsets.unsqueeze(1)   # (d, N, d)
+                all_neg = gridL.unsqueeze(0) - offsets.unsqueeze(1)   # (d, N, d)
+                stacked_coords = torch.cat([all_pos, all_neg], dim=0).reshape(-1, d)  # (2*d*N, d)
 
-                    # compute and accumulate average gradient
-                    pnorm = torch.norm(grad_pos, dim=-1 )[:,None]
-                    nnorm = torch.norm(grad_neg, dim=-1 )[:,None]
+                grad_all = self.gradient(
+                    stacked_coords, normalize=False, transform=False,
+                    accumulate=True, retain_graph=True, create_graph=True
+                )  # (2*d*N, d)
 
-                    # compute divergence of normalised gradient field
-                    if isinstance(H.mono_loss, str) or (H.mono_loss > 0):
-                        grad_pos = grad_pos / pnorm
-                        grad_neg = grad_neg / nnorm
-                        ndiv = ndiv + (grad_pos[:,j] - grad_neg[:,j])/(2*C.delta)
+                grad_pos = grad_all[: d * N].reshape(d, N, d)   # (d, N, d)
+                grad_neg = grad_all[d * N :].reshape(d, N, d)   # (d, N, d)
 
-                    # compute the percentage deviation in the gradient (at all the points where we evaluated it)
-                    if isinstance(H.thick_loss, str) or (H.thick_loss > 0):
-                        L['thick_loss'] = L['thick_loss'] + \
-                                          torch.mean( (1-(pnorm/torch.clip(torch.mean(pnorm), 1e-8, torch.inf )) )**2 ) + \
-                                          torch.mean( (1-(nnorm/torch.clip(torch.mean(nnorm), 1e-8, torch.inf )) )**2 )
+                # Hessian diagonal: ∂²φ/∂x_j² ≈ (∇φ(x+δ e_j)_j - ∇φ(x-δ e_j)_j) / (2*delta)
+                hess_diag = (grad_pos - grad_neg).diagonal(dim1=0, dim2=2) / (2 * delta)  # (N, d)
+                hess = torch.zeros((N, d, d), device=curlew.device, dtype=curlew.dtype)
+                hess[:, range(d), range(d)] = hess_diag
+
+                pnorm = torch.norm(grad_pos, dim=-1)   # (d, N)
+                nnorm = torch.norm(grad_neg, dim=-1)   # (d, N)
+
+                if isinstance(H.mono_loss, str) or (H.mono_loss > 0):
+                    grad_pos_norm = grad_pos / (pnorm.unsqueeze(-1) + 1e-8)
+                    grad_neg_norm = grad_neg / (nnorm.unsqueeze(-1) + 1e-8)
+                    ndiv = (grad_pos_norm - grad_neg_norm).diagonal(dim1=0, dim2=2).sum(dim=1) / (2 * delta)
+
+                if isinstance(H.thick_loss, str) or (H.thick_loss > 0):
+                    pnorm_mean = torch.clip(pnorm.mean(dim=1, keepdim=True), 1e-8, torch.inf)
+                    nnorm_mean = torch.clip(nnorm.mean(dim=1, keepdim=True), 1e-8, torch.inf)
+                    L['thick_loss'] = ((1 - pnorm / pnorm_mean) ** 2).mean() + ((1 - nnorm / nnorm_mean) ** 2).mean()
 
                 # compute derived thickness and monotonocity loss
                 if isinstance(H.mono_loss, str) or (H.mono_loss > 0):
                     #L['mono_loss'] = torch.mean(ndiv**2) # (normalised) divergence should be close to 0
                     L['mono_loss'] = torch.mean(torch.abs(hess))
-                if isinstance(H.thick_loss, str) or (H.thick_loss > 0):
-                    # L['thick_loss'] = torch.mean( torch.linalg.det(hess)**2 ) # determinant should be close to 0 [ breaks in 2D, as the trace and determinant can't both be 0 unless all is 0!]
-                    L['thick_loss'] = L['thick_loss'] / (2*self.input_dim) # normalise to get average (doesn't change anything, but makes values easier to interpret)
+                #if isinstance(H.thick_loss, str) or (H.thick_loss > 0):
+                #    # L['thick_loss'] = torch.mean( torch.linalg.det(hess)**2 ) # determinant should be close to 0 [ breaks in 2D, as the trace and determinant can't both be 0 unless all is 0!]
+                #    L['thick_loss'] = L['thick_loss'] / (2*self.input_dim) # normalise to get average (doesn't change anything, but makes values easier to interpret)
 
                 # Flatness Loss --  gradients everywhere parallel to trend
                 if (isinstance(H.flat_loss, str) or (H.flat_loss > 0)) and (C.trend is not None):
@@ -458,35 +488,26 @@ class BaseNF(BaseSF):
                     L['flat_loss'] = torch.mean((gv_at_grid_p - C.trend[None,:])**2) # "younging" direction
                     #flat_loss = (1 - self.closs( gv_at_grid_p, C.trend )).mean() # orientation only
 
-        # inequality losses
+        # inequality losses (single batched forward; start/end interleaved so reshape separates)
         if (C.iq is not None) and (isinstance(H.iq_loss, str) or (H.iq_loss > 0)):
-            ns = C.iq[0] # number of samples
-            for start,end,iq in C.iq[1]:
-                # sample N random pairs to evaluate inequality
-                six = torch.randint(0, start.shape[0], (ns,), dtype=int, device=curlew.device)
-                eix = torch.randint(0, end.shape[0], (ns,), dtype=int, device=curlew.device)
+            ns = C.iq[0]
+            pts_list = []  # [s0_block, e0_block, s1_block, e1_block, ...]
+            for start, end, iq in C.iq[1]:
+                six = torch.randint(0, start.shape[0], (ns,), dtype=torch.int, device=curlew.device)
+                eix = torch.randint(0, end.shape[0], (ns,), dtype=torch.int, device=curlew.device)
+                pts_list.append(start[six, :])
+                pts_list.append(end[eix, :])
+            all_pts = torch.cat(pts_list, dim=0)
+            n_iq = len(pts_list) // 2
+            all_vals = self(all_pts, transform=transform).flatten()
+            all_vals = all_vals.view(n_iq, 2, ns)
+            start_vals = all_vals[:, 0, :].reshape(-1)
+            end_vals = all_vals[:, 1, :].reshape(-1)
 
-                # evaluate value at these points
-                start = self( start[ six, : ], transform=transform )
-                end = self( end[ eix, : ], transform=transform )
-                delta = start - end
+            # C._iq_low_clamp / C._iq_high_clamp pre-allocated in bind()
+            delta_all = torch.clamp(start_vals - end_vals, C._iq_low_clamp, C._iq_high_clamp)**2
+            L['iq_loss'] = torch.mean(delta_all)
 
-                # compute loss according to the specific inequality
-                if '=' in iq:
-                    L['iq_loss'] = L['iq_loss'] + torch.mean(delta**2) # basically MSE
-                elif '<' in iq:
-                    L['iq_loss'] = L['iq_loss'] + torch.mean(torch.clamp(delta,0,torch.inf)**2)
-                elif '>' in iq:
-                    L['iq_loss'] = L['iq_loss'] + torch.mean(torch.clamp(delta,-torch.inf, 0)**2)
-
-        # parse loss hyperparameters
-        # If a hyperparameter is a string, we use this to derive an initial weight 
-        # that assumes all (initial) loss terms are equally bad
-        for k,v in L.items():
-            h = H.__getattribute__(k)
-            if isinstance(h, str):
-                H.__setattr__(k, float(h) * (1/v).item() if v > 0 else 0.0 )
-        
         # Dynamically adjust task weights based on the inverse of real-time loss values.
         # (this ignores the magnitude of each loss term, but preserves it's gradient direction,
         # and is a hacky but sometimes useful way to balance multi-task losses)
@@ -495,14 +516,27 @@ class BaseNF(BaseSF):
                 if v > 0:
                     L[k] = 1 / v.item()
         
-        # aggregate losses (and store individual parts for debugging)
+        # parse loss hyperparameters and aggregate to get combined loss
         out = { self.name : [0,{}] }
+        total_loss = 0
         for k,v in L.items():
-            alpha = H.__getattribute__(k)
-            if (alpha is not None) and (alpha > 0) and (v > 0):
-                total_loss = total_loss + alpha*v
-                out[self.name][1][k] = (alpha*v.item(), v.item())
-        
+            h = H.__getattribute__(k) # hyperparmeter weight
+            if isinstance(h, str):
+                h = float(h) * (1/v).item() if v > 0 else 0.0
+                H.__setattr__(k, h )
+            
+            if (h is not None) and (h > 0) and (v > 0):
+                s = h*v # scaled loss term
+                # store loss for debugging / reporting
+                out[self.name][1][k] = (s.item(), v.item())
+                
+                # throw away loss magnitude (just use sign). Can be useful for multi-objective optimisation
+                if (H.use_dynamic_loss_weighting):
+                    s = 1 / s.item()
+
+                total_loss = total_loss + s # aggregate loss!
+            
+        # store total loss too
         out[self.name][0] = total_loss.item()
 
         # done! 
@@ -562,6 +596,12 @@ class BaseNF(BaseSF):
         if C is not None:
             self.bind(C)
 
+        # Compile loss for faster repeated evaluation (PyTorch 2+)
+        #if compile_loss and hasattr(torch, "compile"):
+        #    _loss_fn = torch.compile(self.loss, mode="reduce-overhead")
+        #else:
+        _loss_fn = self.loss
+
         # store best state
         best_loss = np.inf
         best_loss_ = None
@@ -578,12 +618,12 @@ class BaseNF(BaseSF):
         if vb:
             bar = tqdm(range(epochs), desc=prefix, bar_format="{desc}: {n_fmt}/{total_fmt}|{postfix}")
         for epoch in bar:
-            loss, details = self.loss(transform=transform) # compute loss
+            loss, details = _loss_fn(transform=transform)
 
             if (loss.item() < (best_loss + eps)): # update best state
                 best_loss = loss.item()
                 best_loss_ = details
-                best_state = copy.deepcopy( self.state_dict() )
+                best_state = {k: v.detach().clone() for k, v in self.state_dict().items()}
                 best_count = 0
             else: # not necessarily the best; but keep for return
                 if best_state == None:

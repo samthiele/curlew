@@ -9,7 +9,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
-import copy
 from curlew.fields import BaseNF
 
 class NFF(BaseNF):
@@ -29,19 +28,20 @@ class NFF(BaseNF):
         A sequence of linear layers (and optional activation) forming the MLP.
     """
 
-    def initField(self, hidden_layers: list = [512,],
-             activation: nn.Module = nn.SiLU(),
-             rff_features: int = 8,
-             length_scales: list = [1e2, 2e2, 3e2],
-             stochastic_scales : bool = True,
-             learning_rate: float = 1e-1,):
+    def initField(self, 
+                  hidden_layers: list = [],
+                  activation: nn.Module = None,
+                  rff_features: int = 8,
+                  length_scales: list = [1e2, 2e2, 3e2],
+                  stochastic_scales : bool = True,
+                  learning_rate: float = 1e-1):
         """
             Initialise and build this neural field.
             
             hidden_layers : list of int, optional
-                A list of integer sizes for the hidden layers of the MLP.
+                A list of integer sizes for the hidden layers of the MLP. Default is [,], which indicates the input encoding is directly translated to the output (i.e. no hidden layers).
             activation : nn.Module, optional
-                The activation function to use for each hidden layer.
+                The activation function to use for each hidden layer. Default is None, though `nn.SiLU()` can be useful for some fields.
             rff_features : int, optional
                 Number of Fourier features for each input dimension (when RFF is used). 
                 Set as 0 to disable RFF.

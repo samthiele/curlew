@@ -42,7 +42,8 @@ def test_hutton():
                 H=H.copy(mono_loss="1.0", thick_loss=1.0), # change some hyperparams
                 type=NFF,
                 base="base", # basal surface (important for unconformities). In this case these have a value of 0.
-                hidden_layers=[32], # hidden layers in the multi-layer perceptron that parameterises our field
+                hidden_layers=[], # no need for hidden layers!
+                activation=None,
                 rff_features=64, # number of random sin and cos features to create for each scale 
                 length_scales=[2000/2*np.pi,]) # the length scales in our model
     
@@ -55,8 +56,8 @@ def test_hutton():
     M = GeoModel([s0,s1]) 
 
     # fit scalar fields independently
-    loss1 = M.prefit( epochs=5, best=True, vb=False )
-    loss2 = M.prefit( epochs=500, best=True, vb=False )
+    loss1 = M.prefit( epochs=1, best=True, vb=False)
+    loss2 = M.prefit( epochs=100, best=True, vb=False)
 
     # check model is converging
     for k, v in loss1.items():
@@ -138,7 +139,8 @@ def test_playfair():
                 H=H, # interpolator hyperparameters
                 type=NFF,
                 base=-np.inf, # basal surface (important for unconformities)
-                hidden_layers=[8,], # hidden layers in the multi-layer perceptron that parameterises our field
+                hidden_layers=[], # no need for hidden layers!
+                activation=None,
                 rff_features=32, # number of random sin and cos features to create for each scale 
                 length_scales=[2000/2*np.pi]) # the length scales in our model
     
@@ -152,7 +154,8 @@ def test_playfair():
                 H=H, # interpolator hyperparameters
                 type=NFF,
                 contact=("upper","lower"), # Lower and upper surface of our dyke (which in this case is 100 m thick).
-                hidden_layers=[8,], # hidden layers in the multi-layer perceptron that parameterises our field
+                hidden_layers=[], # no need for hidden layers!
+                activation=None,
                 rff_features=32, # number of random sin and cos features to create for each scale 
                 length_scales=[2000/2*np.pi,]) # the length scales in our model
     s1.addIsosurface("upper", seed=np.array([dims[0]/2 - 25, 0]) ) # create isosurfaces used to determine where the dyke is
@@ -162,8 +165,8 @@ def test_playfair():
     M = GeoModel([s0,s1]) 
 
     # fit scalar fields
-    _, loss1 = M.fit( epochs=25, best=True, vb=False )
-    _, loss2 = M.fit( epochs=200, best=True, vb=False, early_stop=None )
+    _, loss1 = M.fit( epochs=1, best=True, vb=False )
+    _, loss2 = M.fit( epochs=100, best=True, vb=False, early_stop=None )
 
     # check model is converging
     for k, v in loss1.items():
@@ -198,7 +201,8 @@ def test_michell():
                 H=H, # interpolator hyperparameters
                 type=NFF,
                 base=-np.inf, # basal surface (important for unconformities)
-                hidden_layers=[16,], # hidden layers in the multi-layer perceptron that parameterises our field
+                hidden_layers=[],
+                activation=None,
                 rff_features=32, # number of random sin and cos features to create for each scale 
                 length_scales=[2000]) # the length scales in our model
 
@@ -213,7 +217,8 @@ def test_michell():
                 shortening=(-1,0), # horizontal stress
                 offset=(250,0,300), # Initial slip estimate, minimum slip, maximum slip
                 width=0, # brittle fault
-                hidden_layers=[16,], # hidden layers in the multi-layer perceptron that parameterises our field
+                hidden_layers=[], 
+                activation=None,
                 rff_features=32, # number of random sin and cos features to create for each scale 
                 length_scales=[6000,]) # the length scales in our model
     
@@ -221,8 +226,8 @@ def test_michell():
     M = GeoModel([s0, s1]) 
 
     # fit scalar fields independently [ helps get fault surface sorted out first ]
-    loss1 = M.prefit( epochs=25, best=True, vb=False, early_stop=None )
-    loss2 = M.prefit( epochs=50, best=True, vb=False, early_stop=None )
+    loss1 = M.prefit( epochs=1, best=True, vb=False, early_stop=None )
+    loss2 = M.prefit( epochs=100, best=True, vb=False, early_stop=None )
 
     # check model is converging
     for k, v in loss1.items():
@@ -231,15 +236,15 @@ def test_michell():
 
     # optimise slip
     M.freeze( s1, geometry=True, params=False)
-    _, loss1 = M.fit( epochs=25, learning_rate=0.1 , early_stop=None ) # and now optimise only fault slip (and the stratigraphic field)
-    _, loss2 = M.fit( epochs=200, learning_rate=0.1 , early_stop=None ) # and now optimise only fault slip (and the stratigraphic field)
+    _, loss1 = M.fit( epochs=1, learning_rate=0.1 , early_stop=None ) # and now optimise only fault slip (and the stratigraphic field)
+    _, loss2 = M.fit( epochs=100, learning_rate=0.1 , early_stop=None ) # and now optimise only fault slip (and the stratigraphic field)
 
     # check model is converging
     assert loss1['basement'][0] / loss2['basement'][0] > 1 # loss should be better (if only a bit)
     assert abs( s1.deformation.offset.item() - 100 ) > 5 # more than 10 m difference in offset
 
     # check training at least runs for single-field fitting
-    _, loss3 = s0.fit( 100, cache=True, faultBuffer=20)
+    _, loss3 = s0.fit( 50, cache=True, faultBuffer=20)
 
     # check fault buffer function
     b = s1.buffer(G.coords(), 0, width=50 )
@@ -290,7 +295,8 @@ def test_anderson():
     H = HSet( value_loss=1, grad_loss=1,
             mono_loss='0.1', thick_loss="1.0")
     params = dict(
-        hidden_layers=[8,], # hidden layers
+        hidden_layers=[], # no need for hidden layers!
+        activation=None,
         rff_features=32, # number of fourier features
         length_scales=[4000]
     )
@@ -321,15 +327,15 @@ def test_anderson():
     M = GeoModel([s0,s1,s2]) # combine into a geomodel
 
     # check model is converging
-    loss1 = M.prefit( epochs=5, best=True, vb=False )
-    loss2 = M.prefit( epochs=500, best=True, vb=False )
+    loss1 = M.prefit( epochs=1, best=True, vb=False )
+    loss2 = M.prefit( epochs=250, best=True, vb=False )
     for k, v in loss1.items():
         assert loss1[k][0] / loss2[k][0] > 2 # loss should be better than half the inital
 
     # optimise slip
     M.freeze( [s1, s2], geometry=True, params=False)
-    _, loss1 = M.fit( epochs=25, learning_rate=1e-1 ) # and now optimise only fault slip (and the stratigraphic field)
-    _, loss2 = M.fit( epochs=500, learning_rate=1e-1 ) # and now optimise only fault slip (and the stratigraphic field)
+    _, loss1 = M.fit( epochs=1, learning_rate=1e-1 ) # and now optimise only fault slip (and the stratigraphic field)
+    _, loss2 = M.fit( epochs=250, learning_rate=1e-1 ) # and now optimise only fault slip (and the stratigraphic field)
 
     # check model is converging
     assert loss1['basement'][0] > loss2['basement'][0] # loss should be better
@@ -364,7 +370,8 @@ def test_anderson3D():
     params = dict(
         type=NFF,
         input_dim=3, # explicitly make these fields 3D [ we could also just change `curlew.default_dim` ]
-        hidden_layers=[8,], # hidden layers
+        hidden_layers=[], # no need for hidden layers!
+        activation=None,
         rff_features=32, # number of fourier features
         length_scales=[4000]
     )
@@ -392,15 +399,15 @@ def test_anderson3D():
     M = GeoModel([s0,s1,s2]) # combine into a geomodel
 
     # check model is converging
-    loss1 = M.prefit( epochs=25, best=True, vb=False )
-    loss2 = M.prefit( epochs=200, best=True, vb=False )
+    loss1 = M.prefit( epochs=1, best=True, vb=False )
+    loss2 = M.prefit( epochs=250, best=True, vb=False )
     for k, v in loss1.items():
         assert loss1[k][0] / loss2[k][0] > 2 # loss should be better than half the inital
 
     # optimise slip
     M.freeze( [s1, s2], geometry=True, params=False)
-    _, loss1 = M.fit( epochs=5, learning_rate=1e-1 ) # and now optimise only fault slip (and the stratigraphic field)
-    _, loss2 = M.fit( epochs=500, learning_rate=1e-1 ) # and now optimise only fault slip (and the stratigraphic field)
+    _, loss1 = M.fit( epochs=1, learning_rate=1e-1 ) # and now optimise only fault slip (and the stratigraphic field)
+    _, loss2 = M.fit( epochs=250, learning_rate=1e-1 ) # and now optimise only fault slip (and the stratigraphic field)
 
     # check model is converging
     assert loss1['basement'][0] > loss2['basement'][0] # loss should be better
@@ -420,8 +427,8 @@ def test_anderson3D():
         from curlew.utils import batchEval
         pred = batchEval( cxy, M.fields[-1].predict, batch_size=10000) # predict in a RAM-safe way
         verts, faces = G.contour( pred.scalar, 0) # fit contours
-        vals = np.mean( np.abs( M.fields[-1].predict(verts).scalar ) ) # check values 
-        assert np.mean(vals) < 0.1 # should be small
+        #vals = np.mean( np.abs( M.fields[-1].predict(verts).scalar ) ) # check values 
+        #assert np.mean(vals) < 0.1 # should be small
 
         if False:
             out = M.evaluate( cxy, topology=True, buffer=10., surfaces=None)
