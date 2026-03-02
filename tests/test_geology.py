@@ -34,7 +34,7 @@ def test_hutton():
                 base=-np.inf, # basal surface (important for unconformities)
                 hidden_layers=[], # hidden layers in the multi-layer perceptron that parameterises our field
                 activation=None,
-                rff_features=64, # number of random sin and cos features to create for each scale 
+                rff_features=128, # number of random sin and cos features to create for each scale 
                 length_scales=[500/2*np.pi,]) # the length scales in our model
 
     # define interpolator for unconformity field
@@ -45,7 +45,7 @@ def test_hutton():
                 base="base", # basal surface (important for unconformities). In this case these have a value of 0.
                 hidden_layers=[], # no need for hidden layers!
                 activation=None,
-                rff_features=64, # number of random sin and cos features to create for each scale 
+                rff_features=128, # number of random sin and cos features to create for each scale 
                 length_scales=[2000/2*np.pi,]) # the length scales in our model
     
     # define isosurfaces
@@ -58,7 +58,7 @@ def test_hutton():
 
     # fit scalar fields independently
     loss1 = M.prefit( epochs=1, best=True, vb=False)
-    loss2 = M.prefit( epochs=100, best=True, vb=False)
+    loss2 = M.prefit( epochs=200, best=True, vb=False)
 
     # check model is converging
     for k, v in loss1.items():
@@ -374,7 +374,7 @@ def test_anderson3D():
         hidden_layers=[], # no need for hidden layers!
         activation=None,
         rff_features=32, # number of fourier features
-        length_scales=[4000]
+        length_scales=[4000],
     )
 
     s0 = strati('basement', # basement stratigraphy field
