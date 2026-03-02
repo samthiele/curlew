@@ -693,12 +693,22 @@ class Transform:
         if isinstance(mat, torch.Tensor):
             shape = tuple(mat.shape)
             self.matrix = mat.detach().cpu().numpy() # always store as a numpy array internally
+            self.tmatrix = mat.to(device=curlew.device, dtype=curlew.dtype)# always stores as tensor internally
         elif isinstance(mat, np.ndarray):
             shape = mat.shape
+            self.matrix = mat
+            self.tmatrix = torch.tensor(mat, dtype=curlew.dtype, device=curlew.device) # always stores as tensor internally
         else:
             raise TypeError("matrix must be a numpy array or torch tensor")
         if shape not in [(3, 3), (4, 4)]: # must be a transform matrix for 2D or 3D vectors.
             raise ValueError("Transform matrix must be 3x3 or 4x4")
+
+    def set(self, mat: ArrayLike):
+        """
+        Set the transform matrix.
+        """
+        self.matrix = mat # update matrix
+        self.__post_init__() # validate and update internal tensors
 
     def apply(self, points: ArrayLike) -> ArrayLike:
         """
@@ -720,26 +730,17 @@ class Transform:
         """
         Return a Transform representing the inverse operation.
         """
-        mat = self.matrix
+        mat = self.tmatrix
 
         if mat.shape[0] != mat.shape[1]:
                 raise ValueError("Transform matrix must be square") # duh!
 
-        if isinstance(mat, torch.Tensor): # torch
-            try:
-                inv = torch.linalg.inv(mat)
-            except RuntimeError as e:
-                raise ValueError("Transform matrix is not invertible") from e # bugger.
-            return Transform(inv)
-        elif isinstance(mat, np.ndarray): # numpy 
-            try:
-                inv = np.linalg.inv(mat)
-            except np.linalg.LinAlgError as e:
-                raise ValueError("Transform matrix is not invertible") from e
-            return Transform(inv)
-
-        else:
-            raise TypeError("matrix must be a numpy array or torch tensor")
+        try:
+            inv = torch.linalg.inv(mat)
+        except RuntimeError as e:
+            raise ValueError("Transform matrix is not invertible") from e # bugger.
+        
+        return Transform(inv)
 
 
     def _apply_numpy(self, points: np.ndarray) -> np.ndarray:
@@ -750,7 +751,7 @@ class Transform:
             raise ValueError("points must have shape (N, D)")
 
         n, d = points.shape
-        mat = np.asarray(self.matrix)
+        mat = self.matrix
 
         if mat.shape == (3, 3) and d != 2:
             raise ValueError("3x3 transform requires (N,2) points")
@@ -773,7 +774,7 @@ class Transform:
             raise ValueError("points must have shape (N, D)")
 
         n, d = points.shape
-        mat = torch.tensor( self.matrix, dtype=curlew.dtype, device=curlew.device)
+        mat = self.tmatrix
 
         if mat.shape == (3, 3) and d != 2:
             raise ValueError("3x3 transform requires (N,2) points")

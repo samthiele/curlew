@@ -1,5 +1,5 @@
 import numpy as np
-from curlew.fields import BaseNF
+import curlew
 
 def test_basic():
     # test colour map
@@ -130,11 +130,11 @@ def test_transform():
     pts2_t = torch.tensor([
         [1.0, 1.0],
         [2.0, 2.0],
-    ])
+    ], device=curlew.device, dtype=curlew.dtype)
     expected2_t = torch.tensor([
         [3.0, 4.0],
         [4.0, 5.0],
-    ])
+    ], device=curlew.device, dtype=curlew.dtype)
     out2_t = T2_t(pts2_t)
     assert torch.allclose(out2_t, expected2_t)
     assert np.allclose(pts2_t, T2_t.inverse()(out2_t))
@@ -146,16 +146,15 @@ def test_transform():
             [0.0, 1.0, 0.0, 2.0],
             [0.0, 0.0, 1.0, 3.0],
             [0.0, 0.0, 0.0, 1.0],
-        ])
-    )
+        ], device=curlew.device, dtype=curlew.dtype) )
     pts3_t = torch.tensor([
         [0.0, 0.0, 0.0],
         [1.0, 1.0, 1.0],
-    ])
+    ], device=curlew.device, dtype=curlew.dtype)
     expected3_t = torch.tensor([
         [1.0, 2.0, 3.0],
         [2.0, 3.0, 4.0],
-    ])
+    ], device=curlew.device, dtype=curlew.dtype)
     out3_t = T3_t.apply(pts3_t)
     assert torch.allclose(out3_t, expected3_t)
     assert np.allclose(pts3_t, T3_t.inverse()(out3_t))
