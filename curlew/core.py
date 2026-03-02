@@ -327,6 +327,10 @@ class HSet:
             gradient scale of each task based on its current loss.
         one_hot : bool
             Enables one-hot encoding of the scalar field value according to the event-ID. Only works with property field HSet()s.
+        reuse_worst_half : float
+            Fraction of inequality constraint pairs to retain as the "worst" from the previous epoch and reuse in the
+            next; the remainder are drawn randomly. 0 = disabled. 0.5 = keep worst 50%, redraw the other 50%.
+            Helps convergence by focusing the optimiser on high-loss inequality pairs.
     """
     
     value_loss : float = 1
@@ -339,6 +343,7 @@ class HSet:
     iq_loss : float = 0
     use_dynamic_loss_weighting : bool = False
     one_hot : bool = False
+    reuse_worst_half : float = 0.5
 
     def copy(self, **kwargs):
         """

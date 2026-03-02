@@ -38,15 +38,13 @@ def test_hutton():
                 length_scales=[500/2*np.pi,]) # the length scales in our model
 
     # define interpolator for unconformity field
-    # N.B. although not needed, this uses a hidden layer
-    # and an activation function, to check that this works.
     s1 = strati('unconformity', # name of created geological neural field (GNF)
                 C=C[1], # constraints for this field
                 H=H.copy(mono_loss="1.0", thick_loss=1.0), # change some hyperparams
                 type=NFF,
                 base="base", # basal surface (important for unconformities). In this case these have a value of 0.
-                hidden_layers=[32], # no need for hidden layers!
-                activation=torch.nn.SiLU(),
+                hidden_layers=[], # no need for hidden layers!
+                activation=None,
                 rff_features=64, # number of random sin and cos features to create for each scale 
                 length_scales=[2000/2*np.pi,]) # the length scales in our model
     
@@ -56,7 +54,7 @@ def test_hutton():
     s1.addIsosurface("base", seed=Ms.fields[1].field.origin) # layer near the base of the unconformity
 
     # combine into a geomodel
-    M = GeoModel([s0,s1]) 
+    M = GeoModel([s0,s1])
 
     # fit scalar fields independently
     loss1 = M.prefit( epochs=1, best=True, vb=False)

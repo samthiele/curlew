@@ -385,6 +385,8 @@ class BaseNF(BaseSF):
             self.closs = torch.nn.CosineSimilarity() # needed by some loss functions
             self.vloss = vloss # loss function to use for value fitting
             self.scale = scale
+            # optional worst-pair retention for inequality losses across epochs (see reuse_worst_half in HSet)
+            self._last_iq_worst_indices = None
 
     ## LEARNING
     def loss(self, transform=True) -> torch.Tensor:
@@ -426,16 +428,17 @@ class BaseNF(BaseSF):
 
         # GLOBAL LOSS FUNCTIONS
         # -------------------------------
+        reuse_frac = getattr(H, 'reuse_worst_half', 0) or 0 # set as 0 or None to disable
         if C.grid is not None:
             if transform:
-                gridL = C.grid.draw(self.transform) # specify transform
+                gridL = C.grid.draw(self.transform)  # sample transformed grid points
             else:
-                gridL = C.grid.draw() # no transform
+                gridL = C.grid.draw() # sample non-transformed grid points
             
             if  isinstance(H.thick_loss, str) or isinstance(H.mono_loss, str) or isinstance(H.flat_loss, str) or \
                 (H.thick_loss > 0) or (H.mono_loss > 0) or (H.flat_loss > 0):
 
-                # Numerically compute the Hessian and normalised divergence from gradient vectors
+                # Numerically compute the Hessian for mono loss
                 # (single batched gradient call over all shifted grids)
                 d = self.input_dim
                 N = gridL.shape[0]
@@ -453,7 +456,7 @@ class BaseNF(BaseSF):
                 grad_pos = grad_all[: d * N].reshape(d, N, d)   # (d, N, d)
                 grad_neg = grad_all[d * N :].reshape(d, N, d)   # (d, N, d)
 
-                # Hessian diagonal: ∂²φ/∂x_j² ≈ (∇φ(x+δ e_j)_j - ∇φ(x-δ e_j)_j) / (2*delta)
+                # Compute Hessian diagonal: ∂²φ/∂x_j² ≈ (∇φ(x+δ e_j)_j - ∇φ(x-δ e_j)_j) / (2*delta)
                 hess_diag = (grad_pos - grad_neg).diagonal(dim1=0, dim2=2) / (2 * delta)  # (N, d)
                 hess = torch.zeros((N, d, d), device=curlew.device, dtype=curlew.dtype)
                 hess[:, range(d), range(d)] = hess_diag
@@ -461,10 +464,10 @@ class BaseNF(BaseSF):
                 pnorm = torch.norm(grad_pos, dim=-1)   # (d, N)
                 nnorm = torch.norm(grad_neg, dim=-1)   # (d, N)
 
-                if isinstance(H.mono_loss, str) or (H.mono_loss > 0):
-                    grad_pos_norm = grad_pos / (pnorm.unsqueeze(-1) + 1e-8)
-                    grad_neg_norm = grad_neg / (nnorm.unsqueeze(-1) + 1e-8)
-                    ndiv = (grad_pos_norm - grad_neg_norm).diagonal(dim1=0, dim2=2).sum(dim=1) / (2 * delta)
+                # if isinstance(H.mono_loss, str) or (H.mono_loss > 0):
+                #     grad_pos_norm = grad_pos / (pnorm.unsqueeze(-1) + 1e-8)
+                #     grad_neg_norm = grad_neg / (nnorm.unsqueeze(-1) + 1e-8)
+                #     ndiv = (grad_pos_norm - grad_neg_norm).diagonal(dim1=0, dim2=2).sum(dim=1) / (2 * delta)
 
                 if isinstance(H.thick_loss, str) or (H.thick_loss > 0):
                     pnorm_mean = torch.clip(pnorm.mean(dim=1, keepdim=True), 1e-8, torch.inf)
@@ -492,11 +495,26 @@ class BaseNF(BaseSF):
         if (C.iq is not None) and (isinstance(H.iq_loss, str) or (H.iq_loss > 0)):
             ns = C.iq[0]
             pts_list = []  # [s0_block, e0_block, s1_block, e1_block, ...]
-            for start, end, iq in C.iq[1]:
-                six = torch.randint(0, start.shape[0], (ns,), dtype=torch.int, device=curlew.device)
-                eix = torch.randint(0, end.shape[0], (ns,), dtype=torch.int, device=curlew.device)
+            # compile inequality pairs to compute (half from cached "worst half" and half randomly drawn)
+            six_list, eix_list = [], []
+            for c, (start, end, iq) in enumerate(C.iq[1]):
+                if reuse_frac > 0 and self._last_iq_worst_indices is not None and c < len(self._last_iq_worst_indices):
+                    six_keep, eix_keep = self._last_iq_worst_indices[c]
+                    n_keep = six_keep.shape[0]
+                    n_new = ns - n_keep
+                    six_new = torch.randint(0, start.shape[0], (n_new,), dtype=torch.int, device=curlew.device)
+                    eix_new = torch.randint(0, end.shape[0], (n_new,), dtype=torch.int, device=curlew.device)
+                    six = torch.cat([six_keep, six_new])
+                    eix = torch.cat([eix_keep, eix_new])
+                else:
+                    six = torch.randint(0, start.shape[0], (ns,), dtype=torch.int, device=curlew.device)
+                    eix = torch.randint(0, end.shape[0], (ns,), dtype=torch.int, device=curlew.device)
+                six_list.append(six)
+                eix_list.append(eix)
                 pts_list.append(start[six, :])
                 pts_list.append(end[eix, :])
+                
+            # evaluate model and compute differences between sampled pairs
             all_pts = torch.cat(pts_list, dim=0)
             n_iq = len(pts_list) // 2
             all_vals = self(all_pts, transform=transform).flatten()
@@ -504,9 +522,24 @@ class BaseNF(BaseSF):
             start_vals = all_vals[:, 0, :].reshape(-1)
             end_vals = all_vals[:, 1, :].reshape(-1)
 
-            # C._iq_low_clamp / C._iq_high_clamp pre-allocated in bind()
+            # Apply clamp to differences to only keep differences that violate each inequality.
+            # N.B. C._iq_low_clamp / C._iq_high_clamp are pre-allocated in bind()
             delta_all = torch.clamp(start_vals - end_vals, C._iq_low_clamp, C._iq_high_clamp)**2
             L['iq_loss'] = torch.mean(delta_all)
+
+            # update cache of inequality pairs with loss above threshold for next epoch (reuse_worst_half)
+            if reuse_frac > 0 and ns > 0:
+                self._last_iq_worst_indices = []
+                for c in range(n_iq):
+                    chunk = delta_all[c * ns : (c + 1) * ns]
+                    threshold = reuse_frac * chunk.mean()
+                    keep_ix = (chunk >= threshold).nonzero(as_tuple=True)[0]
+                    if keep_ix.numel() == 0:
+                        keep_ix = chunk.argmax().unsqueeze(0)
+                    self._last_iq_worst_indices.append((
+                        six_list[c][keep_ix].detach(),
+                        eix_list[c][keep_ix].detach(),
+                    ))
 
         # Dynamically adjust task weights based on the inverse of real-time loss values.
         # (this ignores the magnitude of each loss term, but preserves it's gradient direction,

@@ -112,11 +112,11 @@ def test_benchmark_02_inverse_hutton(benchmark, request):
     def inverse_hutton():
         H = HSet(value_loss='1.0', mono_loss='0.01', thick_loss='1.0')
         s0 = strati('basement', C=C[0], H=H, type=NFF, base=-np.inf,
-                    #hidden_layers=[], activation=None,rff_features=64, length_scales=[500 / 2 * np.pi])
-                    hidden_layers=[32], rff_features=64, length_scales=[500 / 2 * np.pi])
+                    hidden_layers=[], activation=None,rff_features=64, length_scales=[500 / 2 * np.pi])
+                    #hidden_layers=[32], rff_features=64, length_scales=[500 / 2 * np.pi])
         s1 = strati('unconformity', C=C[1], H=H.copy(mono_loss="1.0", thick_loss=1.0), type=NFF, base="base",
-                    #hidden_layers=[], activation=None, rff_features=64, length_scales=[2000 / 2 * np.pi])
-                    hidden_layers=[32], rff_features=64, length_scales=[2000 / 2 * np.pi])
+                    hidden_layers=[], activation=None, rff_features=64, length_scales=[2000 / 2 * np.pi])
+                    #hidden_layers=[32], rff_features=64, length_scales=[2000 / 2 * np.pi])
         s1.isosurfaces = Ms['s1'].isosurfaces
         s0.isosurfaces = Ms['s0'].isosurfaces
         s1.addIsosurface("base", seed=Ms.fields[1].field.origin)
