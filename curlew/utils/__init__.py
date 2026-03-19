@@ -4,8 +4,19 @@ A series of utility functions that can come in handy when using `curlew`. This i
 for data handling and visualisation.
 """
 import numpy as np
-from tqdm import tqdm
 import torch
+from tqdm import tqdm
+
+
+def __getattr__(name: str):
+    """Lazy import so `import curlew.utils` does not load optional `napari`."""
+    if name == "NapariViewer":
+        from curlew.utils.napariViewer import NapariViewer
+        return NapariViewer
+    if name == "image_affine_from_grid":
+        from curlew.utils.napariViewer import image_affine_from_grid
+        return image_affine_from_grid
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 def get_colors(inp, colormap="viridis", normalize=True, vmin=None, vmax=None):
     try:
