@@ -414,6 +414,28 @@ class Geode( object ):
     fields : dict = field(default_factory=dict) # individual scalar fields (Keyed by GeoField name)
     offsets : dict = field(default_factory=dict) # individual displacement fields (Keyed by GeoField name)
 
+    isosurfaces : dict = field(default_factory=dict) # individual isosurfaces (Keyed by GeoField name)
+    anchors : dict = field(default_factory=dict) # individual anchor points (Keyed by GeoField name)
+    
+    def getSurface(self, field, name, normals=False):
+        """
+        Get a mesh for given isosurface for a given field.
+        """
+        assert self.grid is not None, "Surfaces can only be computed for evaluations on a grid"
+        scalar = self.fields[field]
+        iso = self.isosurfaces[field][name]
+        return self.grid.contour(scalar, iso=iso, normals=normals)
+
+    def getSurfaces(self, normals=False):
+        """
+        Get a dictionary of meshes for all isosurfaces for all fields.
+        """
+        out = {}
+        for field in self.fields:
+            for name in self.isosurfaces[field]:
+                out[f'{field}_{name}'] = self.getSurface(field, name, normals=normals)
+        return out
+        
     @classmethod
     def concat(cls, geodes):
         """

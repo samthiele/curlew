@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+import curlew
 
 if TYPE_CHECKING:
     from curlew.core import CSet, Geode
@@ -137,7 +138,7 @@ def _sanitize_geode_key(key: str) -> str:
     return "".join(c if (c.isalnum() or c in "_-") else "_" for c in s)
 
 
-class NapariViewer:
+class Napari3D:
     """
     Open a Napari viewer in 3D and add meshes, point clouds, and volumetric images.
 
@@ -173,6 +174,7 @@ class NapariViewer:
         name: str,
         verts: np.ndarray,
         faces: np.ndarray,
+        normals: np.ndarray | None = None,
         rgb: str | np.ndarray = "green",
         shading: str = "smooth",
         **kwargs,
@@ -187,6 +189,9 @@ class NapariViewer:
         verts : array, shape (N, 3)
         faces : array, shape (M, 3)
             Triangle vertex indices.
+        normals : array, optional
+            Per-vertex normal vectors with shape (N, 3). If provided, these will
+            be passed through to napari's ``add_surface(normals=...)``.
         rgb : str or array, optional
             Matplotlib colour name if `str`. If array, per-vertex colours with shape (N, 3) RGB
             or (N, 4) RGBA in [0, 1].
@@ -200,6 +205,16 @@ class NapariViewer:
         faces = np.asarray(faces)
         if verts.ndim != 2 or verts.shape[1] != 3:
             raise ValueError("verts must have shape (N, 3)")
+
+        if normals is not None:
+            normals = np.asarray(normals, dtype=np.float64)
+            if normals.ndim != 2 or normals.shape[1] != 3:
+                raise ValueError("normals must have shape (N, 3)")
+            if normals.shape[0] != verts.shape[0]:
+                raise ValueError(
+                    "normals shape mismatch: expected per-vertex normals with the same "
+                    f"length as verts (got normals.shape[0]={normals.shape[0]} vs verts.shape[0]={verts.shape[0]})"
+                )
 
         if isinstance(rgb, str):
             from matplotlib.colors import to_rgba
@@ -545,6 +560,7 @@ class NapariViewer:
         *,
         lithoID: bool = True,
         scalar: bool = True,
+        surfaces: bool = True,
         displacement: bool = True,
         offset_length: float = 1.0,
         offset_width: float = 20.0,
@@ -572,11 +588,10 @@ class NapariViewer:
             Prefix for layer names (e.g. ``\"pred\"`` → ``\"pred_lithoID\"``).
         geode : curlew.core.Geode
             Prediction result (numpy or torch arrays accepted).
-        lithoID, scalar, displacement : bool, optional
-            If ``False``, skip lithology IDs, the main scalar field, or offset vector
-            layers respectively.
+        lithoID, scalar, surfaces, displacement : bool, optional
+            If ``False``, don't add the corresponding layer(s).
         offset_length, offset_width : float
-            Passed to :meth:`addVectors` for each ``geode.offsets`` entry.
+            Passed to `addVectors` for each `geode.offsets` entry.
 
         Returns
         -------
@@ -597,6 +612,7 @@ class NapariViewer:
             suffix: str,
             data,
             *,
+            opacity=0.8,
             visible: bool,
         ) -> None:
             if data is None:
@@ -614,7 +630,10 @@ class NapariViewer:
                     vol,
                     grid=grid,
                     colormap=cmap,
+                    blending="additive" if suffix == "lithoID" else "opaque",
+                    rendering="additive" if suffix == "lithoID" else "iso",
                     visible=visible,
+                    opacity=opacity,
                 )
             else:
                 if geode.x is None:
@@ -632,10 +651,11 @@ class NapariViewer:
                     scalar=flat.astype(np.float64),
                     colormap=cmap,
                     visible=visible,
+                    opacity=opacity,
                 )
 
-        if lithoID and geode.lithoID is not None:
-            add_scalar_field("lithoID", geode.lithoID, visible=True)
+        if lithoID and geode.lithoID is not None:            
+            add_scalar_field("lithoID", geode.lithoID, visible=True, opacity=0.35)
 
         if scalar and geode.scalar is not None:
             add_scalar_field("scalar", geode.scalar, visible=False)
@@ -645,6 +665,30 @@ class NapariViewer:
                 sk = _sanitize_geode_key(key)
                 add_scalar_field(f"field_{sk}", arr, visible=False)
 
+        if surfaces and geode.isosurfaces and geode.grid is not None:
+            names = []
+            for field in geode.fields:
+                for name in geode.isosurfaces[field]:
+                    n = f'{field}_{name}'
+                    verts, faces, normals = geode.getSurface(field, name, normals=True)
+                    layers[n] = self.addMesh(
+                        n,
+                        verts,
+                        faces,
+                        normals=normals,
+                        rgb="white",
+                        shading="smooth",
+                    )
+                    names.append(n)
+            
+            # set colors using curlew colormap
+            for i,n in enumerate(names):
+                # napari.Surface uses `vertex_colors` (not `face_color`) for constant colouring
+                verts = layers[n].data[0]
+                col = curlew.ccramp(i / len(names))
+                vertex_colors = np.tile(col, (len(verts), 1))
+                layers[n].vertex_colors = vertex_colors
+        
         if displacement and geode.offsets:
             if geode.x is None:
                 raise ValueError("geode.offsets requires geode.x for vector origins")
@@ -668,6 +712,7 @@ class NapariViewer:
                     length=offset_length,
                     width=offset_width,
                     vector_style="arrow",
+                    visible=False, # hidden by default
                 )
 
         return layers

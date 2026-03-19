@@ -244,7 +244,7 @@ class GeoField( object ):
         return value
 
     def predict(self, x: ArrayLike, combine=False, to_numpy=True, transform=True, values=None, 
-                      litho : bool = True, props=True, gradient : bool = False) -> np.ndarray:
+                      litho : bool = True, props=True, isosurfaces=True, gradient : bool = False) -> np.ndarray:
         """
         Predict scalar values belonging to this and/or previousGeologicalFields.
 
@@ -268,6 +268,8 @@ class GeoField( object ):
             True (default) if lithology codes should be computed.
         props : bool
             True (default) if properties should be computed when a `propertyField` is defined.
+        isosurfaces : bool
+            True (default is False) if isosurface (and anchor) values should be computed and stored. Default is True. 
         gradient : bool
             True if the gradient at each `x` should also be calculated. Default is False.
         """
@@ -357,11 +359,12 @@ class GeoField( object ):
                 lid = self.llookup.get(self.name, -1)
             out.lithoID = torch.full( (len(out.scalar),), lid, device=curlew.device, dtype=torch.int)
             out.lithoLookup = {**out.lithoLookup, **{-1 : "Undefined", lid : self.name }}
+            iso_values = None
             if litho and (self.overprint is not None) and (self.parent2 is None): # only define lithologies for generative events (obviously)
-                isosurfaces = self.getIsovalues()
-                if len(isosurfaces) > 0:
-                    keys = np.array(list(isosurfaces.keys()))
-                    values = np.array(list(isosurfaces.values()))
+                iso_values = self.getIsovalues()
+                if len(iso_values) > 0:
+                    keys = np.array(list(iso_values.keys()))
+                    values = np.array(list(iso_values.values()))
                     ixx = np.argsort(values) # sort these to ensure isosurfaces are applied from smallest to largest
                     for i,(k,v) in enumerate(zip(keys[ixx], values[ixx])):
                         k = f"{self.name}_{k}" # include field name in k to help ensure it is unique!
@@ -372,8 +375,21 @@ class GeoField( object ):
                         out.lithoLookup[i] = k # store link betweein ID and lithology name
                         out.lithoID[mask] = i # update lithology ID array
 
+            if isosurfaces:
+                # evaluate isosurfaces to get either threshold values (if 
+                # not evaluating on a grid), or contours (if evaluating on a grid)
+                if iso_values is None:
+                    iso_values = self.getIsovalues()
+                out.isosurfaces[self.name] = iso_values
+                
+                if len(self.anchors) > 0:
+                    out.anchors[self.name] = {}
+                    for n in self.anchors:
+                        anchor = self.getAnchor(n, to_numpy=True)
+                        out.anchors[self.name][n] = anchor
+                
             # which (temporal) reference was used for these results
-            if transform == True:
+            if transform:
                 out.crs="model" # model coordinates
             else:
                 out.crs=transform.name # field coordinates
@@ -526,6 +542,10 @@ class GeoField( object ):
                         for d in self.deformation[1:]:
                             offset = offset + d.eval(x.x, self)
                 x.offsets[self.name] = offset # store offset in Geode
+                x.isosurfaces[self.name] = self.getIsovalues() # also store fault isosurfaces
+                x.anchors[self.name] = {} # also store anchor points 
+                for k in self.anchors:
+                    x.anchors[self.name][k] = self.getAnchor(k, to_numpy=True)
                 return x
             else: # we are just evaluating a bunch of points
                 if not isinstance(self.deformation, list):
@@ -738,7 +758,7 @@ class GeoField( object ):
                     v = v + g * offset # offset seed points by specified distance in gradient direction
 
                 # evaluate (and average) value at seed points
-                i = np.mean( self.predict( v, litho=False, props=False ).scalar )
+                i = np.mean( self.predict( v, litho=False, props=False, isosurfaces=False ).scalar )
             else:
                 i = v # easy! 
                 if offset != 0: # not so easy...

@@ -10,12 +10,9 @@ from tqdm import tqdm
 
 def __getattr__(name: str):
     """Lazy import so `import curlew.utils` does not load optional `napari`."""
-    if name == "NapariViewer":
-        from curlew.utils.napariViewer import NapariViewer
-        return NapariViewer
-    if name == "image_affine_from_grid":
-        from curlew.utils.napariViewer import image_affine_from_grid
-        return image_affine_from_grid
+    if name == "Napari3D":
+        from curlew.utils.napari3D import Napari3D
+        return Napari3D
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 def get_colors(inp, colormap="viridis", normalize=True, vmin=None, vmax=None):
