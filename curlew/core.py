@@ -6,11 +6,13 @@ import torch
 from dataclasses import dataclass, field
 import copy
 import curlew
+from curlew import _numpy, _tensor
 from curlew.geometry import Grid
 from typing import Union
 
 import torch.optim as optim
 import torch.nn as nn
+
 
 class LearnableBase(nn.Module):
     """
@@ -66,7 +68,7 @@ class LearnableBase(nn.Module):
 
     def loss(self):
         """Should be implemented by child classess that incur losses."""
-        return torch.tensor(0, dtype=curlew.dtype, device=curlew.device, requires_grad=True), dict()
+        return _tensor(0).requires_grad_(True), dict()
     
 @dataclass
 class CSet:
@@ -130,16 +132,16 @@ class CSet:
                     for i in range(len(attr[1])):
                         # convert P1 and P2 to tensor
                         if not isinstance( attr[1][i][0], torch.Tensor): # possibly already a tensor
-                            o[1].append( (torch.tensor( attr[1][i][0], device=curlew.device, dtype=curlew.dtype ),
-                                            torch.tensor( attr[1][i][1], device=curlew.device, dtype=curlew.dtype ),
+                            o[1].append( (_tensor( attr[1][i][0], dev=curlew.device, dt=curlew.dtype ),
+                                            _tensor( attr[1][i][1], dev=curlew.device, dt=curlew.dtype ),
                                             attr[1][i][2] ) )
                         else:
                             o[1].append( (attr[1][i][0], attr[1][i][1], attr[1][i][2] )) # already tensors
                     attr = o            
                 else:
                     if attr is not None:
-                        if isinstance( attr, np.ndarray ) or isinstance( attr, list ): # convert nd array or list types to tensor
-                            attr = torch.tensor( attr, device=curlew.device, dtype=curlew.dtype )
+                        if isinstance( attr, (np.ndarray, list, tuple) ): # convert array-like types to tensor
+                            attr = _tensor( attr, dev=curlew.device, dt=curlew.dtype )
                 args[k] = attr
         return CSet(**args)
     
@@ -155,16 +157,17 @@ class CSet:
                 if k == 'iq': # inequalities are special
                     o = (attr[0], [] )
                     for i in range(len(attr[1])):
-                        # convert P1 and P2 to tensor
-                        if isinstance(attr[1][i][0], torch.Tensor ):
-                            o[1].append( (attr[1][i][0].cpu().detach().numpy(),
-                                        attr[1][i][1].cpu().detach().numpy(),
-                                        attr[1][i][2] ) )
+                        p1, p2, rel = attr[1][i]
+                        if isinstance(p1, torch.Tensor):
+                            p1 = _numpy(p1)
+                        if isinstance(p2, torch.Tensor):
+                            p2 = _numpy(p2)
+                        o[1].append((np.asarray(p1), np.asarray(p2), rel))
                     attr = o     
                 else:
                     if attr is not None:
                         if isinstance(attr, torch.Tensor ):
-                            attr = attr.cpu().detach().numpy()
+                            attr = _numpy(attr)
                 args[k] = attr
         return CSet(**args)
 
@@ -270,7 +273,7 @@ class CSet:
         out = self.copy()
         def e( arr ):
             mask = f( arr )
-            if isinstance(arr, torch.Tensor): mask = torch.tensor(mask, device=curlew.device, dtype=torch.bool)
+            if isinstance(arr, torch.Tensor): mask = _tensor(mask, dev=curlew.device, dt=torch.bool)
             if isinstance(arr, np.ndarray): mask = np.array(mask, dtype=bool)
             return mask
         if out.vp is not None: 
@@ -564,12 +567,12 @@ class Geode( object ):
             if '_' not in k and not callable(getattr(self, k)):
                 attr = getattr(self, k)
                 if attr is not None:
-                    if isinstance( attr, np.ndarray ) or isinstance( attr, list ): # convert nd array or list types to tensor
-                        attr = torch.tensor( attr, device=curlew.device, dtype=curlew.dtype )
+                    if isinstance( attr, (np.ndarray, list, tuple) ): # convert array-like types to tensor
+                        attr = _tensor( attr, dev=curlew.device, dt=curlew.dtype )
                     elif isinstance(attr, dict):
                         for key in attr.keys(): # also convert any dict entries
-                            if isinstance( attr[key], np.ndarray ) or isinstance( attr[key], list ):
-                                attr[key] = torch.tensor( attr[key], device=curlew.device, dtype=curlew.dtype )
+                            if isinstance( attr[key], (np.ndarray, list, tuple) ):
+                                attr[key] = _tensor( attr[key], dev=curlew.device, dt=curlew.dtype )
                 args[k] = attr
         return Geode(**args)
 
@@ -583,11 +586,11 @@ class Geode( object ):
                 attr = getattr(self, k)
                 if attr is not None:
                     if isinstance(attr, torch.Tensor ):
-                        attr = attr.cpu().detach().numpy()
+                        attr = _numpy(attr)
                     elif isinstance(attr, dict): # also convert any dict entries
                         for key in attr.keys():
                             if isinstance( attr[key], torch.Tensor ):
-                                attr[key] = attr[key].cpu().detach().numpy()
+                                attr[key] = _numpy(attr[key])
                 args[k] = attr
         return Geode(**args)
 

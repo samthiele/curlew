@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from torch import nn
 import curlew
+from curlew import _tensor
 from curlew.core import CSet
 from curlew.geology.geofield import GeoField
 from curlew.geology.interactions import Overprint, SheetOffset, FaultOffset, FoldOffset
@@ -163,7 +164,7 @@ def fault(name, *, C, shortening, learn_sigma=False, contact=0, offset=0, width=
     if shortening is None: 
         shortening = np.zeros( f.field.input_dim )
         shortening[-1] = -1 # default is vertical vector
-    shortening = torch.tensor( shortening, device=curlew.device, dtype=curlew.dtype) 
+    shortening = _tensor( shortening, dev=curlew.device, dt=curlew.dtype) 
     
     if isinstance(contact, list) or isinstance(contact, tuple) or isinstance(contact, np.ndarray):
         if not (isinstance(offset, list) or isinstance(offset, tuple) or isinstance(offset, np.ndarray)):
@@ -187,11 +188,11 @@ def fault(name, *, C, shortening, learn_sigma=False, contact=0, offset=0, width=
         init=False
         if isinstance( _o, tuple):
             _o, smin, smax = _o # shear (mode II) offset
-            offs.offset = nn.Parameter( torch.tensor( _o, device=curlew.device, dtype=curlew.dtype) ) # will now be changed by optimiser!
+            offs.offset = nn.Parameter( _tensor( _o, dev=curlew.device, dt=curlew.dtype) ) # will now be changed by optimiser!
             offs.offsetRange = (smin, smax) # use min and max to constrain the range of values allowed
             init=True
         else:
-            offs.offset = torch.tensor(_o, device=curlew.device, dtype=curlew.dtype)
+            offs.offset = _tensor(_o, dev=curlew.device, dt=curlew.dtype)
         if learn_sigma:
             offs.shortening = nn.Parameter( offs.shortening )
             init=True
@@ -275,7 +276,7 @@ def fold( name, *, origin, compression, extension, wavelength, amplitude=1.0, sh
     
     # evaluate fold strain
     if estStrain:
-        x = torch.tensor( np.linspace(0,2,1000), device=curlew.device, dtype=curlew.dtype )
+        x = _tensor( np.linspace(0,2,1000), dev=curlew.device, dt=curlew.dtype )
         y = blended_wave(x, f=sharpness, A=amplitude, T=2) # evaluate one waveform
         dx = torch.mean( torch.diff(x) )
         dy = torch.diff( y )

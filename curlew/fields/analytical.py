@@ -6,6 +6,7 @@ these can also be used to build geological models.
 import numpy as np
 import curlew
 import torch
+from curlew import _tensor
 from curlew.geometry import blended_wave, Transform
 from curlew.fields import BaseAF
 
@@ -38,13 +39,13 @@ class LinearField( BaseAF ):
         if gradient is None:
             gradient = np.zeros( self.input_dim )
             gradient[-1] = 1
-        self.origin = torch.tensor( origin, dtype=curlew.dtype, device=curlew.device )
+        self.origin = _tensor( origin, dt=curlew.dtype, dev=curlew.device )
         self.normalise = normalise
         self.mnorm = np.linalg.norm(gradient)
         if normalise:
             gradient = gradient / self.mnorm
             self.mnorm = 1.0
-        self.grad = torch.tensor( gradient, dtype=curlew.dtype, device=curlew.device )
+        self.grad = _tensor( gradient, dt=curlew.dtype, dev=curlew.device )
 
     def evaluate( self, x: torch.Tensor ):
         """
@@ -87,15 +88,15 @@ class QuadraticField( BaseAF ):
         if gradient is None:
             gradient = np.zeros( self.input_dim )
             gradient[-1] = 1
-        self.curve = torch.tensor( np.zeros ( self.input_dim ), dtype=curlew.dtype, device=curlew.device )
+        self.curve = _tensor( np.zeros ( self.input_dim ), dt=curlew.dtype, dev=curlew.device )
         if curve is not None:
-            self.curve = torch.tensor( curve, dtype=curlew.dtype, device=curlew.device )
-        self.origin = torch.tensor( origin, dtype=curlew.dtype, device=curlew.device )
+            self.curve = _tensor( curve, dt=curlew.dtype, dev=curlew.device )
+        self.origin = _tensor( origin, dt=curlew.dtype, dev=curlew.device )
         self.normalise = normalise
         self.mnorm = np.linalg.norm(gradient)
         if normalise:
             gradient = gradient / self.mnorm
-        self.grad = torch.tensor( gradient, dtype=curlew.dtype, device=curlew.device )
+        self.grad = _tensor( gradient, dt=curlew.dtype, dev=curlew.device )
 
     def evaluate( self, x: torch.Tensor ):
         """
@@ -158,9 +159,9 @@ class PeriodicField(BaseAF):
         self.sharpness = sharpness
         
         # convert to torch tensors
-        self.origin = torch.tensor( self.origin, dtype=curlew.dtype, device=curlew.device )
-        self.grad = torch.tensor( self.grad, dtype=curlew.dtype, device=curlew.device )
-        self.axialPlane = torch.tensor( self.axialPlane, dtype=curlew.dtype, device=curlew.device )
+        self.origin = _tensor( self.origin, dt=curlew.dtype, dev=curlew.device )
+        self.grad = _tensor( self.grad, dt=curlew.dtype, dev=curlew.device )
+        self.axialPlane = _tensor( self.axialPlane, dt=curlew.dtype, dev=curlew.device )
 
     def evaluate( self, x: torch.Tensor ):
         """
@@ -200,7 +201,7 @@ class ListricField(BaseAF):
                   fault_ceil: float = 700. ):
         if origin is None:
             origin = np.zeros(self.input_dim)
-        self.origin = torch.tensor(origin, dtype=torch.float32)
+        self.origin = _tensor(origin, dt=torch.float32, dev=curlew.device)
 
         # store origin and gradient as torch tensors
         self.field = self.listric()
@@ -262,12 +263,12 @@ class EllipsoidalField(BaseAF):
         # Setup Center (Vector v)
         if origin is None:
             origin = np.zeros(dim)
-        self.origin = torch.tensor(origin, dtype=curlew.dtype, device=curlew.device)
+        self.origin = _tensor(origin, dt=curlew.dtype, dev=curlew.device)
 
         # Setup Scaling (Diagonal Matrix D)
         if axes is None:
             axes = np.ones(dim)
-        axes_t = torch.tensor(axes, dtype=curlew.dtype, device=curlew.device)
+        axes_t = _tensor(axes, dt=curlew.dtype, dev=curlew.device)
         D = torch.diag(axes_t)
 
         # Setup Rotation/Orientation (Matrix R)
@@ -275,7 +276,7 @@ class EllipsoidalField(BaseAF):
             R = torch.eye(dim, dtype=curlew.dtype, device=curlew.device)
         else:
             # directions should be (dim, dim)
-            R = torch.tensor(directions, dtype=curlew.dtype, device=curlew.device)
+            R = _tensor(directions, dt=curlew.dtype, dev=curlew.device)
             # Ensure the basis vectors are unit length (normalization)
             R = R / torch.linalg.norm(R, dim=-1, keepdim=True)
 
@@ -328,12 +329,12 @@ class RectangularPrismField(BaseAF):
         # Setup Center
         if origin is None:
             origin = np.zeros(dim)
-        self.origin = torch.tensor(origin, dtype=curlew.dtype, device=curlew.device)
+        self.origin = _tensor(origin, dt=curlew.dtype, dev=curlew.device)
 
         # Setup Scaling (Half-extents)
         if axes is None:
             axes = np.ones(dim)
-        axes_t = torch.tensor(axes, dtype=curlew.dtype, device=curlew.device)
+        axes_t = _tensor(axes, dt=curlew.dtype, dev=curlew.device)
         D = torch.diag(axes_t)
 
         # Setup Rotation/Orientation
@@ -345,7 +346,7 @@ class RectangularPrismField(BaseAF):
                 directions = np.vstack([directions, np.cross(directions[0], directions[1])])
             elif directions.shape != (dim, dim):
                 raise ValueError(f"Directions should be of shape ({dim}, {dim}) or ({dim-1}, {dim}), but got {directions.shape}")
-            R = torch.tensor(directions, dtype=curlew.dtype, device=curlew.device)
+            R = _tensor(directions, dt=curlew.dtype, dev=curlew.device)
             # Normalize basis vectors
             R = R / torch.linalg.norm(R, dim=-1, keepdim=True)
 

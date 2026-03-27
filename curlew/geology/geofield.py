@@ -5,6 +5,7 @@ events such as faults and sheet intrusions.
 """
 
 import curlew
+from curlew import _tensor, _numpy
 from curlew.core import Geode
 from curlew.fields import BaseNF
 from curlew.geology.interactions import Overprint, OffsetBase
@@ -280,7 +281,7 @@ class GeoField( object ):
             grid = x
             x = grid.coords()
         if not isinstance(x, torch.Tensor):
-            x = torch.tensor( x, device=curlew.device, dtype=curlew.dtype)
+            x = _tensor( x, dev=curlew.device, dt=curlew.dtype)
 
         # operation needs to be done in batches?
         if (len(x) > curlew.batchSize) and (values is None):
@@ -341,7 +342,7 @@ class GeoField( object ):
             else:
                 out = self.forward( out, undef=transform ) # evaluate scalar value 
             if out.scalar.ndim==0: # if only evaluating one location, ensure result is a vector
-                out.scalar = torch.tensor([out.scalar.detach()], dtype=curlew.dtype, device=curlew.device)
+                out.scalar = _tensor([out.scalar.detach().item()], dev=curlew.device, dt=curlew.dtype)
             
             out.structureID = torch.full( (len(out.scalar),), self.eid, device=curlew.device, dtype=torch.int)
             out.structureLookup = {**out.structureLookup, **{self.eid : self.name}}
@@ -436,7 +437,7 @@ class GeoField( object ):
         """
 
         if not isinstance(x, torch.Tensor):
-            x = torch.tensor(x, dtype=curlew.dtype, device=curlew.device, requires_grad=True)
+            x = _tensor(x, dt=curlew.dtype, dev=curlew.device).requires_grad_(True)
         if not x.requires_grad:
             #x = torch.tensor(x, dtype=curlew.dtype, device=curlew.device, requires_grad=True)
             x = x.detach().clone().requires_grad_(True)
@@ -459,8 +460,8 @@ class GeoField( object ):
             grad_out = grad_out / norm
 
         if to_numpy:
-            grad_out = grad_out.cpu().detach().numpy()
-            pred = pred.cpu().detach().numpy()
+            grad_out = _numpy(grad_out)
+            pred = _numpy(pred)
 
         if return_vals: # return gradient array and predictions Geode
             return grad_out, self.predict( x, combine=False, to_numpy=to_numpy, 
@@ -488,7 +489,7 @@ class GeoField( object ):
         """
         tonp = False
         if isinstance( x, np.ndarray ): # cast numpy to torch if need be (should not be though)
-            x = torch.tensor( x, device=curlew.device, dtype=curlew.dtype)
+            x = _tensor( x, dev=curlew.device, dt=curlew.dtype)
             tonp = True
         
         # remove any child deformation
@@ -506,7 +507,7 @@ class GeoField( object ):
         
         # return (in a matching array format)
         if tonp:
-            return x.cpu().detach().numpy()
+            return _numpy(x)
         return x
 
     def displacement(self, x: ArrayLike) -> np.ndarray:
@@ -527,7 +528,7 @@ class GeoField( object ):
         """
         tonp = False
         if isinstance(x, np.ndarray):
-            x = torch.tensor(x, dtype=curlew.dtype, device=curlew.device)
+            x = _tensor(x, dt=curlew.dtype, dev=curlew.device)
             tonp = True
 
         if self.deformation is None:
@@ -557,7 +558,7 @@ class GeoField( object ):
                             offset = offset + d.eval(x, self)            
         
         if tonp: # cast to numpy if needed
-            return offset.detach().cpu().numpy() # return as numpy array
+            return _numpy(offset) # return as numpy array
         else:
             return offset
 
@@ -684,7 +685,7 @@ class GeoField( object ):
             a = np.asarray(arr)
             if a.ndim == 1:
                 a = a[None, :]
-            return torch.tensor(a, device=curlew.device, dtype=curlew.dtype)
+            return _tensor(a, dev=curlew.device, dt=curlew.dtype)
 
         def undeform_pt(pt):
             t = to_torch(pt)
@@ -703,14 +704,14 @@ class GeoField( object ):
             pos_out = start_recon
             dir_out = diff
             if to_numpy:
-                pos_out = pos_out.cpu().detach().numpy()
-                dir_out = dir_out.cpu().detach().numpy()
+                pos_out = _numpy(pos_out)
+                dir_out = _numpy(dir_out)
             return pos_out, dir_out
         else:
             # Position-only anchor
             pt = undeform_pt(stored)
             if to_numpy:
-                pt = pt.cpu().detach().numpy()
+                pt = _numpy(pt)
             return pt, None
 
     def getIsovalue( self, name, offset=0):
@@ -812,7 +813,7 @@ class GeoField( object ):
         """
 
         # constant fields have no loss
-        if (isinstance(self.field, int) or isinstance(self.field, float)): return torch.tensor(0.0, device=curlew.device), {}
+        if (isinstance(self.field, int) or isinstance(self.field, float)): return _tensor(0.0, dev=curlew.device), {}
 
         loss, details = self.field.loss() 
         for o in [self.propertyField, self.deformation, self.overprint]:

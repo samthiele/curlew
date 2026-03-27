@@ -45,6 +45,7 @@ jobs:
         python -m pip install matplotlib
         python -m pip install tqdm
         python -m pip install plyfile
+        python -m pip install napari[all]
         python -m pip install .
     - name: Test with pytest
       run: |

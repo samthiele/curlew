@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from torch import nn
 import curlew
+from curlew import _tensor
 from curlew.core import LearnableBase
 from typing import Union, List
 
@@ -317,8 +318,8 @@ class FoldOffset( OffsetBase ):
             A periodic function that takes an array of scalar values and returns periodically varying offsets.
         """
         super().__init__()
-        self.thicker = torch.tensor( thicker, device=curlew.device, dtype=curlew.dtype)
-        self.shorter = torch.tensor( shorter, device=curlew.device, dtype=curlew.dtype)
+        self.thicker = _tensor( thicker, dev=curlew.device, dt=curlew.dtype)
+        self.shorter = _tensor( shorter, dev=curlew.device, dt=curlew.dtype)
         self.shortening = shortening
         self.periodic = periodic
     

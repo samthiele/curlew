@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 import curlew
+from curlew import _numpy, _tensor
 
 # TODO - add functions for converting angle pairs (e.g., strike, dip) to vectors
 
@@ -321,7 +322,8 @@ class Grid(object):
 
         # return in desired format
         if tensor:
-            return torch.tensor( out, device=curlew.device, dtype=curlew.dtype)
+            from curlew.core import _tensor
+            return _tensor(out)
         else:
             return out
     
@@ -687,20 +689,10 @@ class Transform:
         """
         if isinstance(self.matrix, int): # special case -- identity transforms can be initialised as Transform(2) or Transform(3).
             self.matrix = np.eye(self.matrix+1)
+        self.matrix = _numpy(self.matrix) # ensure numpy
+        self.tmatrix = _tensor(self.matrix) # ensure torch tensor
 
-        mat = self.matrix
-
-        if isinstance(mat, torch.Tensor):
-            shape = tuple(mat.shape)
-            self.matrix = mat.detach().cpu().numpy() # always store as a numpy array internally
-            self.tmatrix = mat.to(device=curlew.device, dtype=curlew.dtype)# always stores as tensor internally
-        elif isinstance(mat, np.ndarray):
-            shape = mat.shape
-            self.matrix = mat
-            self.tmatrix = torch.tensor(mat, dtype=curlew.dtype, device=curlew.device) # always stores as tensor internally
-        else:
-            raise TypeError("matrix must be a numpy array or torch tensor")
-        if shape not in [(3, 3), (4, 4)]: # must be a transform matrix for 2D or 3D vectors.
+        if self.tmatrix.shape not in [(3, 3), (4, 4)]: # must be a transform matrix for 2D or 3D vectors.
             raise ValueError("Transform matrix must be 3x3 or 4x4")
 
     def set(self, mat: ArrayLike):

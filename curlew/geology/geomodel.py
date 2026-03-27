@@ -374,9 +374,9 @@ class GeoModel(object):
 
         # find contacts
         c = None
-        g.contactMask = np.abs( np.diff( g.lithoID, prepend=g.lithoID[0] ) ) > 0
-        if g.contactMask.any():
-            cpos = pos[g.contactMask]
+        g._contactMask = np.abs( np.diff( g.lithoID, prepend=g.lithoID[0] ) ) > 0
+        if g._contactMask.any():
+            cpos = pos[g._contactMask]
             c = self.predict( cpos, gradient=True ) # predict again, at the contact points only
 
         # return Geode

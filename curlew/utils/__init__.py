@@ -10,8 +10,13 @@ from tqdm import tqdm
 
 def __getattr__(name: str):
     """Lazy import so `import curlew.utils` does not load optional `napari`."""
+    if name == "NapariViewer":
+        from curlew.utils.napari_viewer import NapariViewer
+
+        return NapariViewer
     if name == "Napari3D":
         from curlew.utils.napari3D import Napari3D
+
         return Napari3D
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

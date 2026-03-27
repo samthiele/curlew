@@ -45,9 +45,6 @@ Kamath, A.V., Thiele, S.T., Moulard, M., Grose, L., Tolosana-Delgado, R., Hillie
 """
 import torch
 import numpy as np
-from curlew.fields import BaseNF
-from curlew.geology.geomodel import GeoModel
-from curlew.geology.geofield import GeoField
 
 device = 'cpu' # can be changed to set device to e.g., gpu
 """The device used to compute operations with pytorch tensors. Change to allow e.g. GPU parallelisation."""
@@ -115,7 +112,42 @@ if mpl:
     # Create a new colormap
     ccstrat = mcolors.ListedColormap(_colors, name="curlew_stratigraphic")
 
+## Utility functions for converting between numpy and torch tensors
+def _tensor(x, dev=None, dt=None):
+    """
+    Convert array-like or scalar input to a torch tensor on the given device and dtype.
+    """
+    if dev is None: dev = device # normally use default device
+    if dt is None: dt = dtype # normally use default dtype
+    if isinstance(x, torch.Tensor):
+        return x.to(device=dev, dtype=dt)
+    elif isinstance(x, np.ndarray):
+        return torch.tensor(x, device=dev, dtype=dt)
+    elif isinstance(x, (list, tuple)):
+        return torch.tensor(x, device=dev, dtype=dt)
+    elif isinstance(x, (int, float, bool, np.integer, np.floating, np.bool_)):
+        return torch.tensor(x, device=dev, dtype=dt)
+    else:
+        raise TypeError(f"Unsupported type: {type(x)}")
+    
+def _numpy(x):
+    """
+    Convert a torch tensor or list to a numpy array.
+    """
+    if isinstance(x, np.ndarray):
+        return x
+    elif isinstance(x, torch.Tensor):
+        return x.cpu().detach().numpy()
+    elif isinstance(x, list):
+        return np.array(x)
+    else:
+        raise TypeError(f"Unsupported type: {type(x)}")
+    
+    
 # import things we want to expose under the `curlew` namespace
+from curlew.fields import BaseNF
+from curlew.geology.geomodel import GeoModel
+from curlew.geology.geofield import GeoField
 from curlew import core
 from curlew import synthetic
 from curlew import geology

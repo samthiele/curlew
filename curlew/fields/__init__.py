@@ -3,7 +3,7 @@ Import core neural field types from other python files, and define the "base" NF
 """
 
 import curlew
-from curlew.core import CSet, HSet, LearnableBase, Geode
+from curlew.core import CSet, HSet, LearnableBase, Geode, _tensor
 import numpy as np
 import torch
 import torch.nn as nn
@@ -203,7 +203,7 @@ class BaseSF(LearnableBase):
                 for i in range(self.input_dim):
                     o = [0]*self.input_dim
                     o[i] = C.delta
-                    C._offset.append( torch.tensor( o, device=curlew.device, dtype=curlew.dtype) )
+                    C._offset.append( _tensor( o, dev=curlew.device, dt=curlew.dtype) )
 
         # pre-allocate inequality clamp tensors
         # (layout matches loss: one block of ns per inequality)
@@ -304,7 +304,7 @@ class BaseSF(LearnableBase):
         """
         Optionally implemented by child classes to facilitate optimiation and learning. Defaults to 0.
         """
-        return torch.tensor(0, dtype=curlew.dtype, device=curlew.device, requires_grad=True), {self.name:(0,{})}
+        return _tensor(0, dt=curlew.dtype, dev=curlew.device).requires_grad_(True), {self.name:(0,{})}
     
     def fit(self, *args):
         """

@@ -3,6 +3,7 @@ Implementation of various types of "geological" forward models that convert scal
 measurable rock properties (density, magnetic susceptibility, mineralogy, chemistry, etc.).
 """
 import curlew
+from curlew import _tensor
 from curlew.core import LearnableBase
 import torch
 import torch.nn as nn
@@ -54,7 +55,7 @@ class ConstantProperty(PropertyModelBase):
         # Save the names
         self.propertyNames = propertyNames
         if noData is not None:
-            self.noData = torch.tensor(noData, device=curlew.device, dtype=curlew.dtype)*torch.ones(len(propertyNames), device=curlew.device, dtype=curlew.dtype)
+            self.noData = _tensor(noData, dev=curlew.device, dt=curlew.dtype)*torch.ones(len(propertyNames), device=curlew.device, dtype=curlew.dtype)
         else:
             self.noData = torch.nan * torch.ones(len(propertyNames), device=curlew.device, dtype=curlew.dtype)
 
@@ -63,13 +64,13 @@ class ConstantProperty(PropertyModelBase):
             self.propDict = nn.ParameterDict()
             for k, v in propDict.items():
                 self.propDict[k] = nn.Parameter(
-                    torch.tensor(v, dtype=curlew.dtype, device=curlew.device)
+                    _tensor(v, dt=curlew.dtype, dev=curlew.device)
                 )
             self.init_optim(lr=learning_rate)
         else:
             self.propDict = dict()
             for k, v in propDict.items():
-                self.propDict[k] = torch.tensor(v, dtype=curlew.dtype, device=curlew.device)
+                self.propDict[k] = _tensor(v, dt=curlew.dtype, dev=curlew.device)
     
     def predict(self, geode: curlew.geology.geofield.Geode) -> torch.Tensor:
         """
