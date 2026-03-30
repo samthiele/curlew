@@ -1169,6 +1169,108 @@ class NapariViewer:
                 layers[nm_eq] = eq_layer
 
         return layers
+    
+    def addTracks(
+        self,
+        name: str,
+        tracks,
+        *,
+        features: dict | None = None,
+        colormap=None,
+        tail_width: float = 2.0,
+        tail_length: int = 30,
+        head_length: int = 0,
+        **kwargs,
+    ):
+        """
+        Add 3D particle trajectories as a napari ``Tracks`` layer.
+
+        Parameters
+        ----------
+        name : str
+            Layer name (replaces an existing layer with the same name).
+        tracks : array-like
+            One of three formats:
+
+            - **Napari format** ``(N, 5)`` — columns are ``[track_id, t, x0, x1, x2]``
+                (passed through directly).
+            - **Stacked trajectories** ``(N_tracks, T, 3)`` — ``N_tracks`` particle paths,
+                each sampled at ``T`` equally-spaced time steps, coordinates ``(x, y, z)``.
+                Track IDs are assigned as ``0 … N_tracks-1`` and time as ``0 … T-1``.
+            - **List of arrays** — each element is ``(T_i, 3)`` for variable-length paths.
+                Track IDs and per-track time indices are assigned automatically.
+
+        features : dict, optional
+            Per-point scalar attributes (length ``N``), passed to napari as ``features``.
+            Example: ``{'speed': speed_array}``. Can be used for colour-by-feature.
+        colormap : optional
+            Napari colormap (or name) for ``color_by`` features. Defaults to Curlew
+            ``ccramp`` when available.
+        tail_width : float, optional
+            Track tail line width.
+        tail_length : int, optional
+            Number of previous time-steps to render as a tail.
+        head_length : int, optional
+            Number of future time-steps to render ahead of the current frame.
+        **kwargs
+            Additional arguments passed to ``viewer.add_tracks`` (e.g. ``color_by``,
+            ``blending``, ``opacity``).
+
+        Returns
+        -------
+        napari.layers.Tracks
+        """
+        _require_napari()
+
+        tracks_arr = np.asarray(tracks, dtype=np.float64) if not isinstance(tracks, list) else None
+
+        if tracks_arr is not None and tracks_arr.ndim == 2 and tracks_arr.shape[1] == 5:
+            # Already in napari format [track_id, t, x0, x1, x2]
+            data = tracks_arr
+        elif tracks_arr is not None and tracks_arr.ndim == 3 and tracks_arr.shape[2] == 3:
+            # (N_tracks, T, 3) → (N_tracks*T, 5)
+            n_tracks, T, _ = tracks_arr.shape
+            ids = np.repeat(np.arange(n_tracks, dtype=np.float64), T)
+            times = np.tile(np.arange(T, dtype=np.float64), n_tracks)
+            coords = tracks_arr.reshape(-1, 3)
+            data = np.column_stack([ids, times, coords])
+        elif isinstance(tracks, list) or (tracks_arr is not None and tracks_arr.ndim == 1):
+            # List of variable-length (T_i, 3) arrays
+            rows = []
+            for track_id, traj in enumerate(tracks):
+                t = np.asarray(traj, dtype=np.float64)
+                if t.ndim != 2 or t.shape[1] != 3:
+                    raise ValueError(
+                        f"Track {track_id}: expected shape (T, 3), got {t.shape}"
+                    )
+                ids = np.full(len(t), track_id, dtype=np.float64)
+                times = np.arange(len(t), dtype=np.float64)
+                rows.append(np.column_stack([ids, times, t]))
+            data = np.vstack(rows)
+        else:
+            raise ValueError(
+                "tracks must be (N, 5) napari format, (N_tracks, T, 3), or a list of (T_i, 3) arrays"
+            )
+
+        opts: dict = {
+            "name": name,
+            "tail_width": tail_width,
+            "tail_length": tail_length,
+            "head_length": head_length,
+        }
+        if features is not None:
+            opts["features"] = features
+        if colormap is not None:
+            opts["colormap"] = colormap
+        elif features:
+            opts["colormap"] = _curlew_napari_colormap()
+        opts.update(kwargs)
+
+        self._remove_layer_if_present(name)
+        layer = self.viewer.add_tracks(data, **opts)
+        self._layers[name] = layer
+        self._cnt += 1
+        return layer
 
     def show(self, *, block: bool = False):
         """
