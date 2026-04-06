@@ -285,8 +285,9 @@ class GeoField( object ):
 
         # operation needs to be done in batches?
         if (len(x) > curlew.batchSize) and (values is None):
-                out = batchEval( x, self.predict, combine=combine, to_numpy=to_numpy, transform=transform, gradient=gradient,
-                                    values=values, litho=litho, batch_size=curlew.batchSize )
+                out = batchEval( x, self.predict, combine=combine, to_numpy=to_numpy, transform=transform, 
+                                    values=values, litho=litho, props=props, isosurfaces=isosurfaces, gradient=gradient,
+                                    batch_size=curlew.batchSize )
                 out.grid = grid
                 return out
         
@@ -392,6 +393,7 @@ class GeoField( object ):
             # which (temporal) reference was used for these results
             if transform:
                 out.crs="model" # model coordinates
+                out.x = x # store the coordinates that were used for evaluation (not the possibly transformed ones currently in the Geode object)
             else:
                 out.crs=transform.name # field coordinates
 
@@ -501,9 +503,9 @@ class GeoField( object ):
                 offset = self.displacement(x) # get deformation vectors
                 if isinstance(x, Geode):
                     #n.b. offset == x in this case, and x.offsets[self.name] was defined by self.displacement call
-                    x.x = x.x - x.offsets[self.name]
+                    x.x = x.x + x.offsets[self.name]
                 else:
-                    x = x - offset # apply deformation to the input coordinates
+                    x = x + offset # apply deformation to the input coordinates
         
         # return (in a matching array format)
         if tonp:

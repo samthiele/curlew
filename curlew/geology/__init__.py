@@ -8,7 +8,13 @@ import curlew
 from curlew import _tensor
 from curlew.core import CSet
 from curlew.geology.geofield import GeoField
-from curlew.geology.interactions import Overprint, SheetOffset, FaultOffset, FoldOffset
+from curlew.geology.interactions import (
+    Overprint,
+    SheetOffset,
+    FaultOffset,
+    FoldOffset,
+    VFieldOffset,
+)
 from curlew.geology.geomodel import _linkF, GeoModel
 from curlew.geometry import blended_wave
 from curlew.fields.analytical import LinearField
@@ -68,7 +74,7 @@ def strati( name, *, C, base = -np.inf, mode="above", **kwargs):
     o = Overprint(threshold=base, mode=mode)
     return _initF( name, C=C, overprint=o, **kwargs)
 
-def sheet(name, *, C, contact=(-1,1), aperture=2, **kwargs):
+def sheet(name, *, C, contact=(-1,1), aperture=2, n_steps=1, dt=-1.0, **kwargs):
     """
     Create a GeoField representing a sheet intrusion (dyke, sill or vein).
 
@@ -83,7 +89,11 @@ def sheet(name, *, C, contact=(-1,1), aperture=2, **kwargs):
         the intrusion, or a list of (upper, lower) tuples if multiple dykes are defined.
     aperture : float | list
         The aperture (Mode I opening) of the dyke, or a list thereof. Used to displace surrounding rocks.
-    
+    n_steps : int
+        Number of Euler substeps for integrating sheet-parallel displacement (see :class:`~curlew.geology.interactions.SheetOffset`). Default is 1.
+    dt : float
+        Time step per Euler substep. Default is -1.0 (i.e. reconstruct from modern to paleo-coords).
+
     Keywords
     ----------
     All keywords are passed to `curlew.GeoField.__init__(...)`, many of which are then used to initialise the 
@@ -104,7 +114,9 @@ def sheet(name, *, C, contact=(-1,1), aperture=2, **kwargs):
     offset = []
     overprint = []
     for _c, _a in zip(contact, aperture):
-        offset.append( SheetOffset(contact=_c, aperture=_a) )
+        offset.append(
+            SheetOffset(contact=_c, aperture=_a, n_steps=n_steps, dt=dt)
+        )
         overprint.append( Overprint(threshold=_c, mode='in')  )
     if len(offset) == 1:
         offset = offset[0]
@@ -112,7 +124,7 @@ def sheet(name, *, C, contact=(-1,1), aperture=2, **kwargs):
 
     return _initF( name, C=C, deformation=offset, overprint=overprint, **kwargs)
 
-def fault(name, *, C, shortening, learn_sigma=False, contact=0, offset=0, width=0, highcurve=False, **kwargs):
+def fault(name, *, C, shortening, learn_sigma=False, contact=0, offset=0, width=0, n_steps=2, dt=-1.0, **kwargs):
     """
     Create a GeoField representing a fault, shear zone or (optionally) dilatant shear vein.
 
@@ -150,6 +162,10 @@ def fault(name, *, C, shortening, learn_sigma=False, contact=0, offset=0, width=
         fault core, `width_ductile` defines the (larger) width of surrounding ductile deformation,
         and `proportion` defines the partioning of the total offset between these two deformation
         types.
+    n_steps : int
+        Number of explicit Euler substeps for integrating fault slip (see :class:`~curlew.geology.interactions.FaultOffset`). Default is 2.
+    dt : float
+        Time step per Euler substep. Default is -1.0 (i.e. reconstruct from modern to paleo-coords).
 
     Keywords
     ----------
@@ -181,8 +197,14 @@ def fault(name, *, C, shortening, learn_sigma=False, contact=0, offset=0, width=
     # build offset object(s)
     O = []
     for _c,_o, _w in zip(contact, offset, width):
-        offs = FaultOffset(shortening=shortening, offset=_o, contact=_c, 
-                            width=_w, highcurve=highcurve )
+        offs = FaultOffset(
+            shortening=shortening,
+            offset=_o,
+            contact=_c,
+            width=_w,
+            n_steps=n_steps,
+            dt=dt,
+        )
 
         # handle constant or learnable offsets and/or slip direction
         init=False

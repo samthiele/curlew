@@ -48,13 +48,13 @@ def plot2D( sxy, grid, C=None, ticksize=50, lw=1, cmap='rainbow', levels=None, a
         if (sxy.shape[-1] == 3) or (sxy.shape[-1] == 4): # RGB or RGBA colours
             # plot colours directly
             si = sxy.reshape( shape + (sxy.shape[-1],) )
-            ax.imshow( np.transpose( si, (1,0,2)), alpha=alpha, extent=(xmn,xmx,ymn,ymx), origin='lower' )
+            ax.imshow( np.transpose( si, (1,0,2)), alpha=alpha, extent=(xmn,xmx,ymn,ymx), origin='lower', interpolation='nearest' )
         else:
             si = sxy.reshape(shape) # reshape to image
             vmn,vmx = np.percentile(sxy, (0,100))
             
             # plot scalar field and countours
-            ax.imshow(si.T, cmap=cmap, alpha=alpha, extent=(xmn,xmx,ymn,ymx), vmin=vmn, vmax=vmx, origin='lower' )
+            ax.imshow(si.T, cmap=cmap, alpha=alpha, extent=(xmn,xmx,ymn,ymx), vmin=vmn, vmax=vmx, origin='lower', interpolation='nearest' )
             if not (isinstance(levels, bool) and (levels == False)):
                 contour = ax.contour(si.T, cmap=cmap,levels=levels, extent=(xmn,xmx,ymn,ymx),
                                      vmin=vmn, vmax=vmx)

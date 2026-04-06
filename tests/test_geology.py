@@ -221,7 +221,9 @@ def test_michell():
                 hidden_layers=[], 
                 activation=None,
                 rff_features=32, # number of random sin and cos features to create for each scale 
-                length_scales=[6000,]) # the length scales in our model
+                length_scales=[6000,], # the length scales in our model
+                n_steps=1,  # default n_steps=2 ~ doubles integrated slip vs this test’s offset check
+    )
     
     # combine into a geomodel
     M = GeoModel([s0, s1]) 

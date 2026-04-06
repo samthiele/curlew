@@ -231,7 +231,8 @@ class ListricField(BaseAF):
         def listric_grad_func(coords):
             num = (self.y_s - self.y_f) * self.k
             den = np.log(2) * (1 + 2**(-self.k * (coords[:, 0] - self.origin[0])))
-            return torch.cat([num/den, torch.ones_like(coords[:, 1])], dim=-1)
+            # stack to (N, 2); torch.cat on two 1D tensors would concatenate to length 2N
+            return torch.stack([num / den, torch.ones_like(coords[:, 1])], dim=-1)
         return listric_grad_func
 
 class EllipsoidalField(BaseAF):

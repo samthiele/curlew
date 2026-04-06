@@ -7,7 +7,7 @@ long_description = (this_dir / "README.md").read_text() # read README file as lo
 
 setup(
     name='curlew',
-    version='1.0',
+    version='1.1',
     packages=setuptools.find_packages(),
     url='https://github.com/samthiele/curlew',
     license='MIT',

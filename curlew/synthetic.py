@@ -515,9 +515,10 @@ def seuss(shape=(1500, 700), nlayers=6, **kwargs):
             fault_ceil=700.0,
             curvature_rate=0.006,
         ),
+        width=1e-9,
+        n_steps=3,
         offset=100,
         shortening=np.array([1, -1]),
-        highcurve=True,
     )
 
     # Second stratigraphic package (unconformable cover)
@@ -548,24 +549,21 @@ def seuss(shape=(1500, 700), nlayers=6, **kwargs):
         lt=[d1, f1],
         gt=[s2],
     )
-
-    # Younger listric fault (two surfaces)
-    f2 = fault(
-        "f2",
-        C=ListricField(
-            "f2f",
-            input_dim=2,
-            origin=np.array([350.0, 700.0]),
-            fault_floor=0.0,
-            fault_ceil=700.0,
-            curvature_rate=0.006,
-        ),
-        contact=0,
-        offset=100,
-        shortening=np.array([1, -1]),
-        highcurve=True,
-    )
-
+    
+    f2 = fault('f2', type=ListricField, C=None,
+           contact=0.0, 
+           offset=100, # The displacement magnitude
+           n_steps=3, # apply displacement in several steps, due to high curvature
+           shortening=[1, -1],
+           input_dim=2,
+           origin=np.array([250.0, 700.0]),
+           fault_ceil=700., # Defines the ceiling of the fault
+           fault_floor=0., # Defines the floor of the fault
+           width=1e-9,
+           curvature_rate=0.006 # Defines the steepness of the decay
+           
+        )
+    
     M = GeoModel([d2, f2], grid=G, name="Seuss")
     s = M.predict(G)
     C = sample(s, pv="rgb", **kwargs)

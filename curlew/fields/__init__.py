@@ -158,7 +158,7 @@ class BaseSF(LearnableBase):
         geode = None
         if isinstance(x, Geode):
             geode = x # store geode
-            x = geode.x # extract coordinates
+            x = geode.x # extract coordinates [ these have been transformed during self.transform(x) ]
 
         # apply local transform to achieve e.g., global anisotropy
         x = self.T(x) 

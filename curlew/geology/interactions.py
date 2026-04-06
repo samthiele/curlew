@@ -12,7 +12,17 @@ from torch import nn
 import curlew
 from curlew import _tensor
 from curlew.core import LearnableBase
-from typing import Union, List
+from curlew.fields import BaseSF
+from typing import Optional, Union, List
+
+def _checkVectorShape(out: torch.Tensor, refPoints: torch.Tensor) -> torch.Tensor:
+    """Check vector field shapes"""
+    if not isinstance(out, torch.Tensor):
+        out = _tensor(out) # ensure out is a tensor and on the correct device
+    if out.dim() == 1: raise ValueError(f"Vector field expected, got scalar field?")
+    if out.shape[-1] != refPoints.shape[-1]:
+        raise ValueError(f"Latent field output dimension {out.shape} does not match coordinate dimension {refPoints.shape}")
+    return out
 
 # OVERPRINTING RELATIONS -- function used to create new rocks (generative fields)
 # -----------------------------------------------------------------------------------
@@ -133,67 +143,139 @@ class OffsetBase(LearnableBase):
         """
         raise NotImplementedError
     
-class SheetOffset( OffsetBase ):
+class VFieldOffset(OffsetBase):
     """
-    Calculate offsets for a scalar field representing an infinite sheet intrusion (dyke or sill).
+    Integrate a "velocity" field to derive displacements. 
+    If `field` is a `BaseSF`, its forward pass is treated as the velocity `v(x)`. 
+    Subclasses may omit `field` and override `_velocity` instead (see `SheetOffset`, `FaultOffset`).
     """
-
-    def __init__(self, contact=(-1,1), aperture=1, polarity=1):
+    def __init__(
+        self,
+        field: Optional[BaseSF] = None,
+        *,
+        n_steps: int = 4,
+        dt: float = -1.0,
+        eval_transform: bool = False,
+    ):
         """
-        Initialise a new SheetOffset object.
+        Create a new velocity field offset object.
 
         Parameters
         ----------
-        contact : tuple
-            The isosurface values (or names) defining the two sides of this sheet intrusion.
-        aperture : float
-            Scale factor for the aperture. Default is 1 (Mode I opening).
-        polarity : int, optional
-            The polarity of the dyke offset. If 1 (default), the hangingwall is moved and the footwall is fixed.
-            If -1, the footwall is moved and the hangingwall is fixed.
+        field : `BaseSF`, optional
+            The velocity field to integrate. If None, the subclass must override `_velocity`.
+        n_steps : int, optional
+            The number of Euler steps to take. Default is 4 (assumes quite a smooth displacement field!).
+        dt : float, optional
+            The time step size. Default is -1.0, i.e. reconstruct backwards in time. +1 can be used to deform paleo-coordinates forward in time. 
+        eval_transform : bool, optional
+            Whether to evaluate the field in the local coordinate system of the GeoField. Default is False.
         """
         super().__init__()
-        assert len(contact) == 2, "Contact must be a list or tuple of length two, representing the lower and upper surface of this intrusion."
+        if field is not None and not isinstance(field, BaseSF):
+            raise TypeError("field must be a BaseSF instance or None")
+        self.field = field
+        self.n_steps = int(n_steps)
+        if self.n_steps < 1:
+            raise ValueError("n_steps must be >= 1")
+        self.dt = float(dt) / self.n_steps  # Euler sub-step size (total time span is `dt`)
+        self._eval_transform = bool(eval_transform)
+
+    def _velocity(self, x: torch.Tensor, G) -> torch.Tensor:
+        if self.field is None:
+            # this will be implemented in child classes 
+            raise NotImplementedError(
+                "_velocity must be implemented when no latent field is provided."
+            )
+        
+        # get the velocity vectors from the underlying field
+        out = self.field.forward(x, transform=self._eval_transform)
+        return _checkVectorShape(out, x)
+
+    def disp(self, X, G):
+        x = X # make a copy of position vectors
+        u = torch.zeros_like(X) # initialise displacement vectors
+        for _ in range(self.n_steps): # integration loop
+            v = self._velocity(x, G)
+            u = u + v * self.dt # accumulate displacement
+            x = x + v * self.dt # update positions (for next velocity evaluation)
+        return u # TODO - update so that x' is returned too??
+
+    def __repr__(self):
+        frepr = repr(self.field) if self.field is not None else "None"
+        return (
+            f"VelFieldOffset(field={frepr}, n_steps={self.n_steps}, "
+            f"dt={self.dt}, eval_transform={self._eval_transform})" )
+
+class SheetOffset(VFieldOffset):
+    """
+    Dyke/sill-style opening in the gradient direction of the host scalar field, integrated with
+    :class:`VelFieldOffset` (default ``n_steps=1``, ``dt=1``).
+    """
+
+    def __init__(
+        self,
+        contact=(-1, 1),
+        aperture=1,
+        polarity=1,
+        *,
+        n_steps=1,
+        dt=-1.0,
+    ):
+        super().__init__(field=None, n_steps=n_steps, dt=dt, eval_transform=False)
+        assert len(contact) == 2, (
+            "Contact must be a list or tuple of length two, representing the lower and upper "
+            "surface of this intrusion."
+        )
         self.contact = contact
         self.aperture = aperture
         self.polarity = polarity
 
-    def disp( self, X, G ):
-        """
-        Compute displacement vectors for points `X` based on GeoField `G`.
-        """
-        ds, s = self.dss(X,G)
-        # m = torch.linalg.norm(ds) # gradient magnitude 
-
-        # get the contact values and use this to define midpoint
+    def _velocity(self, x, G):
+        """Implement infinite dyke displacement"""
+        ds, s = self.dss(x, G)
         s0, s1 = G.getIsovalues(self.contact)
-
-        # estimate aperture in scalar field units
-        a = np.abs(s1-s0)
-
-        # determine mask at which non-zero displacements are applied
+        a = np.abs(s1 - s0)
         if self.polarity > 0:
-            mask = s > min(s0, s1)
+            mask = s > min(s0, s1) #  move hangingwall up
         else:
-            mask = s < max(s0, s1)
-        
-        # zero displacement in "footwall"
-        ds[~mask] = ds[~mask] * 0
+            mask = s < max(s0, s1) #  move footwall down
+            ds = -ds # need to reverse the gradient!
+            
+        v = ds.clone()
+        v[~mask] = 0
+        return (a * self.aperture) * v
 
-        # offset points by aperture in the gradient direction
-        return a * ds * self.aperture
-    
     def __repr__(self):
-        return f"SheetOffset(contact={self.contact}, aperture={self.aperture})"
+        return (
+            f"SheetOffset(contact={self.contact}, aperture={self.aperture}, "
+            f"polarity={self.polarity}, n_steps={self.n_steps}, dt={self.dt})"
+        )
 
-class FaultOffset( OffsetBase ):
+class FaultOffset(VFieldOffset):
     """
-    Calculate offsets for a scalar field representing an infinite sheet intrusion (dyke or sill).
+    Fault-related displacement from the gradient of the GeoField's implicit surface, integrated
+    with :class:`VFieldOffset` (default ``n_steps=2``, ``dt=1``). The instantaneous "velocity"
+    at each Euler sub-step is the mode-II slip vector constructed from ``dss`` (same construction
+    as the historical single-step fault offset). For strongly curved faults, increase ``n_steps``
+    (and/or reduce ``dt``) instead of using a separate corrector pass.
     """
 
-    def __init__(self, shortening, offset=0, offsetRange=None, contact=0, width=1e-5, modifier=None, highcurve=False, polarity=1):
+    def __init__(
+        self,
+        shortening,
+        offset=0,
+        offsetRange=None,
+        contact=0,
+        width=1e-5,
+        modifier=None,
+        polarity=1,
+        *,
+        n_steps=1,
+        dt=-1.0,
+    ):
         """
-        Initialise a new FaultOffset object.
+        Create a new fault offset object.
 
         Parameters
         ----------
@@ -222,81 +304,70 @@ class FaultOffset( OffsetBase ):
         modifier : curlew.fields.BaseSF
             An implicit field that is evaluated at all `x` and then used to scale the applied offset. Used to 
             e.g., implement finite faults where offset decays according to some ellipsoidal function.
-        highcurve : bool, optional
-            If True, correct the calculated slip direction vector by re-evaluating the
-            gradient of the scalar field at each X+slip and correcting by the difference 
-            in scalar value. This can help ensure properly tangential vectors for "highly"
-            curved faults, but is computationally more expensive.
         polarity : int, optional
             The polarity of the fault offset. If 1 (default), the hangingwall is moved and the footwall is fixed.
             If -1, the footwall is moved and the hangingwall is fixed.
+        n_steps : int, optional
+            The number of Euler steps to take. Default is 2 (assumes quite a smooth displacement field!).
+        dt : float, optional
+            The time step size. Default is -1.0 (i.e. reconstruct from modern to paleo-coords), though +1.0 can be useful to move from paleo to modern coords.
         """
-        super().__init__()
+        super().__init__(field=None, n_steps=n_steps, dt=dt, eval_transform=False)
         self.shortening = shortening
         self.offset = offset
         self.offsetRange = offsetRange
         self.contact = contact
         self.width = width
-        self.highcurve = highcurve
         self.polarity = polarity
         self.modifier = modifier
 
-    def disp( self, X, G ):
-        """
-        Compute displacement vectors for points `X` based on GeoField `G`.
-        """
-        # TODO - only evaluate gradient where slip is significant (faster!)
-        ds, s = self.dss(X,G,normalize=True) # get gradient direction
-        
-        # shift so that the fault surface is at zero
+    def _fault_kinematics(self, x, G):
+        ds, s = self.dss(x, G, normalize=True)
         contact = self.contact
         if isinstance(contact, str):
             contact = G.getIsovalue(contact)
-        #s = s - (contact / G.field.mnorm) # force isosurface to be at zero and scale to have ~unit average gradient
-        s = s - contact # force isosurface to be at zero
+        s_adj = s - contact
 
-        # get displacement vectors by projecting shortening onto tangent to the scalar field
-        # [ project onto tangent plane using: shortening - shortening . gradient ]
-        slip = self.shortening[None,:] - (torch.sum(self.shortening * ds, dim=-1, keepdim=True)) * ds
-        slip = slip / (torch.norm(slip, dim=1)+1e-6)[:,None] # normalise to length 1
+        slip = self.shortening[None, :] - (
+            torch.sum(self.shortening * ds, dim=-1, keepdim=True)
+        ) * ds
+        slip = slip / (torch.norm(slip, dim=1) + 1e-6)[:, None]
 
-        # handle possibly learnable offset
-        offset = self.offset
+        off = self.offset
         if self.offsetRange is not None:
-            offset = torch.clamp( offset, min(self.offsetRange), max(self.offsetRange))
-        
-        # apply modifier (non-uniform offset)
-        if self.modifier is not None:
-            m = self.modifier.forward( X, transform=False) # N.B. this means the modifier field need to be specified in paleo-coordinates! 
-            offset = (m * offset).squeeze()
-        
-        # compute (mode II) slip vectors
-        offset = offset * slip
-        if self.polarity < 0:
-            s = -s # reverse polarity to move footwall instead of hangingwall
-        if isinstance(self.width, tuple):
-            s1, s2, p = self.width
-            scale = (1-p)*torch.sigmoid(s*4/np.clip(s1,1e-6,np.inf)) + p*torch.sigmoid(s*4/np.clip(s2, 1e-6,np.inf))
-        else:
-            scale = torch.sigmoid(s*4/np.clip( self.width, 1e-6, np.inf)) # N.B. -4 is approximately where the sigmoid function reaches 0
-        
-        offset = offset * scale[:, None].detach() # scale displacements to move fault hangingwall only. N.B. we disregard gradients from the scalar field here to help focus on optimising the offset term. 
+            off = torch.clamp(off, min(self.offsetRange), max(self.offsetRange))
 
-        # apply correction for non-locally linear scalar field tangents
-        # TODO - make this iterative if better approximation is needed?
-        if self.highcurve:
-            mask = scale > 0 # only apply correction where slip is significant
-            ds2, s2 = self.dss( X[mask,:]+offset[mask,:], G )
-            #s2 = s2 / G.field.mnorm # normalise so scalar field approximates a distance field
-            #s2 = s2 - (contact / G.field.mnorm) # force isosurface to be at zero
-            s2 - s2 - contact # force isosurface to be at zero
-            delta = s[mask] - s2 # - s
-            offset[mask,:] = offset[mask,:] - delta[:,None] * ds2
-        return offset # add displacements to get undeformed coordinates
-    
+        if self.modifier is not None:
+            m = self.modifier.forward(x, transform=False)
+            off = (m * off).squeeze()
+
+        off = off * slip
+
+        s_scale = s_adj.clone()
+        if self.polarity < 0:
+            s_scale = -s_scale
+        if isinstance(self.width, tuple):
+            s1, s2w, p = self.width
+            scale = (1 - p) * torch.sigmoid(
+                s_scale * 4 / np.clip(s1, 1e-6, np.inf)
+            ) + p * torch.sigmoid(s_scale * 4 / np.clip(s2w, 1e-6, np.inf))
+        else:
+            scale = torch.sigmoid(
+                s_scale * 4 / np.clip(self.width, 1e-6, np.inf)
+            )
+
+        return off * scale[:, None].detach()
+
+    def _velocity(self, x, G):
+        return self._fault_kinematics(x, G)
+
     def __repr__(self):
-        return f"FaultOffset(contact={self.contact}, offset={self.offset}, width={self.width}, shortening={self.shortening})"
-    
+        return (
+            f"FaultOffset(contact={self.contact}, offset={self.offset}, width={self.width}, "
+            f"shortening={self.shortening}, n_steps={self.n_steps}, dt={self.dt})"
+        )
+
+
 class FoldOffset( OffsetBase ):
     """
     Calculate offsets from a scalar field (SF) representing distance along a fold series.
