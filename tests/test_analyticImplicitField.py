@@ -60,7 +60,7 @@ def test_ALF():
 
         # gradient = 1,1,1 -- so we know the answer
         # (is the sum of the coordinates)
-        assert (field == np.sum(x, axis=-1)).all()
+        assert (field.numpy() == np.sum(x, axis=-1)).all()
 
         # also test axis-aligned fields
         for j in range(i):
@@ -70,7 +70,7 @@ def test_ALF():
             s0 = LinearField(name='f0', input_dim=i, 
                      gradient=grad, origin=orig )
             field = s0.forward( torch.tensor(x) ).squeeze()
-            assert (field == 2*(x[:,j] + 1)).all()
+            assert (field.numpy() == 2*(x[:,j] + 1)).all()
 
 def test_multi():
     from curlew import GeoModel

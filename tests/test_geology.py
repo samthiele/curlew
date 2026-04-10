@@ -3,6 +3,7 @@ import torch
 from curlew.geology.geomodel import GeoModel
 from curlew.geometry import grid
 from curlew.fields.fourier import NFF
+from curlew.fields.series import FSF
 import curlew
 
 curlew.default_dim = 2 # specify that these tests run in 2D by default
@@ -116,6 +117,89 @@ def test_hutton():
         #assert loss1['basement'][0] > loss2['basement'][0] # loss should be better
         #assert loss1['unconformity'][0] > loss2['unconformity'][0] # loss should be better
         assert loss1['forward'][0] > loss2['forward'][0] 
+
+def test_hutton_FSF():
+    """
+    Run the hutton model as a test. Use Fourier Series Fields (FSF)
+    instead of Neural Fields (NFF) to check that these work as well.
+    """
+    from curlew.synthetic import hutton
+    from curlew import HSet
+    from curlew.geology import strati
+    curlew.default_dim = 2
+
+    dims = (2000,1000)  # dimensions of our 2D section
+    C, Ms = hutton(dims, breaks=10, cmap='prism', pval=1.0) 
+
+    # initialise random sampling for global constraints
+    G = grid( dims, step=(10,10), center=(dims[0]/2,dims[1]/2), sampleArgs=dict(N=1024) ) 
+    for _c in C:
+        _c.grid = G # add a random grid for each of our constraints
+        _c.delta = 10
+    
+    # define interpolator for basement field
+    H = HSet( value_loss='1.0', mono_loss='0.01', thick_loss='1.0')
+    s0 = strati('basement', # name for this scalar field
+                C=C[0], # constraints for this field
+                H=H, # interpolator hyperparameters
+                type=FSF,
+                base=-np.inf, # basal surface (important for unconformities)
+                rff_features=128, # number of random sin and cos features to create for each scale 
+                length_scale_range=[500, 500]) # the length scales in our model
+
+    # define interpolator for unconformity field
+    s1 = strati('unconformity', # name of created geological neural field (GNF)
+                C=C[1], # constraints for this field
+                H=H.copy(mono_loss="1.0", thick_loss=1.0), # change some hyperparams
+                type=FSF,
+                base="base", # basal surface (important for unconformities). In this case these have a value of 0.
+                rff_features=128, # number of random sin and cos features to create for each scale 
+                length_scale_range=[2000, 2000]) # the length scales in our model
+    
+    # define isosurfaces
+    s1.isosurfaces = Ms['s1'].isosurfaces
+    s0.isosurfaces = Ms['s0'].isosurfaces
+    s1.addIsosurface("base", seed=Ms.fields[1].field.origin) # layer near the base of the unconformity
+
+    # combine into a geomodel
+    M = GeoModel([s0,s1])
+
+    # fit scalar fields independently
+    loss1 = M.prefit( epochs=1, best=True, vb=False)
+    loss2 = M.prefit( epochs=200, best=True, vb=False)
+
+    # check model is converging
+    for k, v in loss1.items():
+        assert loss1[k][0] > loss2[k][0]
+    
+    # get isosurface values
+    isovals = s0.getIsovalues()
+    assert len(isovals) > 3
+
+    isovals = s1.getIsovalues()
+    assert len(isovals) > 3
+
+    # create a grid (section) to evaluate our model on
+    G2 = grid( dims, step=(20,20), center=(dims[0]/2,dims[1]/2), sampleArgs=dict(N=1024) )
+    sxy = G2.coords()
+
+    # evaluate scalar field
+    from curlew.utils import batchEval
+    pred = batchEval(sxy, M.predict, batch_size=1000) # just use this to check it works
+    assert (pred.structureID == 2).any() # check some basement is present
+    assert (pred.structureID == 1).any() # check some unconformity is present
+
+    # check lithoIDs were assigned correctly
+    lithoNames = set( pred.lithoLookup.values() )
+    assert 'basement' in lithoNames
+    assert 'basement_i0' in lithoNames
+    assert 'unconformity' in lithoNames
+    assert 'unconformity_i0' in lithoNames
+    assert len( np.unique(pred.lithoID) ) > 4 # should be at least 4 different lithologies...
+    
+    # check evaluate gradients function works
+    grad, pred2 = s0.gradient( G2.coords(), normalize=True, return_vals=True )
+    assert np.max( np.abs(1-np.linalg.norm(grad, axis=1)) ) < 1e-6 # check vectors are unit vectors
 
 def test_playfair():
     from curlew.synthetic import playfair

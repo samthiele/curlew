@@ -321,7 +321,7 @@ class BaseSF(LearnableBase):
         out = { self.name : [loss.item(),{}] }
         return loss, out
 
-class BaseAF( BaseSF ):
+class BaseAF(BaseSF):
     """
     Base class for all analytical fields (those implementing specific geometric implicit functions).
     """
@@ -688,3 +688,4 @@ class BaseNF(BaseSF):
 # import other child classes for easy access
 from curlew.fields.analytical import LinearField, QuadraticField, PeriodicField, ListricField
 from curlew.fields.fourier import NFF
+from curlew.fields.series import FSF

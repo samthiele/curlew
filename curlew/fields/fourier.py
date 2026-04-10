@@ -13,8 +13,10 @@ from curlew.fields import BaseNF
 
 class NFF(BaseNF):
     """
-    A generic neural field that maps input coordinates to some value or values. See the other
-    child classes in this module (e.g., fourier, geoinr, etc.) for specific implementations.
+    NeuralFourierField
+    
+    A neural field that uses random Fourier feature encoding for representing scalar potentials.
+    This class inherits from BaseNF and implements the necessary methods for training and evaluation.
 
     Attributes
     ----------
@@ -141,7 +143,7 @@ class NFF(BaseNF):
             x = self._encode_rff(x)
 
         # Pass through all layers and return
-        out = self.scale * self.mlp( x )
+        out = self.scale * self.mlp(x)
 
         return out
 
