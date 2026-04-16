@@ -301,93 +301,137 @@ class EllipsoidalField(BaseAF):
 
 class RectangularPrismField(BaseAF):
     """
-    A dimension-agnostic analytical field for N-dimensional Rectangular Prisms (Hyper-rectangles).
-    
-    Using the Transform function within the BaseSF class, it applies an affine transform
-    to map world coordinates to a canonical 'unit cube' space.
-    
-    The zero isosurface exists at the boundary of the prism defined by the axes (half-extents)
-    and directions. Ideally, 'axes' should define the half-width, half-height, etc.
+    Supports N rectangular prisms. Pass origins/axes/directions as:
+      - Single prism:  origin=(dim,), axes=(dim,), directions=(dim,dim)
+      - Multi prism:   origin=(N,dim), axes=(N,dim), directions=(N,dim,dim)
+    Missing params broadcast to match whichever sets N.
     """
     def initField(self,
                   origin: np.ndarray = None,
                   axes: np.ndarray = None,
                   directions: np.ndarray = None,
-                  mask: bool = False
+                  values: np.ndarray = None,
+                  mask: bool = False,
+                  reduction: str = "max"  # "max" = union, "min" = intersection, "sum" = blend
                   ):
-        
-        # 1. Determine dimensionality
+
+        # --- Determine dim and n_prisms from whichever arg is provided ---
+        def _infer(arr, ndim_single):
+            """Return (np.array with batch dim, n, dim)."""
+            a = np.asarray(arr, dtype=float)
+            if a.ndim == ndim_single:          # single prism
+                a = a[np.newaxis]
+            return a
+
+        n_prisms, dim = None, None
+
         if origin is not None:
-            dim = len(origin)
-        elif axes is not None:
-            dim = len(axes)
-        else:
-            dim = getattr(self, "input_dim", 3)
+            origin = _infer(origin, 1)          # (N, dim)
+            n_prisms, dim = origin.shape
+        if axes is not None:
+            axes = _infer(axes, 1)              # (N, dim)
+            n_prisms = n_prisms or axes.shape[0]
+            dim = dim or axes.shape[1]
+        if directions is not None:
+            directions = _infer(directions, 2)  # (N, dim, dim)
+            n_prisms = n_prisms or directions.shape[0]
+            dim = dim or directions.shape[-1]
+
+        dim = dim or getattr(self, "input_dim", 3)
+        n_prisms = n_prisms or 1
 
         self.dim = dim
-        self.mask = mask
-
-        # Setup Center
-        if origin is None:
-            origin = np.zeros(dim)
-        self.origin = _tensor(origin, dt=curlew.dtype, dev=curlew.device)
-
-        # Setup Scaling (Half-extents)
-        if axes is None:
-            axes = np.ones(dim)
-        axes_t = _tensor(axes, dt=curlew.dtype, dev=curlew.device)
-        D = torch.diag(axes_t)
-
-        # Setup Rotation/Orientation
-        if directions is None:
-            R = torch.eye(dim, dtype=curlew.dtype, device=curlew.device)
+        self.n_prisms = n_prisms
+        
+        # Assign per-prism values (default: 1, 2, 3, ...)
+        if values is None:
+            values = np.arange(1, n_prisms + 1, dtype=float)
         else:
-            if directions.shape == (dim - 1, dim):
-                # If we have only dim-1 directions, we assume the last one is the cross product of the others
-                directions = np.vstack([directions, np.cross(directions[0], directions[1])])
-            elif directions.shape != (dim, dim):
-                raise ValueError(f"Directions should be of shape ({dim}, {dim}) or ({dim-1}, {dim}), but got {directions.shape}")
-            R = _tensor(directions, dt=curlew.dtype, dev=curlew.device)
-            # Normalize basis vectors
-            R = R / torch.linalg.norm(R, dim=-1, keepdim=True)
+            values = np.asarray(values, dtype=float)
+            if values.shape[0] == 1 and n_prisms > 1:
+                values = np.broadcast_to(values, (n_prisms,)).copy()
+        self.values = _tensor(values, dt=curlew.dtype, dev=curlew.device)  # (N,)
+        
+        self.mask = mask
+        self.reduction = reduction
 
-        # Construct the Shape Matrix M = R @ D @ R.T
-        # This scales the space along the specific direction vectors
-        M = R @ D
-        
-        # Construct full Affine Transform
-        T_matrix = torch.cat([M, self.origin.unsqueeze(1)], dim=1)
-        
-        # Add the homogenous row [0, 0, ... 1]
-        homogenous_row = torch.cat(
-            [torch.zeros(self.dim, dtype=curlew.dtype, device=curlew.device),
-             torch.ones(1, device=curlew.device, dtype=curlew.dtype)]
-        ).unsqueeze(0)
-        
-        T_matrix = torch.cat([T_matrix, homogenous_row], dim=0)
+        # --- Broadcast defaults / singletons to (N, ...) ---
+        if origin is None:
+            origin = np.zeros((n_prisms, dim))
+        elif origin.shape[0] == 1 and n_prisms > 1:
+            origin = np.broadcast_to(origin, (n_prisms, dim)).copy()
 
-        # Invert to get World -> Field transform
-        self.T = Transform(matrix=T_matrix).inverse()
+        if axes is None:
+            axes = np.ones((n_prisms, dim))
+        elif axes.shape[0] == 1 and n_prisms > 1:
+            axes = np.broadcast_to(axes, (n_prisms, dim)).copy()
+
+        if directions is not None and directions.shape[0] == 1 and n_prisms > 1:
+            directions = np.broadcast_to(directions, (n_prisms, dim, dim)).copy()
+
+        # --- Build one (dim+1, dim+1) inverse transform per prism ---
+        T_invs = []
+        for i in range(n_prisms):
+            o_i = _tensor(origin[i], dt=curlew.dtype, dev=curlew.device)
+            a_i = _tensor(axes[i],   dt=curlew.dtype, dev=curlew.device)
+            D_i = torch.diag(a_i)
+
+            if directions is None:
+                R_i = torch.eye(dim, dtype=curlew.dtype, device=curlew.device)
+            else:
+                d_i = directions[i]
+                if d_i.shape == (dim - 1, dim):
+                    # Only valid for dim == 3
+                    d_i = np.vstack([d_i, np.cross(d_i[0], d_i[1])])
+                elif d_i.shape != (dim, dim):
+                    raise ValueError(
+                        f"directions[{i}] shape {d_i.shape}, expected ({dim},{dim}) or ({dim-1},{dim})")
+                R_i = _tensor(d_i, dt=curlew.dtype, dev=curlew.device)
+                R_i = R_i / torch.linalg.norm(R_i, dim=-1, keepdim=True)
+
+            M_i = R_i @ D_i  # (dim, dim)
+
+            # Assemble (dim+1, dim+1) affine matrix  [M | t ; 0 | 1]
+            T_i = torch.eye(dim + 1, dtype=curlew.dtype, device=curlew.device)
+            T_i[:dim, :dim] = M_i
+            T_i[:dim, dim]  = o_i
+
+            T_invs.append(torch.linalg.inv(T_i))
+
+        # (N, dim+1, dim+1)  — single batched tensor for fast evaluation
+        self.T_inv = torch.stack(T_invs)
 
     def evaluate(self, x: torch.Tensor):
         """
-        Evaluates the field intensity using the L-Infinity norm (max absolute difference).
-        
-        In the canonical space, the prism is a unit hypercube [-1, 1].
-        We calculate the maximum distance along any axis from the center.
+        x : (B, dim)  query points in world space.
+        Returns : (B,)  aggregated field value across all N prisms.
         """
-        # 1. Calculate absolute values of the coordinates (in canonical space)
-        abs_x = torch.abs(x)
-        
-        # 2. Find the maximum value along the dimension axis (L_infinity norm)
-        # torch.max returns a named tuple (values, indices), we just want values.
-        # This represents the distance from center to the nearest face in unit space.
-        chebyshev_dist = torch.max(abs_x, dim=1).values
-        
-        # 3. Calculate falloff
-        # Inside the box, dist < 1.0, so result is positive.
-        # On the boundary, dist = 1.0, result is 0.
+        B = x.shape[0]
+
+        x_homo = torch.cat([x, torch.ones(B, 1, device=x.device, dtype=x.dtype)], dim=1)
+        x_canon = torch.einsum('nij,bj->nbi', self.T_inv, x_homo)
+        x_canon = x_canon[..., :self.dim]
+
+        chebyshev = torch.max(torch.abs(x_canon), dim=-1).values  # (N, B)
+        field = 1.0 - chebyshev                                    # (N, B)
+
         if self.mask:
-            return torch.clamp(1 - chebyshev_dist, min=0)
+            field = torch.clamp(field, min=0.0)
+
+        if self.reduction == "label":
+            # For each point, pick the prism it's deepest inside,
+            # return that prism's assigned value. 0 if outside all.
+            inside = field > 0                                      # (N, B)
+            masked = torch.where(inside, field, torch.full_like(field, -float('inf')))
+            best = torch.argmax(masked, dim=0)                      # (B,)
+            any_inside = inside.any(dim=0)                          # (B,)
+            return torch.where(any_inside, self.values[best], torch.zeros(B, device=x.device, dtype=x.dtype))
+
+        elif self.reduction == "max":
+            return torch.max(field, dim=0).values
+        elif self.reduction == "min":
+            return torch.min(field, dim=0).values
+        elif self.reduction == "sum":
+            return torch.sum(field, dim=0)
         else:
-            return 1 - chebyshev_dist
+            raise ValueError(f"Unknown reduction '{self.reduction}'")

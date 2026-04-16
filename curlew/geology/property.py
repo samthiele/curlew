@@ -106,6 +106,149 @@ class ConstantProperty(PropertyModelBase):
 
         return geode
 
+class SoftConstantProperty(ConstantProperty):
+    """
+    A differentiable drop-in replacement for ConstantProperty.
+
+    ConstantProperty assigns densities via hard boolean masks
+    (``outputTensor[lithoID == i] = constant``), which kills the gradient
+    ``∂ρ/∂scalar_field``.  When geometry is being optimised the autograd
+    graph back to the NFF weights is therefore severed, and the geometry
+    cannot move.
+
+    SoftConstantProperty replaces the hard assignment with a sigmoid
+    transition on the *continuous* scalar field ``geode.scalar``, restoring
+    the gradient path::
+
+        ∂L/∂gz  →  ∂L/∂ρ  →  ∂ρ/∂sf  →  ∂sf/∂geometry_params
+
+    The ``soft_temp`` (temperature) parameter controls boundary sharpness:
+
+    * Large values (e.g. 100 m for a model in metres): wide, fuzzy transition
+      — geometry gradient is non-zero across a broad zone.  Easier to
+      optimise; less faithful to sharp contacts.
+    * Small values (e.g. 5–20 m): sharp transition, gradient concentrated
+      near the isosurface.  Better resolution once converged.
+
+    A good strategy is to start with a large temperature and anneal it
+    downward across outer iterations.
+
+    Parameters
+    ----------
+    soft_temp : float
+        Width of the sigmoid transition in scalar-field units (same units as
+        the NFF output — typically metres for spatial models).
+    propDict, propertyNames, learnable, noData, learning_rate
+        Passed unchanged to ``ConstantProperty``.
+    """
+
+    def __init__(
+        self,
+        propDict:        dict          = {},
+        propertyNames:   list          = [],
+        learnable:       bool          = True,
+        noData:          Optional[list] = None,
+        learning_rate:   float         = 1e-2,
+        soft_temp:       float         = 50.0,
+    ):
+        super().__init__(
+            propDict=propDict,
+            propertyNames=propertyNames,
+            learnable=learnable,
+            noData=noData,
+            learning_rate=learning_rate,
+        )
+        self.soft_temp = soft_temp
+
+    def predict(self, geode: "curlew.geology.geofield.Geode"):
+        """
+        Predict property values using differentiable sigmoid domain blending.
+
+        For each pair of adjacent domains (ordered by their mean scalar-field
+        value) a sigmoid transition is applied at the midpoint of their mean
+        scalar-field values.  The result is a smooth density that:
+
+        * equals the constant domain density far from any isosurface;
+        * transitions smoothly across isosurface boundaries;
+        * is differentiable w.r.t. both the NFF scalar field (geometry) and
+          the propDict entries (rock properties).
+
+        Parameters
+        ----------
+        geode : Geode
+            Must expose ``.scalar`` (continuous NFF output, shape ``(N,)``),
+            ``.lithoID`` (integer domain labels, shape ``(N,)``), and
+            ``.lithoLookup`` (``{int: str}``).
+
+        Returns
+        -------
+        geode : Geode
+            Updated in-place with ``.properties`` (``(N, P)``) and
+            ``.propertyNames``.
+        """
+        sf_flat  = geode.scalar       # (N,), differentiable w.r.t. NFF params
+        lithoID  = geode.lithoID      # (N,), integer domain labels
+        litho_lk = geode.lithoLookup  # {int: str}
+        N        = sf_flat.shape[0]
+        P        = len(self.propertyNames)
+
+        unique_ids = torch.unique(lithoID)
+
+        # ── Single domain: no boundary, return the learnable constant ──────
+        if len(unique_ids) == 1:
+            name    = litho_lk[unique_ids[0].item()]
+            rho_val = self.propDict.get(name, self.noData)   # shape (P,)
+            geode.properties    = rho_val.unsqueeze(0).expand(N, P)
+            geode.propertyNames = self.propertyNames
+            return geode
+
+        # ── Multi-domain: collect per-domain stats + learnable density ────
+        # We store (mean_sf, max_sf, min_sf, rho_param) so that blending
+        # thresholds can be placed right at the domain boundary rather than
+        # at the midpoint of domain means.
+        #
+        # Using mean/mean as the threshold works for open (planar) contacts
+        # but fails for closed bodies: the exterior domain spans a wide sf
+        # range so its mean sits far from the isosurface, shifting the
+        # sigmoid transition deep inside (or outside) the body.
+        # Using max(lower)/min(upper) brackets the real isosurface from
+        # both sides and is robust for both open and closed geometries.
+        domain_info = []
+        for uid in unique_ids:
+            mask       = lithoID == uid
+            name       = litho_lk[uid.item()]
+            sf_domain  = sf_flat[mask].detach()
+            sf_mean    = float(sf_domain.mean())
+            sf_max     = float(sf_domain.max())
+            sf_min     = float(sf_domain.min())
+            rho_param  = self.propDict.get(name, self.noData)  # (P,)
+            domain_info.append((sf_mean, sf_max, sf_min, rho_param))
+        domain_info.sort(key=lambda x: x[0])  # order by mean_sf
+
+        # ── Sigmoid blending across adjacent domain boundaries ─────────────
+        # Start with the lowest-sf domain's density (shape (N, P)).
+        rho_soft = domain_info[0][3].unsqueeze(0).expand(N, P)
+
+        for i in range(len(domain_info) - 1):
+            _, sf_lo_max, _,        rho_lo = domain_info[i]
+            _, _,         sf_hi_min, rho_hi = domain_info[i + 1]
+
+            # Threshold sits between the top of the lower domain and the
+            # bottom of the upper domain — right at the contact for both
+            # open horizons and closed bodies.
+            thresh = (sf_lo_max + sf_hi_min) / 2.0
+
+            # alpha → 0 in lower domain, alpha → 1 in upper domain
+            # shape (N, 1) for broadcasting over P properties
+            alpha = torch.sigmoid(
+                (sf_flat - thresh) / self.soft_temp
+            ).unsqueeze(-1)
+
+            rho_soft = rho_soft + alpha * (rho_hi - rho_lo).unsqueeze(0)
+
+        geode.properties    = rho_soft
+        geode.propertyNames = self.propertyNames
+        return geode
 
 class MLPProperty(PropertyModelBase, nn.Module):
     """

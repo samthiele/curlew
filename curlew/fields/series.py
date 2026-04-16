@@ -40,14 +40,12 @@ class FSF(BaseNF):
 
         w1   : amplitude  (F,)  — how much each mode contributes
         w2   : phase      (F,)  — where in space each mode's hinge sits
-        bias : asymmetry  (F,)  — shifts σ input, controls fold vergence
+        bias : asymmetry  (F,)  — shifts σ input
 
         The activation σ is always evaluated on a sinusoid ∈ [−1, 1] shifted
         by a learnable bias.  This keeps σ' away from zero at initialisation
-        regardless of the weights, and allows asymmetric fold shapes (vergent
-        folds, wider anticlines than synclines, etc.) that the linear mode
-        cannot represent without access to higher harmonics.
-
+        regardless of the weights, and allows asymmetric shapes to be learned.
+        
         Gradient and Hessian are analytic:
             f_k = sin(Ω_k·x + w2_k) + bias_k
             g_k = cos(Ω_k·x + w2_k)          [∂f_k/∂(Ω_k·x)]
