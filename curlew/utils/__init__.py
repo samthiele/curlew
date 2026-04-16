@@ -69,29 +69,7 @@ def batchEval( array, function, batch_size = 10000, vb=False, **kwargs):
         elif isinstance(results[0], np.ndarray):
             return np.concatenate(results)
         elif isinstance(results[0], torch.Tensor):
-            return torch.concatenate(results)
+            return torch.cat(results, dim=0)
 
     else: # easy!
         return function(array, **kwargs)
-
-def spatialHash( points : np.array, resolution : float, extent : tuple = None):
-    """
-    Create a spatial hash of the points at the specified resolution to enable
-    fast intersections or to generate URLs representing positions. If extent is not None 
-    then the hash is calculated by indexing a global grid of the specified resolution. Otherwise,
-    if extent is None, then the hash is calculated using large primes to reduce the probability
-    of two spatially separate points recieving the same hash (although this is still possible). 
-    """
-    
-    # round points to the nearest multiple of the resolution
-    points = np.round(points / resolution) * resolution
-    
-    # compute index into global grid
-    if extent is not None:
-        points = np.round(points / resolution) * resolution
-        ixx = [(points[:,i] / extent[i]).astype(int) for i in range(points.shape[1])]
-        hash = np.sum([ixx[i] * 10**i for i in range(len(ixx))])
-    else:
-        # large primes
-        primes = np.array( [73856093, 19349663, 83492791] )
-        # hash =  # TODO

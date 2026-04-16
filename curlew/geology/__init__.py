@@ -178,7 +178,7 @@ def fault(name, *, C, shortening, learn_sigma=False, contact=0, offset=0, width=
     """
     # shortening
     if shortening is None: 
-        shortening = np.zeros( f.field.input_dim )
+        shortening = np.zeros( curlew.default_dim )
         shortening[-1] = -1 # default is vertical vector
     shortening = _tensor( shortening, dev=curlew.device, dt=curlew.dtype) 
     
