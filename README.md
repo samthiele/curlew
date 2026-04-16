@@ -32,9 +32,9 @@ Quickly get up to speed with `curlew` using these [CoLab tutorials](https://driv
 
 Documentation is automatically built and served through [GitHub pages](https://samthiele.github.io/curlew/). 
 
-## Support
+## Support and feedback
 
-Please use [GitHub issues](https://github.com/samthiele/curlew/issues) to report bugs or other problems. The [Discussions](https://github.com/samthiele/curlew/discussions) can be used for feature requests, ideas or more general problems (or praise :smirk:). Also feel free to share any cool models you have built through the [Discussions](https://github.com/samthiele/curlew/discussions)!
+Please use [GitHub issues](https://github.com/samthiele/curlew/issues) to report bugs. For broader ideas or questions, don't hesitate to use the [discussions](https://github.com/samthiele/curlew/discussions) page.
 
 ## Contributing and appreciation
 
@@ -62,4 +62,4 @@ Upgrades to the geology/modeling core, especially an improved structure for the 
 
 ### v1.0 - initial release
 
-Implemented basic fourier-feature based neural fields and overlying data-structures to turn these into 3D model. Developed an implemented comprehensive loss function for fitting neural fields to diverse geological data. 
+3) Leave a [GitHub issue](https://github.com/samthiele/curlew/issues) if you have questions or comments (Issues do not strictly need to be related to bug reports).
