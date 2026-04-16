@@ -7,19 +7,6 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-
-def __getattr__(name: str):
-    """Lazy import so `import curlew.utils` does not load optional `napari`."""
-    if name == "NapariViewer":
-        from curlew.utils.napari_viewer import NapariViewer
-
-        return NapariViewer
-    if name == "Napari3D":
-        from curlew.utils.napari3D import Napari3D
-
-        return Napari3D
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
 def get_colors(inp, colormap="viridis", normalize=True, vmin=None, vmax=None):
     try:
         import matplotlib as mpl
@@ -87,3 +74,24 @@ def batchEval( array, function, batch_size = 10000, vb=False, **kwargs):
     else: # easy!
         return function(array, **kwargs)
 
+def spatialHash( points : np.array, resolution : float, extent : tuple = None):
+    """
+    Create a spatial hash of the points at the specified resolution to enable
+    fast intersections or to generate URLs representing positions. If extent is not None 
+    then the hash is calculated by indexing a global grid of the specified resolution. Otherwise,
+    if extent is None, then the hash is calculated using large primes to reduce the probability
+    of two spatially separate points recieving the same hash (although this is still possible). 
+    """
+    
+    # round points to the nearest multiple of the resolution
+    points = np.round(points / resolution) * resolution
+    
+    # compute index into global grid
+    if extent is not None:
+        points = np.round(points / resolution) * resolution
+        ixx = [(points[:,i] / extent[i]).astype(int) for i in range(points.shape[1])]
+        hash = np.sum([ixx[i] * 10**i for i in range(len(ixx))])
+    else:
+        # large primes
+        primes = np.array( [73856093, 19349663, 83492791] )
+        # hash =  # TODO
