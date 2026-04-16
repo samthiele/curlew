@@ -3,13 +3,16 @@ Utility functions for generating basic geometries (grids, sections, etc.) and
 performing other simple geometric tasks. 
 """
 
+from dataclasses import dataclass
 import numpy as np
 import torch
 import curlew
+from curlew import _numpy, _tensor
 
 # TODO - add functions for converting angle pairs (e.g., strike, dip) to vectors
 
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Union
+ArrayLike = Union[np.ndarray, "torch.Tensor"]
 
 def poisson_disk_indices_2d(
     x: np.ndarray,
@@ -219,6 +222,7 @@ class Grid(object):
         self.matrix = np.eye(self.ndim+1)
         if center is not None: # define grid origin
             self.matrix[:self.ndim, self.ndim] = np.array(center)
+            self.tformed_axes = [self.axes[i] + center[i] for i in range(len(center))]
         if rotation is not None: # define grid rotation matrix
             self.matrix[:self.ndim, :self.ndim] = rotation
         self.center = self.matrix[:self.ndim, self.ndim] # store for convenience
@@ -238,7 +242,7 @@ class Grid(object):
         coords = np.meshgrid(*self.axes, indexing='ij')
         grid = np.array([c.T for c in coords[::-1]]).T
         grid = grid[...,::-1]
-        points = grid.reshape((-1, self.ndim) )
+        points = grid.reshape((-1, self.ndim))
 
         # apply transform matrix
         if transform:
@@ -276,7 +280,7 @@ class Grid(object):
         if transform and (self._cache is not None): # we need to apply a transform?
             # N.B. assumes that if self._cache is defined then this contains
             # pre-computed transformed grid point positions
-            coords = transform(coords)
+            coords = transform(coords, end=None)
         return coords
 
     def sample(self, N=4096, poissonDisk=None, tensor=False):
@@ -318,7 +322,8 @@ class Grid(object):
 
         # return in desired format
         if tensor:
-            return torch.tensor( out, device=curlew.device, dtype=curlew.dtype)
+            from curlew.core import _tensor
+            return _tensor(out)
         else:
             return out
     
@@ -667,5 +672,105 @@ def blended_wave( x, f=0.5, A=1, T=2*np.pi ):
     y1 = triangle_wave(x, A=A, T=T, n_terms=1) # sinusoid wave 
     y2 = triangle_wave(x, A=A, T=T, n_terms=11) # triangle wave 
     return (1-f)*y1 + f*y2
+
+@dataclass
+class Transform:
+    """
+    Homogeneous transform supporting:
+      - 3x3 matrices for 2D points
+      - 4x4 matrices for 3D points
+    """
+    matrix: ArrayLike
+
+    def __post_init__(self):
+        if isinstance(self.matrix, int):
+            self.matrix = np.eye(self.matrix + 1)
+
+        # If handed a CUDA tensor, pull it to CPU before storing as numpy
+        if isinstance(self.matrix, torch.Tensor):
+            self.matrix = self.matrix.detach().cpu().numpy()
+
+        self.matrix = _numpy(self.matrix)
+
+        if self.matrix.shape not in [(3, 3), (4, 4)]:
+            raise ValueError("Transform matrix must be 3x3 or 4x4")
+
+    def set(self, mat: ArrayLike):
+        """Set the transform matrix."""
+        self.matrix = mat
+        self.__post_init__()
+
+    def apply(self, points: ArrayLike) -> ArrayLike:
+        """
+        Apply the transform to an (N,2) or (N,3) array of points.
+        Handles both numpy arrays and pytorch tensors.
+        """
+        if isinstance(points, torch.Tensor):
+            return self._apply_torch(points)
+        elif isinstance(points, np.ndarray):
+            return self._apply_numpy(points)
+        else:
+            raise TypeError("points must be a numpy array or torch tensor")
+
+    def __call__(self, points: ArrayLike) -> ArrayLike:
+        """Alias for apply()."""
+        return self.apply(points)
+
+    def inverse(self) -> "Transform":
+        """Return a Transform representing the inverse operation."""
+        # Always invert on CPU to avoid cuSOLVER initialisation issues;
+        # _apply_torch will move the matrix to the right device on demand.
+        mat = torch.as_tensor(self.matrix)  # CPU, from numpy source of truth
+
+        try:
+            inv = torch.linalg.inv(mat)
+        except torch.linalg.LinAlgError as e:
+            raise ValueError("Transform matrix is not invertible") from e
+        # Any other RuntimeError (CUDA, dtype, driver) propagates naturally
+
+        return Transform(inv.numpy())
+
+    def _apply_numpy(self, points: np.ndarray) -> np.ndarray:
+        """Apply the transform to a numpy (N, D) array."""
+        if points.ndim != 2:
+            raise ValueError("points must have shape (N, D)")
+
+        n, d = points.shape
+        mat = self.matrix
+
+        if mat.shape == (3, 3) and d != 2:
+            raise ValueError("3x3 transform requires (N,2) points")
+        if mat.shape == (4, 4) and d != 3:
+            raise ValueError("4x4 transform requires (N,3) points")
+
+        ones = np.ones((n, 1), dtype=points.dtype)
+        homo = np.concatenate([points, ones], axis=1)   # (N, D+1)
+        transformed = (mat @ homo.T).T                   # (N, D+1)
+        w = transformed[:, -1:]
+        return transformed[:, :-1] / w
+
+    def _apply_torch(self, points: torch.Tensor) -> torch.Tensor:
+        """Apply the transform to a torch (N, D) tensor."""
+        if points.ndim != 2:
+            raise ValueError("points must have shape (N, D)")
+
+        n, d = points.shape
+
+        # Cast lazily: matches device and dtype of the incoming points.
+        # Zero-copy if already matching; cheap cast otherwise.
+        # Keeps self.matrix as the CPU numpy source of truth.
+        mat = torch.as_tensor(self.matrix, dtype=points.dtype, device=points.device)
+
+        if mat.shape == (3, 3) and d != 2:
+            raise ValueError("3x3 transform requires (N,2) points")
+        if mat.shape == (4, 4) and d != 3:
+            raise ValueError("4x4 transform requires (N,3) points")
+
+        # Mirror device and dtype of points exactly
+        ones = torch.ones((n, 1), dtype=points.dtype, device=points.device)
+        homo = torch.cat([points, ones], dim=1)           # (N, D+1)
+        transformed = (mat @ homo.T).T                    # (N, D+1)
+        w = transformed[:, -1:].clamp(min=1e-12)
+        return transformed[:, :-1] / w
 
 

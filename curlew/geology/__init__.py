@@ -5,119 +5,151 @@ import numpy as np
 import torch
 from torch import nn
 import curlew
+from curlew import _tensor
 from curlew.core import CSet
-from curlew.geology.SF import SF
-from curlew.geology.interactions import sheetOffset
-from curlew.geology.interactions import faultOffset
-from curlew.geology.interactions import foldOffset
-from curlew.geology.model import _linkF
+from curlew.geology.geofield import GeoField
+from curlew.geology.interactions import (
+    Overprint,
+    SheetOffset,
+    FaultOffset,
+    FoldOffset,
+    VFieldOffset,
+)
+from curlew.geology.geomodel import _linkF, GeoModel
 from curlew.geometry import blended_wave
-from curlew.fields.analytical import ALF
+from curlew.fields.analytical import LinearField
 
-# GEOLOGICAL OBJECTS / EVENTS - utility functions for creating SFs for different geological objects, each typically representing a geological event. 
+# GEOLOGICAL OBJECTS / EVENTS - utility functions for creating GeoFields for different geological objects, each typically representing a geological event. 
 # --------------------------------------------------------------------------------------------------------------------------------------------------
-def _initF( name, C, H=None, bound = -np.inf, deformation=None, dargs={}, **kwargs):
+def _initF( name, C, **kwargs):
     """
-    Initialise a SF and handle case where C is a constraint set (`CSet`) or 
+    Initialise a GeoField and handle case where C is a constraint set (`CSet`) or 
     `curlew.fields.NF` or `curlew.fields.analytical.AF` instance.
     """
-    if H is None: # init default hyperparams
-        H = curlew.core.HSet() 
-    if isinstance( C, CSet ): # build a SF
-        f = SF( name, H=H, bound=bound, 
-               deformation=deformation,
-               deformation_args=dargs,
-               **kwargs ) # create our SF
+    if isinstance( C, CSet ): # build a GeoField
+        f = GeoField( name, **kwargs ) # create our GeoField
         f.field.bind( C ) # bind constraints
+    elif C is None: # construct a new field but without constraints
+        f = GeoField( name, **kwargs ) # create our GeoField
     else:  # predifined field
-        f = SF( name, H=H, bound=bound, 
-               deformation=deformation,
-               deformation_args=dargs,
-               field=C,
-               **kwargs ) # create our SF
+        f = GeoField( name, type=type(C), field=C, **kwargs ) # create our GeoField using predefined Field
+    
+    # compile the field to booooost performance
+    if curlew.compile and isinstance(f.field, nn.Module):
+        f.field.compile()
+        
     return f
 
-def strati( name, C, H=None, base = -np.inf, **kwargs):
+def strati( name, *, C, base = -np.inf, mode="above", **kwargs):
     """
-    Create a SF representing a stratigraphic series (base stratigraphy or unconformity).
+    Create a GeoField representing a stratigraphic series (base stratigraphy or unconformity).
 
     Parameters
     ------------
     name : str
-        A name for the created stratigraphic series (and SF that represents it).
+        A name for the created stratigraphic series (and GeoField that represents it).
     C : CSet | curlew.fields.analytical.AF | curlew.fields.NF
         Either a pre-constructed neural field, explicit field or a set of 
-        constraints to use to construct a new SF representing this stratigraphic series.
-    H : HSet
-        Hyperparameters for the created neural field (if C is a CSet). 
-    base : float
-        Scalar value representing the basement contact of this stratigraphic series. This
+        constraints to use to construct a new GeoField representing this stratigraphic series.
+    base : float | str
+        Scalar value or isosurface name representing the basement contact of this stratigraphic series. This
         is important for unconformities, as only values greater than `base` are considered
-        part of this event. Default is -infinity.
+        part of this event. Default is -infinity. If a string is provided, an isosurface with the corresponding
+        name *must* be added to the returned GeoField.
+    mode : str
+        The overprinting mode. Options are:
+            - `"above"`: replace all regions greater than the provided threshold). Useful for e.g., unconformities.
+            - `"below"`: replace all regions less than than the provided threshold). Useful for e.g., intrusions.
 
     Keywords
     ----------
-    All keywords are passed to `curlew.fields.NF.__init__(...)`.
+    All keywords are passed to `curlew.GeoField.__init__(...)`, many of which are then used to initialise the 
+    underlying analytical or neural field. See `curlew.GeoField.__init__(...)` for further details.
 
     Returns
     ---------
-    A `curlew.geology.SF` instance for the created structure.
+    A `curlew.geology.GeoField` instance for the created structure.
     """
-    return _initF( name, C=C, H=H, bound=base, **kwargs)
+    # build object for unconformable overprinting
+    o = Overprint(threshold=base, mode=mode)
+    return _initF( name, C=C, overprint=o, **kwargs)
 
-def sheet(name, C, H=None, contact=(-1,1), aperture=2, **kwargs):
+def sheet(name, *, C, contact=(-1,1), aperture=2, n_steps=1, dt=-1.0, **kwargs):
     """
-    Create a SF representing a sheet intrusion (dyke, sill or vein).
+    Create a GeoField representing a sheet intrusion (dyke, sill or vein).
 
     Parameters
     -----------
-    C : CSet
-        The constraints used to constrain this geological structure.
-    H : HSet
-        The hyperparameters used by the underlying `curlew.fields.NF` interpolator.
-    contact : tuple
+    name : str
+        A name for the created stratigraphic series (and GeoField that represents it).
+    C : CSet | curlew.fields.analytical.AF | curlew.fields.NF
+        The constraints or predefined field used to constrain this geological structure.
+    contact : tuple | list [ tuple ]
         A tuple of floats specifying the scalar values for the (upper, lower) sides of 
-        the intrusion.
-    aperture : float
-        The aperture (Mode I opening) of the dyke. Used to displace surrounding rocks.
+        the intrusion, or a list of (upper, lower) tuples if multiple dykes are defined.
+    aperture : float | list
+        The aperture (Mode I opening) of the dyke, or a list thereof. Used to displace surrounding rocks.
+    n_steps : int
+        Number of Euler substeps for integrating sheet-parallel displacement (see :class:`~curlew.geology.interactions.SheetOffset`). Default is 1.
+    dt : float
+        Time step per Euler substep. Default is -1.0 (i.e. reconstruct from modern to paleo-coords).
+
     Keywords
-    -----------
-    Keywords are used to set the properties of the underlying `curlew.fields.NF` interpolator
-    (i.e. are passed to `curlew.fields.NF.__init__(...)`).
+    ----------
+    All keywords are passed to `curlew.GeoField.__init__(...)`, many of which are then used to initialise the 
+    underlying analytical or neural field. See `curlew.GeoField.__init__(...)` for further details.
 
     Returns
     ---------
-    A `curlew.geology.SF` instance for the created structure.
+    A `curlew.geology.GeoField` instance for the created structure.
     """
     if isinstance(contact, float) or isinstance(contact, int):
         contact = (-contact, contact) # define as upper and lower surface (assuming symmetry)
-    dargs = {'contact':contact, 'aperture':aperture}
-    return _initF( name, C=C, H=H, bound=contact, 
-                  deformation=sheetOffset, dargs=dargs, **kwargs)
+    if not isinstance(contact, list):
+        contact = [contact]
+    if not isinstance(aperture, list):
+        aperture = [aperture for c in contact]
+    assert len(contact) == len(aperture)
+    
+    offset = []
+    overprint = []
+    for _c, _a in zip(contact, aperture):
+        offset.append(
+            SheetOffset(contact=_c, aperture=_a, n_steps=n_steps, dt=dt)
+        )
+        overprint.append( Overprint(threshold=_c, mode='in')  )
+    if len(offset) == 1:
+        offset = offset[0]
+        overprint = overprint[0]
 
-def fault(name, C, H=None, sigma1=None, learn_sigma=False, offset=0, contact=0, width=0, highcurve=False, **kwargs):
+    return _initF( name, C=C, deformation=offset, overprint=overprint, **kwargs)
+
+def fault(name, *, C, shortening, learn_sigma=False, contact=0, offset=0, width=0, n_steps=2, dt=-1.0, **kwargs):
     """
-    Create a SF representing a fault, shear zone or (optionally) dilatant shear vein.
+    Create a GeoField representing a fault, shear zone or (optionally) dilatant shear vein.
 
     Parameters
     -----------
-    C : CSet
-        The constraints used to constrain this geological structure.
-    H : HSet
-        The hyperparameters used by the underlying `curlew.fields.NF` interpolator.
-    sigma1 : np.ndarray
+    name : str
+        A name for the created stratigraphic series (and GeoField that represents it).
+    C : CSet | curlew.fields.analytical.AF | curlew.fields.NF
+        The constraints or predefined field used to constrain this geological structure.
+    shortening : np.ndarray
         A numpy array of shape (n,) defining the principal compressive stress vector. This
         is used to resolve the slip direction, by projection onto the tangent of the fault's
         interpolated scalar field. Defaults to vertical.
     learn_sigma : bool
-        True if sigma1 should be converted to a learnable parameter. Default is False.
-    offset : float | tuple
+        True if shortening should be converted to a learnable parameter. Default is False.
+    contact : float | str | list
+        The value (or name) defining the fault (iso)surface. Default is zero. Multi-faults (i.e. parallel
+        faults with different displacements and locations but with geometry defined by a single implicit
+        function) can be constructed by making `contact`, `offset` and `width` a list with one entry for
+        each fault surface.
+    offset : float | tuple | list
         The mode-2 slip on this (shear) fault. If a float is passed, 
         the offset will be fixed. If a tuple containing (initial, minimum, maximum) is
         passed then the offset will be learned, by constrained to the specified range.
-    contact : float | str
-        The value (or name) defining the fault (iso)surface. Default is zero.
-    width : float | tuple
+    width : float | tuple | list
         The width of ductile deformation associated with this fault. If a float is passed
         then this will specify the width of ductile deformation (using a sigmoid function),
         such that large widths can be used for shear zones and small values of width
@@ -130,103 +162,166 @@ def fault(name, C, H=None, sigma1=None, learn_sigma=False, offset=0, contact=0, 
         fault core, `width_ductile` defines the (larger) width of surrounding ductile deformation,
         and `proportion` defines the partioning of the total offset between these two deformation
         types.
+    n_steps : int
+        Number of explicit Euler substeps for integrating fault slip (see :class:`~curlew.geology.interactions.FaultOffset`). Default is 2.
+    dt : float
+        Time step per Euler substep. Default is -1.0 (i.e. reconstruct from modern to paleo-coords).
 
     Keywords
-    -----------
-    Keywords are used to set the properties of the underlying `curlew.fields.NF` interpolator
-    (i.e. are passed to `curlew.fields.NF.__init__(...)`)
+    ----------
+    All keywords are passed to `curlew.GeoField.__init__(...)`, many of which are then used to initialise the 
+    underlying analytical or neural field. See `curlew.GeoField.__init__(...)` for further details.
 
     Returns
     ---------
-    A `curlew.geology.SF` instance for the created structure.
+    A `curlew.geology.GeoField` instance for the created structure.
     """
-    dargs = {'sharpness':1000, 'highcurve': highcurve, 'contact' : contact}
+    # shortening
+    if shortening is None: 
+        shortening = np.zeros( curlew.default_dim )
+        shortening[-1] = -1 # default is vertical vector
+    shortening = _tensor( shortening, dev=curlew.device, dt=curlew.dtype) 
+    
+    if isinstance(contact, list) or isinstance(contact, tuple) or isinstance(contact, np.ndarray):
+        if not (isinstance(offset, list) or isinstance(offset, tuple) or isinstance(offset, np.ndarray)):
+            offset = [offset for i in contact] # listify
+        if not (isinstance(width, list) or isinstance(width, tuple) or isinstance(width, np.ndarray)):
+            width = [width for i in contact] # listify
+        assert len(offset) == len(contact)
+        assert len(width) == len(contact)
+    else:
+        contact = [contact] # listify
+        offset = [offset]
+        width = [width]
 
-    # handle single or composite width
-    if width != 0:
-        if isinstance(width, tuple):
-            dargs['sharpness'] = (4/width[0], 4/width[1], width[2])
+    # build offset object(s)
+    O = []
+    for _c,_o, _w in zip(contact, offset, width):
+        offs = FaultOffset(
+            shortening=shortening,
+            offset=_o,
+            contact=_c,
+            width=_w,
+            n_steps=n_steps,
+            dt=dt,
+        )
+
+        # handle constant or learnable offsets and/or slip direction
+        init=False
+        if isinstance( _o, tuple):
+            _o, smin, smax = _o # shear (mode II) offset
+            offs.offset = nn.Parameter( _tensor( _o, dev=curlew.device, dt=curlew.dtype) ) # will now be changed by optimiser!
+            offs.offsetRange = (smin, smax) # use min and max to constrain the range of values allowed
+            init=True
         else:
-            dargs['sharpness'] = 4/width
+            offs.offset = _tensor(_o, dev=curlew.device, dt=curlew.dtype)
+        if learn_sigma:
+            offs.shortening = nn.Parameter( offs.shortening )
+            init=True
+        
+        if init: # initialise the optimiser to include the new parameters
+            offs.init_optim(lr=kwargs.get('learning_rate', 1e-1))
+        O.append(offs)
+    
+    if len(O) == 1:
+        O = O[0] # un-listify for single fault surfaces
     
     # build field
-    f = _initF( name, C=C, H=H, bound=None, 
-                  deformation=faultOffset, dargs=dargs, **kwargs)
+    f = _initF( name, C=C, deformation=O, **kwargs)
 
-    # add sigma 1 vector to dargs
-    if sigma1 is None: 
-        sigma1 = np.zeros( f.field.input_dim )
-        sigma1[-1] = -1 # default is vertical vector
-    dargs['sigma1'] = torch.tensor( sigma1, device=curlew.device, dtype=curlew.dtype)   
-
-    # handle constant or learnable offsets and/or slip direction
-    init=False
-    if isinstance( offset, tuple):
-        offset, smin, smax = offset # shear (mode II) offset
-        f.field.offset = nn.Parameter( torch.tensor( offset, device=curlew.device, dtype=curlew.dtype) ) # will now be changed by optimiser!
-        dargs['offset'] = (f.field.offset, smin, smax)
-        init=True
-    else:
-        dargs['offset'] = torch.tensor(offset, device=curlew.device, dtype=curlew.dtype)
-    if learn_sigma:
-        f.field.sigma1 = nn.Parameter( dargs['sigma1'] )
-        dargs['sigma1'] = f.field.sigma1
-        init=True
-    f.deformation_args = dargs # update dargs
-    if init: # re-initialise the optimiser to include the new parameters, if needed
-        f.field.init_optim()
     return f
 
-def finiteFault(name, C, H, **kwargs):
+def finiteFault(name, *, C, H, **kwargs):
     """
-    Create a SF representing a finite fault.
-    """
-    pass
-
-def stock(name, C, H, contact=0, **kwargs):
-    """
-    Create a SF representing a stock, pluton or batholith. 
+    Create a GeoField representing a finite fault.
     """
     pass
 
-def fold( name, origin, compression, extension, wavelength, amplitude=1.0, sharpness=1.0):
+def stock(name, *, C, H, contact=0, **kwargs):
     """
-    Create a new SF instance representing a fold structure. This uses an explicitely
-    defined scalar field (defining distance along the fold-shortening axis) to compute
-    displacement vectors that give the specified fold amplitude and wavelength. 
+    Create a GeoField representing a stock, pluton or batholith. 
+    """
+    pass
+
+def fold( name, *, origin, compression, extension, wavelength, amplitude=1.0, sharpness=1.0, estStrain=False):
+    """
+    Create a GeoField representing a fold structure.
+
+    This constructs an explicitly defined scalar field aligned with the
+    fold-shortening axis, then computes displacement vectors that reproduce a
+    fold geometry with the specified wavelength, amplitude, and sharpness.
+    Optionally, an estimated finite strain required to “undo” the folding can
+    be computed from the waveform geometry (and applied when transforming from
+    model to paleo-coordinates).
+
+    Parameters
+    ------------
+    name : str
+        A name for the created stratigraphic series (and GeoField that represents it).
+    origin : array-like
+        A point through which the fold scalar field passes; used as the field’s origin.
+    compression : array-like
+        Vector describing the principal compression direction. This is
+        normalized and scaled internally to represent the fold wavelength. This vector
+        should be perpendicular to the fold's axial foliation.
+    extension : array-like
+        Vector describing the principal extension direction, such that the fold axis
+        is the cross product between the extension and compression vectors.
+    wavelength : float
+        The fold wavelength. Used to scale the compression vector into a
+        periodic scalar field.
+    amplitude : float, default=1.0
+        Amplitude of the fold waveform.
+    sharpness : float, default=1.0
+        Sharpness of the fold waveform, controlling the peakedness of the
+        blended wave.
+    estStrain : bool, default=False
+        If True, numerically estimate the finite strain required to restore the
+        folded layer to its unfolded length using a line integral of the
+        waveform.
+
+    Keywords
+    ----------
+    All keywords are passed to `curlew.GeoField.__init__(...)`, many of which are then used to initialise the 
+    underlying analytical or neural field. See `curlew.GeoField.__init__(...)` for further details.
+
+    Returns
+    ---------
+    A `curlew.geology.GeoField` instance representing the fold structure, with an
+    associated analytical scalar field and deformation function.
     """
     # create a fold field and associated deformation function
     compression = compression / np.linalg.norm(compression) # direction of principal compression
     compression *= (2 * np.pi) / wavelength  # scale normal vector to give appropriate wavelength 
-    fa = ALF( name, input_dim=len(compression), 
-              origin=origin, gradient=compression )
+    fa = LinearField( name, input_dim=len(compression), 
+              origin=origin, gradient=compression ) # TODO; allow also interpolated fields here
     
     # evaluate fold strain
-    x = torch.tensor( np.linspace(0,2,1000), device=curlew.device, dtype=curlew.dtype )
-    y = blended_wave(x, f=sharpness, A=amplitude, T=2) # evaluate one waveform
-    dx = torch.mean( torch.diff(x) )
-    dy = torch.diff( y )
-    l0 = torch.sum( torch.sqrt( dx**2 + dy**2 ) ) # line-integral gives initial length
-    l1 = x[-1] - x[0] # current length is known
-    strain = ((l0-l1) / l1).item() # hence get strain needed to undo folding
-
+    if estStrain:
+        x = _tensor( np.linspace(0,2,1000), dev=curlew.device, dt=curlew.dtype )
+        y = blended_wave(x, f=sharpness, A=amplitude, T=2) # evaluate one waveform
+        dx = torch.mean( torch.diff(x) )
+        dy = torch.diff( y )
+        l0 = torch.sum( torch.sqrt( dx**2 + dy**2 ) ) # line-integral gives initial length
+        l1 = x[-1] - x[0] # current length is known
+        strain = ((l0-l1) / l1).item() # hence get strain needed to undo folding
+    else:
+        strain = 0 # ignore shortening
+    
     # create a lambda function for evaluating folds from scalar value
     f = lambda x: blended_wave( x, f=sharpness, A=amplitude, T=2)
 
-    # create dargs and set offset function
+    # creat fold object
     extension = extension / np.linalg.norm(extension) # principal stretching direction
-    dargs = dict(thicker=torch.tensor(extension, dtype=curlew.dtype, device=curlew.device ),
-                 shorter=torch.tensor(compression, dtype=curlew.dtype, device=curlew.device ),
-                 shortening=strain, 
-                 periodic=f )
+    defo = FoldOffset( thicker=extension, shorter=compression, shortening=strain, periodic=f )
 
-    # create and return our SF instance
-    return SF( name, None, field=fa, 
-        deformation=foldOffset, deformation_args=dargs )
+    # create and return our GeoField instance
+    return GeoField( name, None, field=fa, # use pre-existing (analytical) field rather than creating a new one
+                    deformation=defo )
 
-def domainBoundary( name, C, H=None, bound = 0, gt = 0, lt = 1, **kwargs ):
+def domainBoundary( name, *, C, bound = 0, gt = 0, lt = 1, mode="below", **kwargs ):
     """
-    Create a SF representing a domain boundary, in which different sub-models are modelled on either side of the boundary. 
+    Create a GeoField representing a domain boundary, in which different sub-models are modelled on either side of the boundary. 
     This can be very useful for modelling e.g., sedimentary basins, where the basin fill is modelled on one side of the boundary (onlap relations), 
     or for modelling domain boundary faults (in which there is no known or meaningful relationship between the fault's hangingwall and footwall).
 
@@ -236,39 +331,43 @@ def domainBoundary( name, C, H=None, bound = 0, gt = 0, lt = 1, **kwargs ):
         A name for the created domain boundary.
     C : CSet | curlew.fields.analytical.AF | curlew.fields.NF
         Either a pre-constructed neural field, explicit field or a set of 
-        constraints to use to construct a new SF representing this domain boundary.
-    H : HSet
-        Hyperparameters for the created neural field (if C is a CSet).
+        constraints to use to construct a new GeoField representing this domain boundary.
     bound : float, str
         A float specifying the value (isosurface value or name) of the interpolated scalar field that represents the domain boundary.
-    gt : float | SF | list
-        A float or a list of floats or SFs that define the scalar field(s) used to populate the hangingwall (val > bound) of this domain boundary. In essence these
+    gt : float | GeoField | list
+        A float or a list of floats or GeoFields that define the scalar field(s) used to populate the hangingwall (val > bound) of this domain boundary. In essence these
         define the geological sub-model used on the hangingwall side of the domain boundary. If a float is provided, it will be populated with a constant value.
-    lt : float | SF | list
-        A float or a list of floats or SFs that define the scalar field(s) used to populate the footwall (val < bound) of this domain boundary. In essence these
+    lt : float | GeoField | list
+        A float or a list of floats or GeoFields that define the scalar field(s) used to populate the footwall (val < bound) of this domain boundary. In essence these
         define the geological sub-model used on the footwall side of the domain boundary. If a float is provided, it will be populated with a constant value.
-
+    mode : str
+        The overprinting mode. Options are:
+            - `"above"`: replace all regions greater than the provided threshold). Useful for e.g., unconformities.
+            - `"below"`: replace all regions less than than the provided threshold). Useful for e.g., intrusions.
+    
     Keywords
-    ------------
-    All keywords are passed to `curlew.fields.NF.__init__(...)`.
+    ----------
+    All keywords are passed to `curlew.GeoField.__init__(...)`, many of which are then used to initialise the 
+    underlying analytical or neural field. See `curlew.GeoField.__init__(...)` for further details.
 
     Returns
     ---------
-    A `curlew.geology.SF` instance for the created domain boundary. This can then be included in a GeoModel class. Note that the submodels (i.e. `gt` and `lt`) are now
-    associated with this SF instance, so do not need to be (directly) passed to the GeoModel constructor.
+    A `curlew.geology.GeoField` instance for the created domain boundary. This can then be included in a GeoModel class. Note that the submodels (i.e. `gt` and `lt`) are now
+    associated with this GeoField instance, so do not need to be (directly) passed to the GeoModel constructor.
     """
 
     # create field representing domain boundary
-    f = _initF( name, C=C, H=H, bound=bound, **kwargs) 
+    o = Overprint(threshold=bound, mode=mode)
+    f = _initF( name, C=C, overprint=o, **kwargs)
 
     # define parent / child relationships for domain boundary field
     if not (isinstance(gt, list) or isinstance(gt, list)):
         gt = [gt]
     if not (isinstance(lt, list) or isinstance(lt, list)):
         lt = [lt]
-    if isinstance(gt[-1], SF):
+    if isinstance(gt[-1], GeoField):
         gt[-1].child = f
-    if isinstance(lt[-1], SF):
+    if isinstance(lt[-1], GeoField):
         lt[-1].child = f
     f.parent = gt[-1]
     f.parent2 = lt[-1]

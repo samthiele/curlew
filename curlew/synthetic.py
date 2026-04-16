@@ -1,0 +1,570 @@
+"""
+Generate synthetic datasets and models for testing purposes.
+"""
+import numpy as np
+import curlew
+from curlew.core import CSet
+from curlew.geology.geomodel import GeoModel
+from curlew.geometry import grid 
+from curlew.visualise import colour
+from curlew.fields.analytical import LinearField, ListricField, PeriodicField, QuadraticField
+from curlew.geology import strati, fold, fault, domainBoundary, sheet
+from curlew.geology.geofield import GeoField
+
+def sample( G, pv=None, breaks=19, init=100, xstep=300, pval=0.6, cmap='tab20', seed=42 ):
+    """
+    Sample value, orientation, and property constraints from a scalar field and associated gradients.
+
+    Parameters
+    ----------
+    G : curlew.geofield.Geode
+        A Geode object containing the results from a GeoField or GeoModel.
+    pv : np.ndarray or str
+        A (N, d) array of n-dimensional property vectors (e.g., color). Can also be 'rgb' to create synthetic colors.
+    breaks : list
+        A set of scalar values at which contacts (changes in color) should be placed.
+    init : int
+        The index of the first "drillhole" in the x-direction.
+    xstep : int
+        The separation between "drillholes" in the x-direction.
+    pval : float
+        The probability that an observation is a scalar value (rather than just a gradient) constraint.
+    cmap : str
+        The name of the Matplotlib colormap to use for sampling colors that determine where geological contacts are.
+        Must be a discrete colormap.
+    seed : int
+        Random seed to facilitate reproducible results.
+
+    Returns
+    -------
+    np.ndarray
+        The sampled value, orientation, and property constraints.
+    """
+
+    # sample constraints along drillhoes for s0 and s1
+    np.random.seed(seed)
+    
+
+    # reshape GeoField to image dims and initialise structure for accumulating constraints
+    sf = G.grid.reshape( G.scalar )
+    sid = G.grid.reshape( G.structureID.astype(int) )
+    xy = G.grid.reshape( G.grid.coords() )
+    constraints = {int(k):{'vp':[], 'vv':[], 'gp':[], 'gv':[], 'gop':[], 'gov':[]} for k in np.unique(sid)}
+
+    # compute contact points and gradients (bedding orientation)
+    gx = np.diff( sf, axis= 0 )
+    gy = np.diff( sf, axis= 1 )
+    c = colour(sf, breaks=breaks, cmap=cmap) # discretise resulting scalar field into colours
+    contacts = np.sum( np.abs( np.diff(c, axis=1, append=0) ), axis=-1)  > 0 # get contacts
+    domains = np.sum( [np.abs( np.diff(sid, axis=1, append=0) ), # get domain boundaries as gradients will be wrong here
+                       np.abs( np.diff(sid, axis=0, append=0) )], axis=0) > 0 
+    if pv == 'rgb':
+        pv = c
+
+    # loop through boreholes and collect
+    for x in np.arange(init,sf.shape[0],xstep):
+        cc = np.argwhere( contacts[x,:] )
+        if (len(cc) > 1):
+            for y in cc.squeeze()[:-1]: # ignore last as this is the boundary
+                i = int( sid[x,y] )
+                if not domains[x,y]: # ignore domain boundaries as gradients will be wrong
+                    constraints[i]['gp'].append( xy[x,y] ) # add gradient constraint
+                    constraints[i]['gv'].append( (gx[x,y], gy[x,y]) )
+                    constraints[i]['gop'].append( xy[x,y] ) # add identical orientation constraint
+                    constraints[i]['gov'].append( (gx[x,y], gy[x,y]) )
+                    if np.random.rand() <= pval: # add value constraint
+                        constraints[i]['vp'].append( xy[x,y] )
+                        constraints[i]['vv'].append( sf[x,y] )
+
+        if pv is not None: # add continuous property constraints
+            for y in np.arange(sf.shape[1], step=1):
+                if 'property' not in constraints:
+                    constraints['property'] =  {'pp':[], 'pv':[], 'vp':[], 'vv':[]}
+                constraints['property']['pp'].append( xy[x,y] ) # property position
+                constraints['property']['pv'].append( pv[x,y] ) # property value
+                constraints['property']['vp'].append( xy[x,y] ) # position again
+                constraints['property']['vv'].append( sf[x,y] ) # also store scalar value -- useful as a reference
+        
+    # convert to numpy arrays
+    for i in constraints.keys():
+        for k,v in constraints[i].items():
+            if len(v) > 0:
+                constraints[i][k] = np.array(v)
+                if (k == 'gv') or (k=='gov'):  # normalise gradient constraints
+                    constraints[i][k] /= np.linalg.norm( v, axis=-1 )[:,None]
+            else:
+                constraints[i][k] = None
+
+    return [CSet(**v) for k,v in constraints.items()]
+
+# Geological models
+# ------------------------
+def steno( shape=(1500,1000), **kwargs ):
+    """
+    Return a synthetic model with a slightly curved layer-cake stratigraphy.
+
+    Parameters
+    ----------
+    shape : tuple
+        The width and height of the generated data. 
+    
+    Keywords
+    ---------
+        All keywords are passed to `curlew.data.sample(...)`
+    
+    Returns
+    --------
+    xy : np.ndarray
+        A list of (N,d) xy points (from a grid with the specified `shape`)
+    s : np.ndarray,
+        An array of shape (N,2) containing the scalar values and ID of the "event" that caused them.
+    C : list, 
+        A list of constraints for each of the (two) events in this synthetic model.
+    M : GeoModel
+        Geomodel of the synthetic model
+    """
+    G = grid( shape, step=(1, 1), center=(shape[0]/2,shape[1]/2) ) 
+    xy = G.coords()
+
+    s0 = strati('s0', C=QuadraticField( 'f0', input_dim=2, gradient= (0.00001,1), curve=(-0.00005,0), origin = (1000,500) ) )
+
+    # add some isosurfaces
+    for y in np.linspace(0, shape[1], 5): # generate 5 contacts
+        s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
+    
+    M = GeoModel([s0], grid=G, name="steno")
+
+    s = s0.predict(G)
+    C = sample( s, pv='rgb', **kwargs )
+
+    return C, M
+
+def lehmann( shape=(1500,1000), **kwargs ):
+    """
+    Return a synthetic model with a folded basement.
+
+    Parameters
+    ----------
+    shape : tuple
+        The width and height of the generated data. 
+    
+    Keywords
+    ---------
+        All keywords are passed to `curlew.data.sample(...)`
+
+    Returns
+    --------
+    xy : np.ndarray
+        A list of (N,d) xy points (from a grid with the specified `shape`)
+    s : np.ndarray,
+        An array of shape (N,2) containing the scalar values and ID of the "event" that caused them.
+    C : list, 
+        A list of constraints for each of the (two) events in this synthetic model.
+    M : GeoModel
+        Geomodel of the synthetic model
+    """
+    G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
+    xy = G.coords()
+
+    s0 = strati('s0', C=PeriodicField('f0', input_dim=2) ) # Folds
+    
+    M = GeoModel([s0], grid=G, name='lehmann' )
+
+    # add some isosurfaces
+    for y in np.linspace(0, shape[1], 5): # generate 5 contacts
+        s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
+    
+    s = M.predict(G)
+    C = sample(s, pv='rgb', **kwargs)
+    
+    return C, M
+
+def hutton( shape=(1500,1000), **kwargs ):
+    """
+    Return a synthetic model with a folded basement cut by an unconformity.
+
+    Parameters
+    ----------
+    shape : tuple
+        The width and height of the generated data. 
+    
+    Keywords
+    ---------
+        All keywords are passed to `curlew.data.sample(...)`
+
+    Returns
+    --------
+    C : list, 
+        A list of constraints for each of the (two) events in this synthetic model.
+    M : GeoModel
+        Geomodel of the synthetic model
+    """
+    G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
+    #xy = G.coords()
+
+    #s0 = strati('s0', C=PeriodicField( 'f0', input_dim=2 ) ) # Folds
+    s0 = strati('s0', C=QuadraticField( 'f1', input_dim=2, gradient=np.array([0,1]), origin=(0,0), curve=(-0.00002,0) )) # base series
+    d1 = fold('d1', origin=np.array([0,0]), 
+                    extension=np.array([0,1]), # vertical extension
+                    compression=np.array([1,0.3]), # almost horizontal compression
+                    wavelength=2000, 
+                    amplitude=250, sharpness=0.7)
+    s1 = strati('s1', C=QuadraticField( 'f1', input_dim=2, gradient=np.array([0.1,0.9]), origin=(1000,500), curve=(-0.00002,0) ), base=0) # unconformable series
+
+    # add some isosurfaces
+    for y in np.linspace(0, shape[1], 5): # generate contacts
+        s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
+    for y in np.linspace(0, shape[1], 10): # generate contacts
+        s1.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
+
+    M  = GeoModel( [s0,d1,s1], grid=G, name='hutton' )
+    s = M.predict(G)
+    C = sample( s, pv='rgb', **kwargs )
+    C=[C[1],C[0],C[2]] # ignore fold event when generating constraints
+
+    return C, M
+
+def playfair( shape=(1500,1000), width=50, **kwargs ):
+
+    """
+    Return a synthetic model with a layer-cake stratigraphy cut
+    by a dyke.
+
+    Parameters
+    ----------
+    shape : tuple
+        The width and height of the generated data. 
+    width : float
+        The half-width of the added dyke.
+
+    Keywords
+    ---------
+        All keywords are passed to `curlew.data.sample(...)`
+    
+    Returns
+    --------
+    C : list, 
+        A list of constraints for each of the (two) events in this synthetic model.
+    M : GeoModel
+        Geomodel of the synthetic model
+    """
+    G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
+    xy = G.coords()
+
+    s0 = strati('s0', C=QuadraticField( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500) ) )
+    s1 = sheet( 's1', 
+           C=LinearField( 'f1', input_dim=2, origin = [1000,500], gradient=(0.5,0.5) ), contact=(-width,width) )
+    
+    for y in np.linspace(0, shape[1], 5): # generate 5 contacts
+        s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
+    
+    M = GeoModel( [s0, s1], grid=G, name='playfair' )
+    s = M.predict(G)
+    
+    kwargs['pval'] = kwargs.get('pval', 1.0) # change default to sample all value constraints
+    C = sample( M.predict(G), pv='rgb', **kwargs )
+    C1 = sample( s1.predict(G), pv='rgb', breaks=[-width,width], **kwargs)
+
+    return [C[1], C1[0], C[-1]], M
+
+def walker( shape=(1500,1000), width=[60,50,40,50,40], pos=[0,100,200,400,600], **kwargs ):
+
+    """
+    Return a synthetic model with a layer-cake stratigraphy cut
+    by several parallel dykes.
+
+    Parameters
+    ----------
+    shape : tuple
+        The width and height of the generated data. 
+    width : float
+        A list specifying the dyke widths.
+    pos : float
+        A list specifying the dyke positions in the x-axis. Must have the same length as width.
+    Keywords
+    ---------
+        All keywords are passed to `curlew.data.sample(...)`
+    
+    Returns
+    --------
+    C : list, 
+        A list of constraints for each of the (two) events in this synthetic model.
+    M : GeoModel
+        Geomodel of the synthetic model
+    """
+    G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
+    xy = G.coords()
+    o = (0, shape[1] / 2)
+    s0 = strati('s0', C=QuadraticField( 'f0', input_dim=2, curve=(-0.00005,0), origin=o ) )
+    contact = [(pos[i], pos[i]+width[i]) for i in range(len(pos))]
+    s1 = sheet( 's1', 
+           C=LinearField( 'f1', input_dim=2, origin =o, gradient=(0.5,0.5) ), contact=contact )
+    
+    for y in np.linspace(0, shape[1], 5): # generate 5 contacts
+        s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
+    
+    M = GeoModel( [s0, s1], grid=G, name='playfair' )
+    s = M.predict(G)
+    
+    kwargs['pval'] = kwargs.get('pval', 1.0) # change default to sample all value constraints
+    C = sample( M.predict(G), pv='rgb', **kwargs )
+    C1 = sample( s1.predict(G), pv='rgb', breaks=np.hstack(contact), **kwargs)
+
+    return [C[1], C1[0], C[-1]], M
+
+def michell( shape=(1500,1000), offset=100, **kwargs ):
+
+    """
+    Return a synthetic model with a slightly curved layer-cake stratigraphy cut
+    by a thrust fault.
+
+    Parameters
+    ----------
+    shape : tuple
+        The width and height of the generated data. 
+    offset : tuple
+        The offset of the fault.
+
+    Keywords
+    ---------
+        All keywords are passed to `curlew.data.sample(...)`
+    
+    Returns
+    --------
+    C : list, 
+        A list of constraints for each of the (two) events in this synthetic model.
+    M : GeoModel
+        Geomodel of the synthetic model
+    """
+    G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
+    xy = G.coords()
+
+    s0 = strati('s0', C=QuadraticField( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500)  ) )
+    s1 = fault( 's1', 
+           C=LinearField( 'f1', input_dim=2, origin=(1000,500), gradient=(0.5,0.5)  ),
+           offset=offset, shortening = [-1,0] )
+
+    for y in np.linspace(0, shape[1], 5): # generate 5 contacts
+        s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
+
+    M = GeoModel( [s0,s1], grid=G, name='michell' )
+    s = M.predict(G)
+    C = sample( s, pv='rgb', **kwargs ) # sample unit and bedding constraints
+    kwargs['pval'] = kwargs.get('pval', 1.0) # change default to sample all value constraints
+    if 'breaks' in kwargs:
+        del kwargs['breaks']
+    Cf = sample( s1.predict(G), pv='rgb', breaks=[0.5], **kwargs  )
+
+    C = [C[0], Cf[0], C[-1]] # get stratigraphy, fault and property constraints
+
+    mask = (C[0].gv[:,0] > - 0.68 ) # mask incorrect bebbing constraints near the fault
+    C[0].gp = C[0].gp[mask] # mask the gp constraints
+    C[0].gv = C[0].gv[mask] # mask the gv constraints
+    C[0].gop = C[0].gop[mask] # mask the gop constraints
+    C[0].gov = C[0].gov[mask] # mask the gov constraints
+
+    C[1].vv = C[1].vv * 0 # ensure value constraints are exactly zero (fault surface = 0)
+    
+    return C, M # return
+
+def anderson( shape=(1500,1000), offset1=225, offset2=250, **kwargs ):
+
+    """
+    Return a synthetic model with a slightly curved layer-cake stratigraphy cut
+    by two intersecting normal faults.
+
+    Parameters
+    ----------
+    shape : tuple
+        The width and height of the generated data. 
+    offset1 : tuple
+        The offset of the first (older) normal fault.
+    offet2 : tuple
+        The offset of the second (younger) normal fault.
+    
+    Keywords
+    ---------
+        All keywords are passed to `curlew.data.sample(...)`
+    
+    Returns
+    --------
+    xy : np.ndarray
+        A list of (N,d) xy points (from a grid with the specified `shape`)
+    s : np.ndarray,
+        An array of shape (N,2) containing the scalar values and ID of the "event" that caused them.
+    C : list, 
+        A list of constraints for each of the (two) events in this synthetic model.
+    M : GeoModel
+        Geomodel of the synthetic model
+    """
+    G = grid( shape, step=(1,1), center=(shape[0]/2,shape[1]/2) ) 
+
+    s0 = strati('s0', C=QuadraticField( 'f0', input_dim=2, curve=(-0.00005,0), origin=(1000,500)  ) )
+    s1 = fault( 's1', 
+           C=LinearField( 'f1', input_dim=2, origin=(950,550), gradient=(np.cos( np.deg2rad(35) ), np.sin( np.deg2rad(35) ))  ),
+           offset=offset1, shortening = [0,-1] )  # extensional faults
+    s2 = fault( 's2', 
+           C=LinearField( 'f2', input_dim=2, origin=(1050,500), gradient=(-np.cos( np.deg2rad(35) ), np.sin( np.deg2rad(35) ))  ),
+           offset=offset2, shortening = [0,-1] ) # extensional faults
+    
+    for y in np.linspace(0, shape[1], 5): # generate 5 contacts
+        s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
+        
+    M = GeoModel( [s0, s1, s2], grid=G, name='anderson' )
+    s = M.predict(G)
+
+    C = sample( s, pv='rgb', **kwargs )
+    if 'breaks' in kwargs:
+        del kwargs['breaks']
+    if 'pv' in kwargs:
+        del kwargs['pv']
+    kwargs['pval'] = kwargs.get('pval', 1.0) # change default to sample all value constraints
+    Cf1 = sample( s1.predict(G), pv='rgb', breaks=[0.5],xstep=600, **kwargs )
+    Cf2 = sample( s2.predict(G), pv='rgb', breaks=[0.5], **kwargs )
+
+    C = [C[0], Cf1[0], Cf2[0], C[-1]] # combine stratigraphy, fault and property constraints
+
+    mask = (C[0].gv[:,1] >  0.9) & (C[0].gv[:,1] < 1.1) # mask incorrect bebbing constraints near the faults
+    C[0].gp = C[0].gp[mask] # mask the gp constraints
+    C[0].gv = C[0].gv[mask] # mask the gv constraints
+    C[0].gop = C[0].gop[mask] # mask the gop constraints
+    C[0].gov = C[0].gov[mask] # mask the gov constraints
+
+    C[1].vv = C[1].vv * 0 # ensure value constraints are exactly zero (fault surface = 0)
+    C[2].vv = C[2].vv * 0 # ensure value constraints are exactly zero (fault surface = 0)
+
+    return C, M # return
+
+def seuss(shape=(1500, 700), nlayers=6, **kwargs):
+    """
+    Return a synthetic model with layered stratigraphy, a dyke, an intrusion
+    domain boundary, and two listric faults (one older, one younger), matching
+    the "Seuss" GeoModel from the Building Analytical Models tutorial.
+
+    Parameters
+    ----------
+    shape : tuple
+        The width and height of the generated data. Default (1500, 700) matches
+        the tutorial notebook.
+    nlayers : int
+        Number of stratigraphic layers (isosurfaces) in each package. Default 6.
+
+    Keywords
+    ---------
+        All keywords are passed to `curlew.synthetic.sample(...)` when
+        generating constraints.
+
+    Returns
+    --------
+    C : list
+        A list of constraints for the events in this synthetic model.
+    M : GeoModel
+        Geomodel with listric faults and domain boundaries (name='Seuss').
+    """
+    dims = shape
+    G = grid(dims, step=(1, 1), center=(dims[0] / 2, dims[1] / 2))
+    curlew.default_dim = 2
+    
+    # First stratigraphic package (layer-cake)
+    s0 = strati(
+        "s0",
+        C=LinearField("f0", input_dim=2, gradient=(0.1, 0.9)),
+    )
+    sy1 = np.linspace(0, dims[1], nlayers)
+    sx1 = np.full_like(sy1, dims[0] / 10)
+    for i, (x, y) in enumerate(zip(sx1, sy1)):
+        s0.addIsosurface("S%d" % (i + 1), seed=np.array([x, y]))
+
+    # Dyke
+    s1 = sheet(
+        "s1",
+        C=LinearField(
+            "f1",
+            input_dim=2,
+            origin=np.array([750.0, 300.0]),
+            gradient=np.array([-0.5, 0.5]),
+        ),
+        contact=(-20, 20),
+        aperture=2,
+    )
+
+    # Domain boundary: intrusion (constant -2) below, s0 and s1 above
+    intrusion = GeoField("i0", field=-2, type=int) # quick and easy way to define a constant scalar field
+    d1 = domainBoundary(
+        "d1",
+        C=QuadraticField(
+            "d1f",
+            input_dim=2,
+            origin=np.array([400.0, 50.0]),
+            gradient=np.array([0.4, 1.0]),
+            curve=(0, 0.002),
+        ),
+        bound=0,
+        lt=[intrusion],
+        gt=[s0, s1],
+    )
+
+    # Older listric fault
+    f1 = fault(
+        "f1",
+        C=ListricField(
+            "f1f",
+            input_dim=2,
+            origin=np.array([650.0, 700.0]),
+            fault_floor=0.0,
+            fault_ceil=700.0,
+            curvature_rate=0.006,
+        ),
+        width=1e-9,
+        n_steps=3,
+        offset=100,
+        shortening=np.array([1, -1]),
+    )
+
+    # Second stratigraphic package (unconformable cover)
+    s2 = strati(
+        "s2",
+        C=LinearField(
+            "f2",
+            input_dim=2,
+            origin=np.array([0.0, 500.0]),
+            gradient=np.array([0.0, 1.0]),
+        ),
+    )
+    sy2 = np.linspace(350, dims[1], nlayers)
+    sx2 = np.full_like(sy2, 9 * dims[0] / 10)
+    for i, (x, y) in enumerate(zip(sx2, sy2)):
+        s2.addIsosurface("S%d" % (i + 1), seed=np.array([x, y]))
+
+    # Unconformity domain boundary: d1 and f1 below, s2 above
+    d2 = domainBoundary(
+        "d2",
+        C=LinearField(
+            "d2f",
+            input_dim=2,
+            origin=np.array([700.0, 500.0]),
+            gradient=np.array([0.2, 0.9]),
+        ),
+        bound=0,
+        lt=[d1, f1],
+        gt=[s2],
+    )
+    
+    f2 = fault('f2', type=ListricField, C=None,
+           contact=0.0, 
+           offset=100, # The displacement magnitude
+           n_steps=3, # apply displacement in several steps, due to high curvature
+           shortening=[1, -1],
+           input_dim=2,
+           origin=np.array([250.0, 700.0]),
+           fault_ceil=700., # Defines the ceiling of the fault
+           fault_floor=0., # Defines the floor of the fault
+           width=1e-9,
+           curvature_rate=0.006 # Defines the steepness of the decay
+           
+        )
+    
+    M = GeoModel([d2, f2], grid=G, name="Seuss")
+    s = M.predict(G)
+    C = sample(s, pv="rgb", **kwargs)
+    return C, M

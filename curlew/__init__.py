@@ -44,9 +44,7 @@ Kamath, A.V., Thiele, S.T., Moulard, M., Grose, L., Tolosana-Delgado, R., Hillie
 
 """
 import torch
-from curlew.fields import NF
-from curlew.geology.model import GeoModel
-from curlew.geology.SF import SF
+import numpy as np
 
 device = 'cpu' # can be changed to set device to e.g., gpu
 """The device used to compute operations with pytorch tensors. Change to allow e.g. GPU parallelisation."""
@@ -54,14 +52,34 @@ device = 'cpu' # can be changed to set device to e.g., gpu
 dtype = torch.float64
 """The precision used during pytorch computations. Lower to float32 to save RAM."""
 
-ccmap = None
-"""A colourful (custom) matplotlib colormap taylored for `curlew`. Will only be set if `matplotlib` is installed."""
+default_dim = 3
+"""The default input dimensionality (2D or 3D) to use when creating new models. Default is 3."""
 
+compile = False 
+"""Whether to compile the model using torch.compile. This can significantly speed up larger models when using a GPU."""
+
+ccmap = None
+"""A colourful (custom) matplotlib (categorical) colormap taylored for `curlew`. Will only be set if `matplotlib` is installed."""
+
+ccramp = None
+"""A colourful (custom) matplotlib (continuous) colormap taylored for `curlew`. Will only be set if `matplotlib` is installed."""
+
+ccstrat = None
+"""A shuffled version of ccmap, useful for plotting stratigraphic fields as though they have many layers in them. """
+
+batchSize = 512000
+"""Divide arrays larger than this size into chunks (batches) to reduce memory usage and avoid out-of-memory crashes."""
+
+mpl=False
 try:
     # Define curlew colormap :-) 
     import matplotlib.colors as mcolors
+    mpl = True
+except:
+    pass
 
-    # Define the colors extracted manually from the provided logo image
+if mpl:
+    # Define a custom / pretty colour ramp for curlew models
     colors = [
         "#A6340B",  # rich red (not darkest)
         "#E35B0E",  # vibrant orange-red
@@ -73,13 +91,65 @@ try:
         "#1B768F",  # medium blue 
         "#054862",  # deeper blue (not darkest)
     ]
-    ccmap = mcolors.ListedColormap(colors)
-except:
-    pass
+    ccmap = mcolors.ListedColormap(colors=colors, name='curlew_categorical')
 
+    # Also as a continuous colormap
+    ccramp = mcolors.LinearSegmentedColormap.from_list(
+        name="curlew_continuous",
+        colors=colors,
+        N=256  # resolution of the ramp
+    )
+
+    # and a shuffled version for visualising stratigraphies
+    _colors = ccramp(np.linspace(0, 1, 255))[:, :3]
+    _step = 25 # block shuffle
+    for i in np.arange(0,len(_colors), step=_step):
+        if i + _step*2 > len(_colors):
+            break
+        ixx = np.random.choice(np.arange(i,i+_step*2), _step*2, replace=False)
+        _colors[i:(i+_step*2), :] = _colors[ixx, :]
+
+    # Create a new colormap
+    ccstrat = mcolors.ListedColormap(_colors, name="curlew_stratigraphic")
+
+## Utility functions for converting between numpy and torch tensors
+def _tensor(x, dev=None, dt=None):
+    """
+    Convert array-like or scalar input to a torch tensor on the given device and dtype.
+    """
+    if dev is None: dev = device # normally use default device
+    if dt is None: dt = dtype # normally use default dtype
+    if isinstance(x, torch.Tensor):
+        return x.to(device=dev, dtype=dt)
+    elif isinstance(x, np.ndarray):
+        return torch.tensor(x, device=dev, dtype=dt)
+    elif isinstance(x, (list, tuple)):
+        return torch.tensor(x, device=dev, dtype=dt)
+    elif isinstance(x, (int, float, bool, np.integer, np.floating, np.bool_)):
+        return torch.tensor(x, device=dev, dtype=dt)
+    else:
+        raise TypeError(f"Unsupported type: {type(x)}")
+    
+def _numpy(x):
+    """
+    Convert a torch tensor or list to a numpy array.
+    """
+    if isinstance(x, np.ndarray):
+        return x
+    elif isinstance(x, torch.Tensor):
+        return x.cpu().detach().numpy()
+    elif isinstance(x, list):
+        return np.array(x)
+    else:
+        raise TypeError(f"Unsupported type: {type(x)}")
+    
+    
 # import things we want to expose under the `curlew` namespace
+from curlew.fields import BaseNF
+from curlew.geology.geomodel import GeoModel
+from curlew.geology.geofield import GeoField
 from curlew import core
-from curlew import data
+from curlew import synthetic
 from curlew import geology
 from curlew import geometry
 from curlew import visualise

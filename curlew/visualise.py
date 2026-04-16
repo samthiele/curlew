@@ -4,7 +4,7 @@ need to be extended at some point to be more usable during model development.
 """
 
 import numpy as np
-from curlew.geology.SF import SF
+from curlew.geology.geofield import GeoField
 
 def plot2D( sxy, grid, C=None, ticksize=50, lw=1, cmap='rainbow', levels=None, ax=None, alpha=0.3 ):
     """
@@ -48,13 +48,13 @@ def plot2D( sxy, grid, C=None, ticksize=50, lw=1, cmap='rainbow', levels=None, a
         if (sxy.shape[-1] == 3) or (sxy.shape[-1] == 4): # RGB or RGBA colours
             # plot colours directly
             si = sxy.reshape( shape + (sxy.shape[-1],) )
-            ax.imshow( np.transpose( si, (1,0,2)), alpha=alpha, extent=(xmn,xmx,ymn,ymx), origin='lower' )
+            ax.imshow( np.transpose( si, (1,0,2)), alpha=alpha, extent=(xmn,xmx,ymn,ymx), origin='lower', interpolation='nearest' )
         else:
             si = sxy.reshape(shape) # reshape to image
             vmn,vmx = np.percentile(sxy, (0,100))
             
             # plot scalar field and countours
-            ax.imshow(si.T, cmap=cmap, alpha=alpha, extent=(xmn,xmx,ymn,ymx), vmin=vmn, vmax=vmx, origin='lower' )
+            ax.imshow(si.T, cmap=cmap, alpha=alpha, extent=(xmn,xmx,ymn,ymx), vmin=vmn, vmax=vmx, origin='lower', interpolation='nearest' )
             if not (isinstance(levels, bool) and (levels == False)):
                 contour = ax.contour(si.T, cmap=cmap,levels=levels, extent=(xmn,xmx,ymn,ymx),
                                      vmin=vmn, vmax=vmx)
@@ -99,15 +99,15 @@ def plot2D( sxy, grid, C=None, ticksize=50, lw=1, cmap='rainbow', levels=None, a
                 
 
         # plot grid for evaluating global constraints
-        if C.sgrid is not None:
-            ax.scatter( C.sgrid[:,0], C.sgrid[:,1], color='gray', s=ticksize/3 )
+        #if C.sgrid is not None:
+        #    ax.scatter( C.sgrid[:,0], C.sgrid[:,1], color='gray', s=ticksize/3 )
     
     return ax.get_figure(), ax
 
 def format_latex_subscript(name):
     """
     Converts 'f2' to LaTeX format '$f_2$'. 
-    Works with multiple letters and digits (e.g., 'sigma12' → '$\\sigma_{12}$').
+    Works with multiple letters and digits (e.g., 'shortening2' → '$\\sigma_{12}$').
     """
     import re
 
@@ -117,7 +117,7 @@ def format_latex_subscript(name):
     else:
         return f"${name}$"  # fallback if not matching pattern
 
-def plotDrill(hole, ax, ticksize=50, lw=1, vmn=0, vmx=20, cmap="tab20b", noval=False):
+def plotDrill2D(hole, ax, ticksize=50, lw=1, vmn=0, vmx=20, cmap="tab20b", noval=False):
     """
     Plot the specified drillhole on the given axis with color normalization.
     """
@@ -125,7 +125,7 @@ def plotDrill(hole, ax, ticksize=50, lw=1, vmn=0, vmx=20, cmap="tab20b", noval=F
     from matplotlib.colors import Normalize
     import matplotlib.patheffects as pe
     
-    points = np.array([hole['pos'][:, 0], hole['pos'][:, 1]]).T.reshape(-1, 1, 2)
+    points = np.array([hole.x[:, 0], hole.x[:, 1]]).T.reshape(-1, 1, 2)
     segments = np.concatenate([points[:-1], points[1:]], axis=1)
 
     # Normalization to handle vmin/vmax
@@ -134,7 +134,7 @@ def plotDrill(hole, ax, ticksize=50, lw=1, vmn=0, vmx=20, cmap="tab20b", noval=F
     # Plot the borehole
     lc = LineCollection(
         segments, 
-        array=hole['classID'], 
+        array=hole.lithoID, 
         cmap=cmap, 
         norm=norm,
         linewidths=lw
@@ -142,7 +142,7 @@ def plotDrill(hole, ax, ticksize=50, lw=1, vmn=0, vmx=20, cmap="tab20b", noval=F
     t = ax.add_collection(lc)
     t.set_path_effects([pe.Stroke(linewidth=lw+5, foreground='k'), pe.Normal()])
     
-def plotConstraints(ax, C=None, H=None, ll=1, lw=4, scale=0.001, ac="k", vmn=0, vmx=20, cmap="tab20b"):
+def plotConstraints2D(ax, C=None, H=None, ll=1, lw=4, scale=0.001, ac="k", vmn=0, vmx=20, cmap="tab20b"):
     
     if C is not None:
         if (H is None) or (H.value_loss != 0):
@@ -256,7 +256,7 @@ def get_positions(M, G, node, first_x=0, first_y=0, step_x=10, step_y=5, pos=Non
 
     # If the node is a domain boundary, handle its children differently
     node_field = next((field for field in M.fields if field.name == node), None)
-    if node_field.parent2 is not None and isinstance(node_field, SF):
+    if node_field.parent2 is not None and isinstance(node_field, GeoField):
         # Move to the right
         pos = get_positions(M, G, children[0], first_x + step_x, first_y, step_x, step_y, pos)
         # Move down
@@ -267,7 +267,7 @@ def get_positions(M, G, node, first_x=0, first_y=0, step_x=10, step_y=5, pos=Non
 
     return pos
 
-def showModel(M, axs=None, leg_loc=None, title="c)", node_size=3000, font_size=18):
+def showModel(M, axs=None, leg_loc=None, title="Model tree", node_size=3000, font_size=18):
     """
     Visualize the model tree of a GeoModel.
 
@@ -295,25 +295,31 @@ def showModel(M, axs=None, leg_loc=None, title="c)", node_size=3000, font_size=1
         if field.parent2 is not None:
             # domain boundary
             color = domain_boundary_color
-        elif field.bound is not None and field.deformation is not None: 
+        elif field.overprint is not None and field.deformation is not None: 
             # dilative event
             color = dilative_event_color
-        elif field.bound is not None: 
+        elif field.overprint is not None: 
             # generative event
             color = generative_event_color
         elif field.deformation is not None:
             # kinematic event
             color = kinematic_event_color
-        graph.add_node(field.name, label=format_latex_subscript(field.name), color=color)
+        else: # fixed value
+            color = fixed_value_color
+        
+        name = field.name
+        if isinstance(field.field, (int, float)):
+            name += f"={field.field}"
+        graph.add_node(field.name, label=format_latex_subscript(name), color=color)
 
         # Add edges
-        if isinstance(field.parent, SF):
+        if isinstance(field.parent, GeoField):
             graph.add_edge(field.name, field.parent.name)
-        if isinstance(field.parent2, SF):
+        if isinstance(field.parent2, GeoField):
             graph.add_edge(field.name, field.parent2.name)
-        if not isinstance(field.parent, SF) and field.parent is not None: # Handle fixed values
+        if not isinstance(field.parent, GeoField) and field.parent is not None: # Handle fixed values
             graph.add_edge(field.name, str(field.parent))
-        if not isinstance(field.parent2, SF) and field.parent2 is not None:
+        if not isinstance(field.parent2, GeoField) and field.parent2 is not None:
             graph.add_edge(field.name, str(field.parent2))
 
     # Plotting
@@ -351,11 +357,7 @@ def showModel(M, axs=None, leg_loc=None, title="c)", node_size=3000, font_size=1
                for color, label in legend_labels.items()]
     ax_legend.legend(handles=handles, loc='center', fontsize=12)
     
-    if axs is None:
-        plt.close(fig)
-        return fig
-    else:
-        pass
+    return fig, fig.get_axes()
 
 def colour( sf, cmap='tab20', breaks=19 ):
     """

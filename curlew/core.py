@@ -6,8 +6,70 @@ import torch
 from dataclasses import dataclass, field
 import copy
 import curlew
+from curlew import _numpy, _tensor
+from curlew.geometry import Grid
+from typing import Union
+
+import torch.optim as optim
+import torch.nn as nn
 
 
+class LearnableBase(nn.Module):
+    """
+    Base class for all learnable curlew objects.
+    """
+    def __init__(self):
+        """
+        Initialise a new learnable torch module.
+        """
+        super().__init__()
+        self.optim = None # needs to be initialised at some point
+        self.frozen = False # if True, optimizer step is ignored
+
+    def init_optim(self, method=optim.Adam, lr=1e-2, **kwargs):
+        """
+        Initialise optimiser used for this MLP. This should only be called
+        (or re-called) once all relevant learnable parameters have been created.
+
+        Parameters
+        ------------
+        method : torch.optim.Optimizer
+            The optimiser class to use (e.g., `torch.optim.Adam`).
+        lr : float
+            The learning rate to use for the underlying ADAM optimiser.
+
+        Keywords
+        ------------
+        Any additional keyword arguments to pass to the optimiser initialisation.
+        """
+        self.optim = method(self.parameters(), lr=lr, **kwargs)
+    
+    def zero(self):
+        """
+        Zero gradients in the optimiser for this NF.
+        """
+        if self.optim is not None:
+            self.optim.zero_grad()
+
+    def step(self):
+        """
+        Step the optimiser for this NF.
+        """
+        if (self.optim is not None) and not self.frozen:
+            self.optim.step()
+
+    def set_rate(self, lr=1e-2 ):
+        """
+        Update the learning rate for this learnable object's optimiser.
+        """
+        assert self.optim is not None, "Optimiser not initialised. Call `init_optim()` first."
+        for param_group in self.optim.param_groups:
+            param_group['lr'] = lr
+
+    def loss(self):
+        """Should be implemented by child classess that incur losses."""
+        return _tensor(0).requires_grad_(True), dict()
+    
 @dataclass
 class CSet:
     """
@@ -29,9 +91,7 @@ class CSet:
         iq (tuple): Inequality constraints. Should be a tuple containing `(N,[(P1, P2, iq),...]`), where each P1 and P2 are (N,d) arrays or tensors
                     defining positions at which to evaluate inequality constraints such as `P1 > P2`. `iq` defines the inequality to evaluate, and can be `<`, `=` or `>`.
                     Note that this inequality is computed for a random set of `N` pairs sampled from `P1` and `P2`. 
-        grid (tuple, torch.tensor or np.ndarray): Either a tuple containing (N,[[xmin,xmax],[ymin,ymax],...] to use random grid points during each epoch, or a
-                                            (N,i) array of positions (in modern-day coordinates) defining specific points. These points are used to define
-                                            where "global" constraints are enforced.
+        grid (tuple, torch.tensor or np.ndarray): A `curlew.geometry.Grid` instance defining the grid used to enforce global constraints (and associated sampling strategy).
         delta (float): The step size used when computing numerical derivatives at the grid points. Default (None) is to initialise
                        as half the distance between the first and second points listed in `grid`. Larger values of delta result
                        in gradients representing larger scale gradients.
@@ -50,8 +110,7 @@ class CSet:
     iq : tuple = None # inequality constraints
 
     # global constraints
-    grid : torch.tensor = None # predefined grid, or params for sampling random ones
-    sgrid : torch.tensor = None # tensor or array containing the last-used (random) grid
+    grid : Grid = None # predefined grid, or params for sampling random ones
     delta : float = None # step to use when computing numerical derivatives 
     trend : torch.tensor = None # global preferential gradient direction vector
     # axis: an (i,) vector defining a globally preferential axis direction.
@@ -61,8 +120,7 @@ class CSet:
 
     def torch(self):
         """
-        Return a copy of these constraints cast to pytorch tensors with the specified
-        data type and hosted on the specified device. 
+        Return a copy of these constraints cast to pytorch tensors. 
         """
         args = {}
         for k in dir(self):
@@ -74,16 +132,16 @@ class CSet:
                     for i in range(len(attr[1])):
                         # convert P1 and P2 to tensor
                         if not isinstance( attr[1][i][0], torch.Tensor): # possibly already a tensor
-                            o[1].append( (torch.tensor( attr[1][i][0], device=curlew.device, dtype=curlew.dtype ),
-                                            torch.tensor( attr[1][i][1], device=curlew.device, dtype=curlew.dtype ),
+                            o[1].append( (_tensor( attr[1][i][0], dev=curlew.device, dt=curlew.dtype ),
+                                            _tensor( attr[1][i][1], dev=curlew.device, dt=curlew.dtype ),
                                             attr[1][i][2] ) )
                         else:
                             o[1].append( (attr[1][i][0], attr[1][i][1], attr[1][i][2] )) # already tensors
                     attr = o            
                 else:
                     if attr is not None:
-                        if isinstance( attr, np.ndarray ) or isinstance( attr, list ): # convert nd array or list types to tensor
-                            attr = torch.tensor( attr, device=curlew.device, dtype=curlew.dtype )
+                        if isinstance( attr, (np.ndarray, list, tuple) ): # convert array-like types to tensor
+                            attr = _tensor( attr, dev=curlew.device, dt=curlew.dtype )
                 args[k] = attr
         return CSet(**args)
     
@@ -99,20 +157,25 @@ class CSet:
                 if k == 'iq': # inequalities are special
                     o = (attr[0], [] )
                     for i in range(len(attr[1])):
-                        # convert P1 and P2 to tensor
-                        if isinstance(attr[1][i][0], torch.Tensor ):
-                            o[1].append( (attr[1][i][0].cpu().detach().numpy(),
-                                        attr[1][i][1].cpu().detach().numpy(),
-                                        attr[1][i][2] ) )
+                        p1, p2, rel = attr[1][i]
+                        if isinstance(p1, torch.Tensor):
+                            p1 = _numpy(p1)
+                        if isinstance(p2, torch.Tensor):
+                            p2 = _numpy(p2)
+                        o[1].append((np.asarray(p1), np.asarray(p2), rel))
                     attr = o     
                 else:
                     if attr is not None:
                         if isinstance(attr, torch.Tensor ):
-                            attr = attr.cpu().detach().numpy()
+                            attr = _numpy(attr)
                 args[k] = attr
         return CSet(**args)
 
     def toPLY( self, path ):
+        """
+        Quickly save this CSet to a PLY file for visualisation in a 3D viewer (e.g., CloudCompare).
+        """
+
         from curlew.io import savePLY
         from pathlib import Path
         path = Path(path)
@@ -127,12 +190,13 @@ class CSet:
                 savePLY( path / str(f'iq_{i}_{lkup[iq[2]]}/rhs.ply'), xyz=iq[1], rgb=[(0,0,255) for i in range(len(iq[1]))])
 
     def toCSV( self, path ):
-        from curlew.io import savePLY
         from pathlib import Path
+        import pandas as pd
+        
         path = Path(path)
         C = self.numpy()
         def saveCSV( path, xyz, attr=None, names=[], rgb=None ):
-            import pandas as pd
+            
             cols = ['x','y','z']+names
             if rgb is not None:
                 cols += ['r','g','b']
@@ -209,7 +273,7 @@ class CSet:
         out = self.copy()
         def e( arr ):
             mask = f( arr )
-            if isinstance(arr, torch.Tensor): mask = torch.tensor(mask, device=curlew.device, dtype=torch.bool)
+            if isinstance(arr, torch.Tensor): mask = _tensor(mask, dev=curlew.device, dt=torch.bool)
             if isinstance(arr, np.ndarray): mask = np.array(mask, dtype=bool)
             return mask
         if out.vp is not None: 
@@ -266,6 +330,10 @@ class HSet:
             gradient scale of each task based on its current loss.
         one_hot : bool
             Enables one-hot encoding of the scalar field value according to the event-ID. Only works with property field HSet()s.
+        reuse_worst_half : float
+            Fraction of inequality constraint pairs to retain as the "worst" from the previous epoch and reuse in the
+            next; the remainder are drawn randomly. 0 = disabled. 0.5 = keep worst 50%, redraw the other 50%.
+            Helps convergence by focusing the optimiser on high-loss inequality pairs.
     """
     
     value_loss : float = 1
@@ -278,6 +346,7 @@ class HSet:
     iq_loss : float = 0
     use_dynamic_loss_weighting : bool = False
     one_hot : bool = False
+    reuse_worst_half : float = 0.5
 
     def copy(self, **kwargs):
         """
@@ -307,3 +376,248 @@ class HSet:
                     setattr(self, k, kwargs.get(k, 0 ) )
         return self
     
+@dataclass
+class Geode( object ):
+    """
+    An "egg-like" class containing all the juicy outputs of a curlew model.
+
+    Attributes:
+        x (torch.tensor or np.ndarray): (N,o) array of value constraint positions (in modern-day coordinates).
+        grid (curlew.geometry.Grid): A `curlew.geometry.Grid` class if points (`x`) were sampled from a regular grid.
+        crs (str) : A string denoting the coordinate reference used for `x`. Will be `'modern'` if
+                    a final result (in modern coordinates), or the name of a specific `GeoField` if result is in field coordinates.
+        lithoID (torch.tensor or np.ndarray): (N,) array of lithology classes defined by isosurfaces described in the relevant `GeoField` instance(s).
+        lithoLookup (dict): A dictionary where keys are lithoID integers and values are the name of the associated isosurfaces.
+        structureID (torch.tensor or np.ndarray): (N,) array of structure IDs denoting the index of the `GeoField` responsible for each lithology / value
+                                                  in the model result.
+        structureLookup (dict): A dictionary where keys are structureIDs and values give the name of the corresponding `GeoField`.
+        scalar (torch.tensor or np.ndarray): (N,) array of the scalar values evaluated at each `x`.
+        properties (torch.tensor or np.ndarray): (N,d) array of property values derived at each `x`.
+        propertyNames (list): List of `d` property names corresponding to each dimension of `self.properties`.
+        fields (dict): Dict containing the individual scalar fields evaluated at each `x` for each `GeoField` instance in the model.
+        offsets (dict): Dict containing the individual displacement fields evaluated at each `x` for each `GeoField` instance in the model.
+    """
+
+    # local constraints
+    x : torch.tensor = None # array of the positions at which points were evaluated
+    grid : Grid = None # grid of points at which model was evaluated
+    crs : str = None # temporal coordinate system (modern or paleo) associated to these points
+
+    lithoID : torch.tensor = None
+    lithoLookup : dict = field(default_factory=dict)
+
+    structureID : torch.tensor = None
+    structureLookup : dict = field(default_factory=dict)
+
+    scalar : torch.tensor = None # scalar field values
+    gradient : torch.tensor = None # gradient field values (often left as None)
+    properties : torch.tensor = None # forward (property) predictions
+    propertyNames : list = field(default_factory=list)
+
+    fields : dict = field(default_factory=dict) # individual scalar fields (Keyed by GeoField name)
+    offsets : dict = field(default_factory=dict) # individual displacement fields (Keyed by GeoField name)
+
+    isosurfaces : dict = field(default_factory=dict) # individual isosurfaces (Keyed by GeoField name)
+    anchors : dict = field(default_factory=dict) # individual anchor points (Keyed by GeoField name)
+    
+    def getSurface(self, field, name, normals=False):
+        """
+        Get a mesh for given isosurface for a given field.
+        """
+        assert self.grid is not None, "Surfaces can only be computed for evaluations on a grid"
+        scalar = self.fields[field]
+        iso = self.isosurfaces[field][name]
+        return self.grid.contour(scalar, iso=iso, normals=normals)
+
+    def getSurfaces(self, normals=False):
+        """
+        Get a dictionary of meshes for all isosurfaces for all fields.
+        """
+        out = {}
+        for field in self.fields:
+            for name in self.isosurfaces[field]:
+                out[f'{field}_{name}'] = self.getSurface(field, name, normals=normals)
+        return out
+        
+    @classmethod
+    def concat(cls, geodes):
+        """
+        Concatenate an ordered list of Geodes. Used when e.g., evaluating large models in chunks.
+        """
+        args = {}
+        for g in geodes:
+            for k in dir(g):
+                if ('_' not in k) and not callable(getattr(g, k)):
+                    attr = getattr(g, k)
+                    if attr is not None:
+                        if k in args:
+                            if isinstance(attr, torch.Tensor ):
+                                args[k] = torch.concat([args[k], attr])
+                            elif isinstance(attr, np.ndarray ):
+                                args[k] = np.concatenate([args[k], attr])
+                            elif isinstance(attr, dict):
+                                temp = {**args[k], **attr}
+                                for k2,v in args[k].items(): # also concatenate any relevant dict entries
+                                    if k2 in attr:
+                                        if isinstance(v, torch.Tensor ):
+                                            temp[k2] = torch.concat( [v, attr[k2]] )
+                                        elif isinstance(v, np.ndarray ):
+                                            temp[k2] = np.concatenate( [v, attr[k2]] )
+                                args[k] = temp
+                        else:
+                            args[k] = attr
+        return Geode(**args)
+
+    def combine(self, younger, weight):
+        """
+        Combine the results from this Geode with results from a (typically younger) one, using the 
+        specified weights. Both Geodes must be evaluated at the same coordinates.
+        """
+        assert len(self.x) == len(younger.x), "Both Geodes must be evaluated at the same coordinates."
+        iweight = 1-weight
+
+        # combine basic attributes
+        args = dict(x=younger.x, grid=younger.grid, crs=younger.crs, # always take these from the younger object
+                    lithoLookup={**self.lithoLookup, **younger.lithoLookup},
+                    structureLookup={**self.structureLookup, **younger.structureLookup},
+                    fields={**self.fields, **younger.fields},
+                    offsets={**self.offsets, **younger.offsets} )
+
+        # combine gradients (if not None)
+        if self.gradient is not None:
+            if isinstance(self.gradient, np.ndarray):
+                args['gradient'] = self.gradient.copy() # copy (numpy)
+            else:
+                args['gradient'] = self.gradient.clone() # clone (pytorch)
+            if younger.gradient is not None: # overprint with younger values if defined
+                if len(younger.gradient) == 2:
+                    pass
+                args['gradient'] = younger.gradient*weight[:,None] + args['gradient']*iweight[:,None]
+
+        # combine property predictions (if not None)
+        if self.properties is not None:
+            args['propertyNames'] = self.propertyNames
+            assert np.all(np.array(self.propertyNames) == np.array(younger.propertyNames)),\
+                f'Property names for {list(self.fields.keys())[0]} do not match {list(younger.fields.keys())[0]}.'
+            assert younger.properties is not None,\
+                f"Properties must be defined for all generative fields. {list(younger.fields.keys())[0]} is missing."
+            args['properties'] = younger.properties*weight[:,None] + self.properties*iweight[:,None]
+
+        # combine scalar values, structure IDs and lithoIDs (if defined)
+        args['scalar'] = younger.scalar*weight + self.scalar*iweight
+        args['structureID'] = torch.round((younger.structureID*weight + self.structureID*iweight)).to(dtype=torch.int) # round to integer
+        if (self.lithoID is not None) and (younger.lithoID is not None):
+            args['lithoID'] = torch.round(younger.lithoID*weight + self.lithoID*iweight).to(dtype=torch.int) # round to integer
+
+        return Geode(**args)
+
+    def stackValues(self, mn=0, mx=1):
+        """
+        Scale scalar values so that they vary between mn and mx for each structural field, and then add offsets 
+        so that there are no overlaps between structures. This can be useful for e.g., plotting or isosurface 
+        extraction.
+
+        Parameters
+        ----------
+        mn : float, optional
+            The minimum value to scale the scalar values to, by default 0. 
+        mx : float, optional
+            The maximum value to scale the scalar values to, by default 1.
+
+        Returns
+        -------
+        curlew.geology.geofield.Geode
+            A new Geode where the scalar values are scaled to the range [mn, mx] for each structure and offset
+            to remove overlaps.
+        """
+        out = self.numpy()
+
+        # get the unique structure IDs
+        ids = np.unique(out.structureID)
+
+        # create a new array to hold the stacked values
+        stacked = np.zeros_like(out.scalar)
+
+        # loop over each structure ID
+        for i, id in enumerate(ids):
+            # get the indices of the current structure ID
+            idx = np.where(out.structureID == id)[0]
+
+            # scale the scalar values to the range [mn, mx]
+            sf = out.scalar[idx]
+            if np.max(sf) - np.min(sf) == 0:
+                # if all values are the same, set them to mn
+                scaled_values = np.full_like(sf, mn)
+            else:
+                # scale the values to the range [mn, mx]        
+                scaled_values = mn + (mx - mn) * (sf - np.min(sf)) / (np.max(sf) - np.min(sf))
+
+            # add an offset based on the index of the structure ID
+            stacked[idx] = scaled_values + i * (mx - mn)
+
+        out.scalar = stacked
+        return out
+
+    def torch(self):
+        """
+        Return a copy of these results cast to pytorch tensors (where relevant). 
+        """
+        args = {}
+        for k in dir(self):
+            if '_' not in k and not callable(getattr(self, k)):
+                attr = getattr(self, k)
+                if attr is not None:
+                    if isinstance( attr, (np.ndarray, list, tuple) ): # convert array-like types to tensor
+                        attr = _tensor( attr, dev=curlew.device, dt=curlew.dtype )
+                    elif isinstance(attr, dict):
+                        for key in attr.keys(): # also convert any dict entries
+                            if isinstance( attr[key], (np.ndarray, list, tuple) ):
+                                attr[key] = _tensor( attr[key], dev=curlew.device, dt=curlew.dtype )
+                args[k] = attr
+        return Geode(**args)
+
+    def numpy(self):
+        """
+        Return a copy of these constraints cast to numpy arrays if necessary.
+        """
+        args = {}
+        for k in dir(self):
+            if '_' not in k and not callable(getattr(self, k)):
+                attr = getattr(self, k)
+                if attr is not None:
+                    if isinstance(attr, torch.Tensor ):
+                        attr = _numpy(attr)
+                    elif isinstance(attr, dict): # also convert any dict entries
+                        for key in attr.keys():
+                            if isinstance( attr[key], torch.Tensor ):
+                                attr[key] = _numpy(attr[key])
+                args[k] = attr
+        return Geode(**args)
+
+    def toPLY( self, path ):
+        """
+        Quickly save this result to a PLY file for visualisation in a 3D viewer (e.g., CloudCompare).
+        """
+        from curlew.io import savePLY
+        from pathlib import Path
+        path = Path(path)
+        R = self.numpy()
+        assert R.x is not None, "Coordinates must be defined to save PLY"
+        attrs = []
+        attr_names = []
+        for n in ['lithoID', 'structureID', 'scalar']:
+            a = R.__getattribute__(n)
+            if a is not None:
+                attrs.append(a)
+                attr_names.append(n)
+        if R.properties is not None:
+            attr_names += R.propertyNames
+            attrs += R.properties
+        attrs = np.vstack( attrs )
+        savePLY( path, xyz=R.x, attr=attrs, names=attr_names )
+
+    def toCSV( self, path ):
+        """
+        Quickly save this result to a CSV file for easy interoperability.
+        """
+        pass # TODO

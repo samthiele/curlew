@@ -17,9 +17,14 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+sandbox
+
+# benchmarks
+.benchmarks/
 
 # VS Code
 .vscode/
+.VSCodeCounter
 
 # MACOSX
 .DS_STORE
