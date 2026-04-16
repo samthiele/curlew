@@ -4,15 +4,25 @@ A toolkit for building 2- and 3- dimensional geological models using neural fiel
 
 <img src="https://github.com/samthiele/curlew/blob/main/icon.png?raw=true" width="200">
 
+This approach allows the inclusion of diverse geological data, while the overarching graph-based modelling framework allows complex structures (unconformities, folds, faults, intrusions, etc.) to be constructed sequentially based on a geological history. 
+
+As well interpolation-based 3D modelling, `curlew` can build complex synthetic geology models in which the neural fields are replaced by simple mathematical functions. These synthetic models can then be sampled to create datasets for testing, benchmarking and algorithm development.
+
+Everything is implemented in a differentiable way using `pytorch` to facilitate inversion frameworks and perform optimisation tasks.
+
 ## Getting started
 
 ### Installation
 
-To install directly from github try: `pip install git+https://github.com/samthiele/curlew.git`.
+To install directly from github try: 
+
+> pip install git+https://github.com/samthiele/curlew.git
 
 This should run on most systems: `numpy`, `pytorch` and `tqdm` are the only required dependencies. Other recommended (but optional) dependencies include `matplotlib` (for 2D plotting), `plyfile`(for IO with 3D PLY files), and `napari` (for 3D visualisation).
 
-To install all dependencies, including the optional ones, use `pip install curlew[all]`. 
+To install all dependencies, including the optional ones, use: 
+
+> pip install curlew[all] 
 
 ### Tutorials
 
@@ -36,7 +46,7 @@ Please star this repository if you found it useful. If you have fixed bugs or ad
 
 If you use `curlew` we would appreciate it if you:
 
-1) Cite the following paper (for academic work)
+1) Cite the following [paper](https://eartharxiv.org/repository/view/10473/) (for academic work)
 
 ```
 Kamath, A. V., Thiele, S. T., Moulard, M., Grose, L., Tolosana-Delgado, R., Hillier, M., and Gloaguen, R. (2026). Curlew 1.0: Spatio-temporal implicit geological modelling with neural fields in python. Solid Earth. doi:10.31223/X5KX81
