@@ -13,11 +13,13 @@ setup(
     license='MIT',
     author='Sam Thiele',
     author_email='s.thiele@hzdr.de',
-    description='A python package for constructing complex geological models from various types of neural fields.',
+    description='A python package for constructing complex geological models using neural networks (neural fields).',
     long_description=long_description,
     long_description_content_type="text/markdown",
     include_package_data=True,
     install_requires=['numpy', 'torch', 'tqdm'],
-    extras_require={'benchmark': ['pytest-benchmark']},
+    extras_require={'dev': ['pytest', 'pytest-benchmark'],
+                    'viz' : ['napari[all]', 'matplotlib', 'plyfile'],
+                    'all' : ['napari[all]', 'matplotlib', 'plyfile', 'pytest', 'pytest-benchmark']},
     package_data = {"":["*.png","*.ttl"]}
 )
