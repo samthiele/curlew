@@ -2,7 +2,7 @@
 
 A toolkit for building 2- and 3- dimensional geological models using neural fields.
 
-<img src="https://github.com/samthiele/curlew/blob/main/icon.png?raw=true" width="200">
+<img src="https://github.com/samthiele/curlew/blob/main/banner.png?raw=true" height="200">
 
 This approach allows the inclusion of diverse geological data, while the overarching graph-based modelling framework allows complex structures (unconformities, folds, faults, intrusions, etc.) to be constructed sequentially based on a geological history. 
 
