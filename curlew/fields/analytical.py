@@ -239,16 +239,24 @@ class EllipsoidalField(BaseAF):
     """
     A dimension-agnostic analytical field for N-dimensional hyper-ellipsoids.
     Using the Transform function within the BaseSF class, applies an affine transform
-    to the coordinates to morph the distance field into an ellipsoidal field such that
-    the value at the center is always 1 and falls off to zero.
+    to the coordinates to morph the canonical field into an ellipsoidal field.
 
     The zero isosurface exists at a distance of 1 in the pre-transformed coordinates; hence
     it exists at the ellipsoid described by the axes and directions.
+
+    Modes
+    -----
+    decay=True:
+        Returns a decaying field with value 1 at the center and 0 at/after the boundary.
+    decay=False (default):
+        Returns an ellipsoidal distance-like field with value 0 at the center and
+        increasing outward (boundary is at value 1 in canonical coordinates).
     """
     def initField(self,
                   origin: np.ndarray = None,
                   axes: np.ndarray = None,
-                  directions: np.ndarray = None):
+                  directions: np.ndarray = None,
+                  decay: bool = False):
         
         # 1. Determine dimensionality from input parameters or default
         if origin is not None:
@@ -290,14 +298,17 @@ class EllipsoidalField(BaseAF):
                                                  torch.ones(1, device=curlew.device, dtype=curlew.dtype)]).unsqueeze(0)], dim=0)
         # We need to invert the transform matrix (as we move from world to field coordinates)
         self.T = Transform(matrix=T_matrix).inverse()
+        self.decay = bool(decay)
 
     def evaluate(self, x: torch.Tensor):
         """
         """
-        # Return the norm of the transformed position (the distance from the origin morphed to the ellipse)
-        # We subtract it from 1 to make it fall off to zero at the boundary.
-        # N.B. We need the clamp to avoid negatives
-        return torch.clamp(1 - torch.linalg.norm(x, dim=1), min=0)
+        r = torch.linalg.norm(x, dim=1)
+        if self.decay:
+            # 1 at the center, 0 at/after the boundary (r >= 1)
+            return torch.clamp(1 - r, min=0)
+        # 0 at the center, increasing outward (boundary at r == 1)
+        return r
 
 class RectangularPrismField(BaseAF):
     """

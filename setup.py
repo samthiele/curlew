@@ -7,7 +7,7 @@ long_description = (this_dir / "README.md").read_text() # read README file as lo
 
 setup(
     name='curlew',
-    version='1.1',
+    version='1.2',
     packages=setuptools.find_packages(),
     url='https://github.com/samthiele/curlew',
     license='MIT',
@@ -20,6 +20,6 @@ setup(
     install_requires=['numpy', 'torch', 'tqdm'],
     extras_require={'dev': ['pytest', 'pytest-benchmark'],
                     'viz' : ['napari[all]', 'matplotlib', 'plyfile'],
-                    'all' : ['napari[all]', 'matplotlib', 'plyfile', 'pytest', 'pytest-benchmark']},
+                    'all' : ['napari[all]', 'matplotlib', 'plyfile', 'pytest', 'pytest-benchmark', 'scipy']},
     package_data = {"":["*.png","*.ttl"]}
 )

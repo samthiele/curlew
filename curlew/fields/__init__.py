@@ -430,14 +430,14 @@ class BaseNF(BaseSF):
         # -------------------------------
         reuse_frac = getattr(H, 'reuse_worst_half', 0) or 0 # set as 0 or None to disable
         if C.grid is not None:
-            if transform:
-                gridL = C.grid.draw(self.transform)  # sample transformed grid points
-            else:
-                gridL = C.grid.draw() # sample non-transformed grid points
-            
             if  isinstance(H.thick_loss, str) or isinstance(H.mono_loss, str) or isinstance(H.flat_loss, str) or \
                 (H.thick_loss > 0) or (H.mono_loss > 0) or (H.flat_loss > 0):
 
+                if transform:
+                    gridL = C.grid.draw(self.transform)  # sample transformed grid points
+                else:
+                    gridL = C.grid.draw() # sample non-transformed grid points
+                    
                 # Numerically compute the Hessian for mono loss
                 # (single batched gradient call over all shifted grids)
                 d = self.input_dim

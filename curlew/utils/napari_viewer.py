@@ -15,6 +15,7 @@ import curlew
 
 if TYPE_CHECKING:
     from curlew.core import CSet, Geode
+    from curlew.fields.eshelby import EshelbyField
     from matplotlib.colors import Colormap as MplColormap
 
 # try loading napari
@@ -247,6 +248,136 @@ class NapariViewer:
         self.viewer.dims.axis_labels = ("z", "y", "x") if self._ndisplay == 3 else ("y", "x")
         self._cnt = 0
 
+        self._lighting = (self._ndisplay == 3)
+        self._lighting_connected = False
+        if self._lighting:
+            self._connect_lighting()
+
+    # Lighting control (3D only)
+    def enable_light_tracking(self, enabled: bool = True) -> None:
+        """Enable/disable aligning surface lighting with the camera direction."""
+        self._lighting = bool(enabled)
+        if self._lighting:
+            self._connect_lighting()
+            self._on_camera_change()
+        else:
+            self._disconnect_lighting_events()
+
+    def _connect_lighting(self) -> None:
+        if self._lighting_connected:
+            return
+        try:
+            self.viewer.camera.events.angles.connect(self._on_camera_change)
+            self._lighting_connected = True
+        except Exception:
+            # Headless ViewerModel (no vispy canvas) or older napari versions.
+            self._lighting_connected = False
+
+    def _disconnect_lighting_events(self) -> None:
+        if not self._lighting_connected:
+            return
+        try:
+            self.viewer.camera.events.angles.disconnect(self._on_camera_change)
+        except Exception:
+            pass # no woman, no cry!
+        self._lighting_connected = False
+
+    def _get_dims_displayed(self, layer) -> np.ndarray:
+        """Best-effort equivalent of napari-threedee `get_dims_displayed`."""
+        try:
+            displayed = getattr(getattr(layer, "_slice_input", None), "displayed", None)
+            if displayed is not None:
+                return np.asarray(displayed, dtype=int)
+        except Exception:
+            pass
+        try:
+            ndim = int(getattr(layer, "ndim", 3))
+        except Exception:
+            ndim = 3
+        return np.arange(ndim, dtype=int)
+
+    def _get_napari_visual(self, layer):
+        """
+        Return the vispy visual for a layer when running with a Qt viewer.
+        In headless ViewerModel this returns None.
+        """
+        viewer = self.viewer
+        # ViewerModel has no .window; only napari.Viewer (Qt) does.
+        win = getattr(viewer, "window", None)
+        if win is None:
+            return None
+
+        # New/old attribute names across napari versions.
+        qt_viewer = getattr(win, "_qt_viewer", None) or getattr(win, "qt_viewer", None)
+        if qt_viewer is None:
+            return None
+
+        # Common mapping: layer_to_visual (dict-like).
+        layer_to_visual = getattr(qt_viewer, "layer_to_visual", None)
+        if layer_to_visual is not None:
+            try:
+                return layer_to_visual[layer]
+            except Exception:
+                pass
+
+        # Fallback: try a callable accessor if present.
+        get_visual = getattr(qt_viewer, "get_visual", None)
+        if callable(get_visual):
+            try:
+                return get_visual(layer)
+            except Exception:
+                pass
+
+        return None
+
+    def _on_camera_change(self, event=None) -> None:
+        if not self._lighting:
+            return
+
+        # If there's no camera/view_direction (or no Qt canvas), this should be a no-op.
+        try:
+            view_direction = np.asarray(self.viewer.camera.view_direction, dtype=np.float64)
+        except Exception:
+            return
+        try:
+            all_layers = list(self.viewer.layers)
+        except Exception:
+            return
+
+        for layer in all_layers:
+            if layer is None:
+                continue
+            try:
+                import napari as _napari_mod
+
+                if not isinstance(layer, _napari_mod.layers.Surface):
+                    continue
+            except Exception:
+                if layer.__class__.__name__ != "Surface":
+                    continue
+
+            visual = self._get_napari_visual(layer)
+            if visual is None:
+                continue
+
+            try:
+                # Convert camera direction to this layer's data coords, then select displayed dims.
+                ray = (
+                    np.asarray(layer._world_to_data_ray(view_direction), dtype=np.float64)
+                    if hasattr(layer, "_world_to_data_ray")
+                    else view_direction
+                )
+                dims_displayed = self._get_dims_displayed(layer)
+                layer_view_dir = np.asarray(ray, dtype=np.float64)[dims_displayed]
+
+                node = getattr(visual, "node", None)
+                shading_filter = getattr(node, "shading_filter", None) if node is not None else None
+                if shading_filter is None or not hasattr(shading_filter, "light_dir"):
+                    continue
+                shading_filter.light_dir = layer_view_dir[::-1] # Napari/vispy use reversed xyz convention vs our (z,y,x) direction.
+            except Exception:
+                continue # Never let lighting updates break rendering or tests.
+
     def _remove_layer_if_present(self, name: str) -> None:
         # hack; but put this here as axis labels are not properly set in the constructor for some reason. 
         self.viewer.dims.axis_labels = ("z", "y", "x") if self._ndisplay == 3 else ("y", "x")
@@ -335,21 +466,28 @@ class NapariViewer:
                     [normals[:, 2], normals[:, 1], normals[:, 0]]
                 )
 
-        if isinstance(rgb, str):
-            from matplotlib.colors import to_rgba
+        from matplotlib.colors import to_rgba
 
+        if isinstance(rgb, str):
             rgba = np.asarray(to_rgba(rgb), dtype=np.float64)
             vertex_colors = np.tile(rgba, (len(verts), 1))
         else:
             vc = np.asarray(rgb, dtype=np.float64)
-            if vc.shape[0] != len(verts):
-                raise ValueError("rgb array must have one row per vertex")
-            if vc.shape[1] == 3:
-                vertex_colors = np.c_[vc, np.ones(len(verts))]
-            elif vc.shape[1] == 4:
-                vertex_colors = vc
+            # allow passing a single colour as (3,) or (4,)
+            if vc.ndim == 1 and vc.shape[0] in (3, 4):
+                rgba = vc if vc.shape[0] == 4 else np.r_[vc, 1.0]
+                vertex_colors = np.tile(rgba, (len(verts), 1))
             else:
-                raise ValueError("rgb must be (N, 3) or (N, 4)")
+                if vc.ndim != 2 or vc.shape[0] != len(verts):
+                    raise ValueError(
+                        "rgb array must be a single (3,)/(4,) colour or have one row per vertex"
+                    )
+                if vc.shape[1] == 3:
+                    vertex_colors = np.c_[vc, np.ones(len(verts))]
+                elif vc.shape[1] == 4:
+                    vertex_colors = vc
+                else:
+                    raise ValueError("rgb must be (3,), (4,), (N, 3) or (N, 4)")
 
         self._remove_layer_if_present(name)
         
@@ -450,7 +588,18 @@ class NapariViewer:
             )
         else:
             v = np.asarray(rgb)
-            if v.ndim == 2 and v.shape[0] == n and v.shape[1] in (3, 4):
+            if v.ndim == 1 and v.shape[0] in (3, 4):
+                rgba = v if v.shape[0] == 4 else np.r_[v, 1.0]
+                face_color = np.tile(rgba, (n, 1))
+                layer = self.viewer.add_points(
+                    xyz,
+                    name=name,
+                    face_color=face_color,
+                    size=size,
+                    **layer_opts,
+                    **kwargs,
+                )
+            elif v.ndim == 2 and v.shape[0] == n and v.shape[1] in (3, 4):
                 layer = self.viewer.add_points(
                     xyz,
                     name=name,
@@ -461,7 +610,7 @@ class NapariViewer:
                 )
             else:
                 raise ValueError(
-                    "rgb must be str or an array of shape (N,3)/(N,4) for per-point colours"
+                    "rgb must be str, a single (3,)/(4,) colour, or an array of shape (N,3)/(N,4) for per-point colours"
                 )
 
         self._layers[name] = layer
@@ -1270,6 +1419,131 @@ class NapariViewer:
         layer = self.viewer.add_tracks(data, **opts)
         self._layers[name] = layer
         self._cnt += 1
+        return layer
+
+    def addEshelby(
+        self,
+        name: str,
+        field: "EshelbyField",
+        *,
+        rgb: str = "cyan",
+        edge_width: float = 2.0,
+        n_ellipse_pts: int = 96,
+        n_u: int = 24,
+        n_v: int = 48,
+        shading: str = "smooth",
+        visible: bool = True,
+        opacity: float = 0.8,
+    ):
+        """
+        Add Eshelby inclusions as ellipses (2D viewer) or ellipsoids (3D viewer).
+
+        2D: each inclusion is drawn as the projection of its equatorial circle (local z=0)
+        into the (x, y) display plane, rendered as a closed polygon in a ``Shapes`` layer.
+
+        3D: inclusions are rendered as triangle meshes (one combined ``Surface`` layer).
+        """
+        # Import here to keep napari optional for the rest of curlew.
+        from curlew.fields.eshelby import EshelbyField as EshelbyFieldType
+
+        if not isinstance(field, EshelbyFieldType):
+            raise TypeError("field must be a curlew.fields.eshelby.EshelbyField instance")
+
+        def _to_np(a) -> np.ndarray:
+            if hasattr(a, "detach"):
+                a = a.detach()
+            if hasattr(a, "cpu"):
+                a = a.cpu()
+            if hasattr(a, "numpy"):
+                return np.asarray(a.numpy(), dtype=np.float64)
+            return np.asarray(a, dtype=np.float64)
+
+        pos = _to_np(field._pos)  # (n,3)
+        RT = _to_np(field._RT)    # (n,3,3) local->global
+        r = _to_np(field._radii).reshape(-1)  # (n,)
+        t = np.sqrt(_to_np(field._t2).reshape(-1))  # (n,)
+        n_src = int(pos.shape[0])
+        if n_src == 0:
+            return None
+
+        if self._ndisplay == 2:
+            n_pts = int(max(12, n_ellipse_pts))
+            theta = np.linspace(0.0, 2.0 * np.pi, n_pts, endpoint=False)
+            circle = np.column_stack([np.cos(theta), np.sin(theta), np.zeros_like(theta)])  # (P,3)
+
+            polys: list[np.ndarray] = []
+            for i in range(n_src):
+                # Local equatorial circle at z_loc=0, radius r[i]
+                loc = circle * float(r[i])
+                glob = pos[i][None, :] + (RT[i] @ loc.T).T  # (P,3) in curlew xyz
+                polys.append(glob)
+
+            # Render as closed polygons with transparent faces.
+            self._remove_layer_if_present(name)
+            edge_color = rgb
+            layer = self.viewer.add_shapes(
+                [self._to_napari_xyz(p) for p in polys],
+                shape_type=["polygon"] * len(polys),
+                name=name,
+                edge_color=edge_color,
+                edge_width=edge_width,
+                face_color=_get_colors(len(polys)),
+                visible=visible,
+                opacity=opacity,
+            )
+            self._layers[name] = layer
+            self._cnt += 1
+            return layer
+
+        # 3D mesh: triangulated ellipsoid surfaces, combined into one layer.
+        n_u = int(max(6, n_u))
+        n_v = int(max(12, n_v))
+        uu = np.linspace(0.0, np.pi, n_u)          # polar
+        vv = np.linspace(0.0, 2.0 * np.pi, n_v, endpoint=False)  # azimuth
+        U, V = np.meshgrid(uu, vv, indexing="ij")  # (n_u, n_v)
+        sx = np.sin(U) * np.cos(V)
+        sy = np.sin(U) * np.sin(V)
+        sz = np.cos(U)
+        sphere = np.stack([sx, sy, sz], axis=-1).reshape(-1, 3)  # (n_u*n_v, 3)
+
+        # Faces for the (n_u x n_v) grid with wrap in v.
+        faces: list[list[int]] = []
+        for iu in range(n_u - 1):
+            for iv in range(n_v):
+                iv2 = (iv + 1) % n_v
+                a = iu * n_v + iv
+                b = iu * n_v + iv2
+                c = (iu + 1) * n_v + iv
+                d = (iu + 1) * n_v + iv2
+                #faces.append([a, c, b])
+                #faces.append([b, c, d])
+                faces.append([b, c, a])
+                faces.append([d, c, b])
+        faces0 = np.asarray(faces, dtype=np.int64)
+
+        verts_all: list[np.ndarray] = []
+        faces_all: list[np.ndarray] = []
+        v_off = 0
+        for i in range(n_src):
+            # Scale unit sphere to ellipsoid in local coords, then rotate + translate.
+            scale = np.array([float(r[i]), float(r[i]), float(t[i])], dtype=np.float64)
+            loc = sphere * scale[None, :]
+            glob = pos[i][None, :] + (RT[i] @ loc.T).T  # (N,3) in curlew xyz
+            verts_all.append(glob)
+            faces_all.append(faces0 + v_off)
+            v_off += glob.shape[0]
+
+        verts = np.vstack(verts_all)
+        faces = np.vstack(faces_all)
+        layer = self.addMesh(
+            name,
+            verts,
+            faces,
+            rgb=rgb,
+            shading=shading,
+            visible=visible,
+            opacity=opacity,
+        )
         return layer
 
     def show(self, *, block: bool = False):

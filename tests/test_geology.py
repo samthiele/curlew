@@ -737,3 +737,84 @@ def test_isosurfaces_and_volumes():
     assert pts.shape[1] == 2
     assert pts.shape[0] > 10
     assert np.max(pts[:, 1]) <= 1e-6
+
+
+def test_project_and_sample_isosurface():
+    """
+    Smoke test for ``GeoField.projectTo`` and ``GeoField.sampleIsosurface``.
+
+    This exercise uses torch and the full curlew stack; run in the project
+    environment (for example ``mamba activate curlew``) before invoking pytest,
+    e.g. ``pytest tests/test_geology.py -k project_to``.
+    """
+    import curlew
+    from curlew.geology.geofield import GeoField
+    from curlew.fields.analytical import EllipsoidalField
+
+    prev_dim = curlew.default_dim
+    try:
+        curlew.default_dim = 3
+        origin = np.array([0.0, 0.0, 0.0])
+        gf = GeoField(
+            name="t",
+            type=EllipsoidalField,
+            origin=origin,
+            axes=np.array([100.0, 100.0, 100.0]),
+        )
+        gf.addIsosurface("surf", seed=origin + np.array([50.0, 0.0, 0.0]))
+        iso = float(gf.getIsovalue("surf"))
+
+        def _check_project(pts_in):
+            proj = gf.projectTo("surf", pts_in, nsteps=10)
+            # output type should match input type
+            assert isinstance(proj, type(pts_in))
+            assert proj.shape == (1, 3)
+            pred = gf.predict(
+                proj,
+                combine=False,
+                to_numpy=True,
+                litho=False,
+                props=False,
+                isosurfaces=False,
+            )
+            val = float(np.asarray(pred.fields["t"]).reshape(-1)[0])
+            np.testing.assert_allclose(val, iso, rtol=1e-2, atol=1e-2)
+
+        # NumPy input
+        _check_project(np.array([[80.0, 10.0, 5.0]], dtype=float))
+
+        # Torch input
+        import curlew
+        pts_t = torch.tensor([[80.0, 10.0, 5.0]], device=curlew.device, dtype=curlew.dtype)
+        _check_project(pts_t)
+
+        def _check_sample(seed_in, *, method: str):
+            samp = gf.sampleIsosurface(
+                "surf",
+                seed_in,
+                target_distance=15.0,
+                n_steps=20,
+                relax_substeps=2,
+                max_samples=200,
+                method=method,
+            )
+            assert isinstance(samp, type(seed_in))
+            assert samp.ndim == 2 and samp.shape[1] == 3
+            a = samp.detach().cpu().numpy() if isinstance(samp, torch.Tensor) else np.asarray(samp)
+            assert np.isfinite(a).all()
+            assert a.shape[0] >= 1
+
+        # distance backend: numpy + torch
+        _check_sample(np.array([70.0, 5.0, 2.0], dtype=float), method="distance")
+        _check_sample(torch.tensor([70.0, 5.0, 2.0], device=curlew.device, dtype=curlew.dtype), method="distance")
+
+        # kdtree backend requires scipy
+        try:
+            import scipy  # noqa: F401
+        except Exception:
+            pass
+        else:
+            _check_sample(np.array([70.0, 5.0, 2.0], dtype=float), method="kdtree")
+            _check_sample(torch.tensor([70.0, 5.0, 2.0], device=curlew.device, dtype=curlew.dtype), method="kdtree")
+    finally:
+        curlew.default_dim = prev_dim

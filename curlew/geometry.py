@@ -327,7 +327,7 @@ class Grid(object):
         else:
             return out
     
-    def contour(self, values, iso, normals=False, transform=True ):
+    def contour(self, values, iso, normals=False, transform=True, mask=None ):
       """
       Use values computed for this grid to extract 2D (lines) or 3D (surfaces) contours. Requires scikit-image.
 
@@ -342,6 +342,11 @@ class Grid(object):
           transform : bool | optional
               True (default) if this grids transorm matrix should be applied to return coordinates in world coords. Otherwise
               internal (local) grid coordinates will be returned.
+          mask : np.ndarray | None
+              Optional boolean mask specifying which grid cells are considered valid for contouring.
+              Can be provided either as a ravelled 1D array with the same length as `values`, or
+              as an array already shaped like this grid (`self.shape`). Masked-out regions are
+              ignored by the contouring algorithm.
       
       Returns
       --------
@@ -352,10 +357,28 @@ class Grid(object):
       except:
           assert False, "Please install scikit-image using `pip install scikit-image`"
       
+      # ensure mask has the correct dtype and shape
+      if mask is not None:
+          m = np.asarray(mask)
+          if m.dtype != bool:
+              m = m.astype(bool)
+          if m.shape == (len(values),):
+              mask = self.reshape(m)
+          elif m.shape == self.shape:
+              mask = m
+          else:
+              raise ValueError(
+                  "volume_mask must be either 1D (len(values),) or shaped like the grid (self.shape). "
+                  f"Got volume_mask.shape={m.shape}, expected {(len(values),)} or {self.shape}."
+              )
+
       if self.ndim == 3: # marching cubes
           from skimage.measure import marching_cubes
           vol = self.reshape(values) # predicted value as (3D) grid
-          vix, faces, norm, _ = marching_cubes( vol, level=iso, mask=np.isfinite(vol) ) # find isosurface using marching cubes 
+          mc_mask = np.isfinite(vol) # also remove nans for mask (marching cubes will then ignore nans)
+          if mask is not None:
+              mc_mask = mc_mask & mask
+          vix, faces, norm, _ = marching_cubes( vol, level=iso, mask=mc_mask ) # find isosurface using marching cubes 
 
           # build interpolators that convert indices to positions
           from scipy.interpolate import interp1d
@@ -387,7 +410,10 @@ class Grid(object):
       elif self.ndim == 2: # marching squares
           from skimage.measure import find_contours
           img = self.reshape(values)
-          contours = find_contours( img, iso, mask=np.isfinite(img))
+          ms_mask = np.isfinite(img)
+          if mask is not None:
+              ms_mask = ms_mask & mask
+          contours = find_contours( img, iso, mask=ms_mask)
 
           # build interpolators that convert indices to positions
           from scipy.interpolate import interp1d

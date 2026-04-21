@@ -5,29 +5,44 @@ def test_EllipsoidalField():
     from curlew.fields.analytical import EllipsoidalField
     from curlew.geometry import grid
 
-    # 2D: default (unit circle)
+    # Default: distance-like mode (unit circle)
     for dim in [2, 3]:
         G = grid([12] * dim, step=[2.0] * dim, center=[0.0] * dim)
         x = G.coords()
         field = EllipsoidalField(name="ell", input_dim=dim)
         out = field.forward(torch.tensor(x, dtype=torch.float32)).squeeze()
         assert out.shape == (x.shape[0],)
-        assert (out >= 0).all().item() and (out <= 1).all().item()
+        assert (out >= 0).all().item()
 
-        # Center should be ~1
+        # Center should be ~0
         center_pt = np.zeros((1, dim))
         center_val = field.forward(torch.tensor(center_pt, dtype=torch.float32)).squeeze().item()
-        assert abs(center_val - 1.0) < 1e-5, f"center value {center_val} not 1"
+        assert abs(center_val - 0.0) < 1e-5, f"center value {center_val} not 0"
 
-        # Far outside should be 0
+        # Boundary at r == 1 in canonical coordinates
+        boundary = np.zeros((1, dim))
+        boundary[0, 0] = 1.0
+        boundary_val = field.forward(torch.tensor(boundary, dtype=torch.float32)).squeeze().item()
+        assert abs(boundary_val - 1.0) < 1e-5, f"boundary value {boundary_val} not 1"
+
+        # Far outside should be > 1
         far = np.ones((1, dim)) * 1e6
         far_val = field.forward(torch.tensor(far, dtype=torch.float32)).squeeze().item()
-        assert far_val == 0.0, f"far value {far_val} not 0"
+        assert far_val > 1.0, f"far value {far_val} not > 1"
+
+        # Decay mode: 1 at center, 0 at/after boundary
+        decay_field = EllipsoidalField(name="ell_decay", input_dim=dim, decay=True)
+        out_d = decay_field.forward(torch.tensor(x, dtype=torch.float32)).squeeze()
+        assert (out_d >= 0).all().item() and (out_d <= 1).all().item()
+        center_val_d = decay_field.forward(torch.tensor(center_pt, dtype=torch.float32)).squeeze().item()
+        assert abs(center_val_d - 1.0) < 1e-5, f"center value {center_val_d} not 1"
+        far_val_d = decay_field.forward(torch.tensor(far, dtype=torch.float32)).squeeze().item()
+        assert far_val_d == 0.0, f"far value {far_val_d} not 0"
 
     # 2D with custom origin and axes (ellipse)
     origin = np.array([10.0, 20.0])
     axes = np.array([5.0, 2.0])  # semi-axes
-    E = EllipsoidalField(name="e2", input_dim=2, origin=origin, axes=axes)
+    E = EllipsoidalField(name="e2", input_dim=2, origin=origin, axes=axes, decay=True)
     G2 = grid([20, 20], step=[1.0, 1.0], center=origin)
     x2 = G2.coords()
     out2 = E.forward(torch.tensor(x2, dtype=torch.float32)).squeeze()
@@ -37,13 +52,13 @@ def test_EllipsoidalField():
 
     # 3D sphere (equal axes)
     axes3 = np.array([3.0, 3.0, 3.0])
-    E3 = EllipsoidalField(name="e3", input_dim=3, origin=np.zeros(3), axes=axes3)
+    E3 = EllipsoidalField(name="e3", input_dim=3, origin=np.zeros(3), axes=axes3, decay=True)
     c3 = np.zeros((1, 3))
     assert abs(E3.forward(torch.tensor(c3, dtype=torch.float32)).squeeze().item() - 1.0) < 1e-5
 
     # Directions (rotation): 2D identity directions
     directions = np.eye(2)
-    E_rot = EllipsoidalField(name="er", input_dim=2, origin=np.zeros(2), axes=np.ones(2), directions=directions)
+    E_rot = EllipsoidalField(name="er", input_dim=2, origin=np.zeros(2), axes=np.ones(2), directions=directions, decay=True)
     assert abs(E_rot.forward(torch.tensor(np.zeros((1, 2)), dtype=torch.float32)).squeeze().item() - 1.0) < 1e-5
 
 

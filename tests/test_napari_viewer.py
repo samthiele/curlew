@@ -75,6 +75,61 @@ def test_add_mesh_2d_and_3d(napari_viewer):
     assert "mesh" in napari_viewer._layers
 
 
+def test_bake_ao_updates_vertex_colors(napari_viewer):
+    if napari_viewer._ndisplay != 3:
+        return
+    # Two nearby triangles (separate layers) with different orientations so the
+    # neighbour-normal cavity metric produces a nonzero effect.
+    verts1 = np.asarray(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64
+    )
+    faces1 = np.asarray([[0, 1, 2]], dtype=np.int64)
+    # A second triangle tilted into the x-z plane and offset slightly.
+    verts2 = np.asarray(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64
+    ) + np.array([1e-6, 2e-6, 3e-6], dtype=np.float64)
+    faces2 = faces1.copy()
+
+    l1 = napari_viewer.addMesh("m1", verts1, faces1, rgb="white", shading="smooth")
+    l2 = napari_viewer.addMesh("m2", verts2, faces2, rgb="white", shading="smooth")
+    vc1_before = np.asarray(l1.vertex_colors, dtype=np.float64).copy()
+    vc2_before = np.asarray(l2.vertex_colors, dtype=np.float64).copy()
+
+    napari_viewer.bakeAO(method="hybrid", k=6, strength=0.8, smooth_iters=0, hybrid_alpha=0.8)
+
+    vc1_after = np.asarray(l1.vertex_colors, dtype=np.float64)
+    vc2_after = np.asarray(l2.vertex_colors, dtype=np.float64)
+    assert vc1_after.shape == vc1_before.shape
+    assert vc2_after.shape == vc2_before.shape
+    # AO should modify RGB channels (darkening).
+    assert not np.allclose(vc1_after[:, :3], vc1_before[:, :3])
+    assert not np.allclose(vc2_after[:, :3], vc2_before[:, :3])
+
+
+def test_bake_ao_density_parallel_layers(napari_viewer):
+    if napari_viewer._ndisplay != 3:
+        return
+    # Two parallel triangles separated along z: normal-based cavity is ~0, but density
+    # should still darken due to nearby geometry.
+    verts1 = np.asarray(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64
+    )
+    faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    verts2 = verts1 + np.array([0.0, 0.0, 0.02], dtype=np.float64)
+
+    l1 = napari_viewer.addMesh("p1", verts1, faces, rgb="white", shading="smooth")
+    l2 = napari_viewer.addMesh("p2", verts2, faces, rgb="white", shading="smooth")
+    vc1_before = np.asarray(l1.vertex_colors, dtype=np.float64).copy()
+    vc2_before = np.asarray(l2.vertex_colors, dtype=np.float64).copy()
+
+    napari_viewer.bakeAO(method="density", k=6, strength=0.8, smooth_iters=0)
+
+    vc1_after = np.asarray(l1.vertex_colors, dtype=np.float64)
+    vc2_after = np.asarray(l2.vertex_colors, dtype=np.float64)
+    assert not np.allclose(vc1_after[:, :3], vc1_before[:, :3])
+    assert not np.allclose(vc2_after[:, :3], vc2_before[:, :3])
+
+
 def test_add_volume_with_grid_2d_and_3d(napari_viewer):
     nd = napari_viewer._ndisplay
     if nd == 2:

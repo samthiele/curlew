@@ -41,16 +41,17 @@ def plot2D( sxy, grid, C=None, ticksize=50, lw=1, cmap='rainbow', levels=None, a
     vmn, vmx = None, None
     pxy = grid.coords()
     shape = grid.shape
+    pxy = np.array([pxy[:,i] for i in range(pxy.shape[-1]) if shape[i] > 1]).T # drop dimensions with only one point (treating 3D grids as 2D sections)
     if (pxy is not None) and (sxy is not None):
         xmn,xmx = np.percentile(pxy[:,0], (0,100)) # get bounds
         ymn,ymx = np.percentile(pxy[:,1], (0,100))
 
         if (sxy.shape[-1] == 3) or (sxy.shape[-1] == 4): # RGB or RGBA colours
             # plot colours directly
-            si = sxy.reshape( shape + (sxy.shape[-1],) )
+            si = sxy.reshape( shape + (sxy.shape[-1],) ).squeeze()
             ax.imshow( np.transpose( si, (1,0,2)), alpha=alpha, extent=(xmn,xmx,ymn,ymx), origin='lower', interpolation='nearest' )
         else:
-            si = sxy.reshape(shape) # reshape to image
+            si = sxy.reshape(shape).squeeze() # reshape to image
             vmn,vmx = np.percentile(sxy, (0,100))
             
             # plot scalar field and countours

@@ -397,7 +397,7 @@ class GeoField( object ):
             grid = x
             x = grid.coords()
         if not isinstance(x, torch.Tensor):
-            x = _tensor( x, dev=curlew.device, dt=curlew.dtype)
+            x = _tensor( x )
 
         # operation needs to be done in batches?
         if (len(x) > curlew.batchSize) and (values is None):
@@ -471,7 +471,7 @@ class GeoField( object ):
                             v = self.forward(x_eval, undef=transform, field=i)
                             s = v.scalar if isinstance(v, Geode) else v.squeeze()
                         if s.ndim == 0:
-                            s = _tensor([s.detach().item()], dev=curlew.device, dt=curlew.dtype)
+                            s = _tensor([s.detach().item()] )
                         out.fields[fname] = s
             else:
                 out = self.forward(out, undef=transform, field=0) # evaluate scalar value for first field
@@ -484,10 +484,10 @@ class GeoField( object ):
                         v = self.forward(x_eval, undef=transform, field=i)
                         s = v.scalar if isinstance(v, Geode) else v.squeeze()
                         if s.ndim == 0:
-                            s = _tensor([s.detach().item()], dev=curlew.device, dt=curlew.dtype)
+                            s = _tensor([s.detach().item()] )
                         out.fields[fname] = s
             if out.scalar.ndim==0: # if only evaluating one location, ensure result is a vector
-                out.scalar = _tensor([out.scalar.detach().item()], dev=curlew.device, dt=curlew.dtype)
+                out.scalar = _tensor([out.scalar.detach().item()] )
             
             out.structureID = torch.full( (len(out.scalar),), self.eid, device=curlew.device, dtype=torch.int)
             out.structureLookup = {**out.structureLookup, **{self.eid : self.name}}
@@ -586,19 +586,20 @@ class GeoField( object ):
         """
 
         if not isinstance(x, torch.Tensor):
-            x = _tensor(x, dt=curlew.dtype, dev=curlew.device).requires_grad_(True)
+            x = _tensor(x ).requires_grad_(True)
         if not x.requires_grad:
             #x = torch.tensor(x, dtype=curlew.dtype, device=curlew.device, requires_grad=True)
             x = x.detach().clone().requires_grad_(True)
         
         # evaluate scalar value for the selected underlying field
-        pred = self.forward(x, undef=transform, field=field).squeeze()
+        # Keep a torch copy for downstream calls (e.g. predict(values=...))
+        pred_t = self.forward(x, undef=transform, field=field).squeeze()
 
         # get gradients
         grad_out = torch.autograd.grad(
-            outputs=pred,
+            outputs=pred_t,
             inputs=x,
-            grad_outputs=torch.ones_like(pred),
+            grad_outputs=torch.ones_like(pred_t),
             create_graph=create_graph,
             retain_graph=retain_graph,
         )[0]
@@ -610,10 +611,10 @@ class GeoField( object ):
 
         if to_numpy:
             grad_out = _numpy(grad_out)
-            pred = _numpy(pred)
 
         if return_vals: # return gradient array and predictions Geode
-            g = self.predict(x, combine=False, to_numpy=to_numpy, transform=transform, values=pred)
+            # `predict(values=...)` expects torch tensors; always pass the torch version.
+            g = self.predict(x, combine=False, to_numpy=to_numpy, transform=transform, values=pred_t)
             # `predict(..., values=pred)` assumes `values` are for the first field; if requesting a different
             # underlying field, update the returned scalar to match that field for consistency.
             if not (isinstance(field, int) and field == 0):
@@ -649,7 +650,7 @@ class GeoField( object ):
         """
         tonp = False
         if isinstance( x, np.ndarray ): # cast numpy to torch if need be (should not be though)
-            x = _tensor( x, dev=curlew.device, dt=curlew.dtype)
+            x = _tensor( x )
             tonp = True
         
         # remove any child deformation
@@ -688,7 +689,7 @@ class GeoField( object ):
         """
         tonp = False
         if isinstance(x, np.ndarray):
-            x = _tensor(x, dt=curlew.dtype, dev=curlew.device)
+            x = _tensor(x )
             tonp = True
 
         if self.deformation is None:
@@ -752,7 +753,7 @@ class GeoField( object ):
         assert (seed is None) or (value is None), "Either seed or value should be defined, not both."
         assert not( (seed is None) and (value is None)), "Either seed or value should be defined, not both."
         if seed is not None:
-            self.isosurfaces[name] = (field, np.asarray( seed ))
+            self.isosurfaces[name] = (field, _numpy( seed ))
         if value is not None:
             self.isosurfaces[name] = (field, value)
 
@@ -795,15 +796,15 @@ class GeoField( object ):
 
         if has_pos and not has_dir and not has_start and not has_end:
             # Position-only anchor (legacy behaviour)
-            self.anchors[name] = (field, np.asarray(position))
+            self.anchors[name] = (field, _numpy(position))
         elif has_pos and has_dir and not has_start and not has_end:
             # Position + direction: store two points; direction in reconstructed space will be normalised
-            start_pt = np.asarray(position)
-            end_pt = np.asarray(position) + np.asarray(direction)
+            start_pt = _numpy(position)
+            end_pt = _numpy(position) + _numpy(direction)
             self.anchors[name] = (field, {"start": start_pt, "end": end_pt, "normalize": True})
         elif has_start and has_end and not has_pos and not has_dir:
             # Start + end: store two points; direction in reconstructed space will not be normalised
-            self.anchors[name] = (field, {"start": np.asarray(start), "end": np.asarray(end), "normalize": False})
+            self.anchors[name] = (field, {"start": _numpy(start), "end": _numpy(end), "normalize": False})
         else: # Invalid combination
             raise ValueError( "addAnchor requires one of: position only; position and direction; or start and end." )
 
@@ -836,10 +837,10 @@ class GeoField( object ):
             stored = stored[1]
 
         def to_torch(arr):
-            a = np.asarray(arr)
+            a = _numpy(arr)
             if a.ndim == 1:
                 a = a[None, :]
-            return _tensor(a, dev=curlew.device, dt=curlew.dtype)
+            return _tensor(a)
 
         def undeform_pt(pt):
             t = to_torch(pt)
@@ -1022,9 +1023,9 @@ class GeoField( object ):
         for k, v in getattr(geode, "fields", {}).items():
             # Values may be torch or numpy depending on predict/to_numpy; enforce output format
             if to_numpy:
-                env[k] = _numpy(v) if isinstance(v, torch.Tensor) else np.asarray(v)
+                env[k] = _numpy(v) if isinstance(v, torch.Tensor) else _numpy(v)
             else:
-                env[k] = _tensor(v, dev=curlew.device, dt=curlew.dtype) if not isinstance(v, torch.Tensor) else v
+                env[k] = _tensor(v) if not isinstance(v, torch.Tensor) else v
 
         # Add isosurface numeric values as scalars
         iso_vals = self.getIsovalues()
@@ -1037,13 +1038,317 @@ class GeoField( object ):
 
         # Enforce boolean dtype
         if to_numpy:
-            mask = np.asarray(mask).astype(bool)
+            mask = _numpy(mask).astype(bool)
         else:
             if not isinstance(mask, torch.Tensor):
                 mask = torch.as_tensor(mask, device=curlew.device, dtype=torch.bool)
             else:
                 mask = mask.bool()
         return mask
+
+    def projectTo(  self, isosurface: str, pts: ArrayLike, nsteps: int = 3, return_normals: bool = False ):
+        """
+        Project points onto a named implicit isosurface using repeated linearized corrections
+        along the underlying scalar field gradient (same idea as one Newton step per iteration:
+        if ``f`` were linear along ``g = ∇f``, then ``p ← p + (f_iso - f(p)) g / (g·g)`` lands on
+        ``f = f_iso``). After each step the value and **unnormalized** gradient are re-evaluated
+        at the new location.
+
+        Parameters
+        ----------
+        isosurface : str
+            Name registered with :py:meth:`addIsosurface` on this ``GeoField``.
+        pts : array-like, shape ``(N, ndim)`` or ``(ndim,)``
+            Model coordinates to project.
+        nsteps : int
+            Number of gradient re-evaluations / correction iterations.
+        return_normals : bool
+            If True, also return the unit normals estimated from the last gradient evaluation.
+
+        Returns
+        -------
+        np.ndarray or torch tensor (matching input) tuple
+            Projected points, same shape as ``pts`` (``(N, ndim)`` or ``(ndim,)``).
+            If ``return_normals`` is True, returns ``(projected_pts, normals)`` where
+            ``normals`` has the same shape as ``pts``.
+        """
+        
+        assert isosurface in self.isosurfaces, f"Isosurface '{isosurface}' not found."
+        spec = self.isosurfaces[isosurface]
+        field_sel = 0
+        if isinstance(spec, tuple) and len(spec) == 2 and isinstance(spec[0], (int, str)):
+            field_sel = spec[0]
+        iso = float(self.getIsovalue(isosurface))
+
+        return_numpy = not isinstance(pts, torch.Tensor)
+        if return_numpy:
+            pts = _tensor(pts)
+
+        single = pts.ndim == 1
+        if single:
+            pts = pts[None, :]
+
+        # ensure we use torch here
+        fobj = self.getField(field_sel)
+        fname = fobj.name if hasattr(fobj, "name") else None
+
+        g = None
+        for _ in range(int(nsteps)):
+            g, geode = self.gradient(
+                pts,
+                return_vals=True,
+                normalize=False,
+                to_numpy=False,   # stay in torch
+                transform=True,
+                field=field_sel,
+            )
+            if hasattr(geode, "fields") and fname is not None and fname in geode.fields:
+                f = geode.fields[fname].reshape(-1)
+            else:
+                f = geode.scalar.reshape(-1)
+
+            gg = (g * g).sum(dim=1) + 1e-12
+            pts = pts - ((f - iso) / gg).unsqueeze(1) * g
+
+        if return_normals:
+            n = g / (g.norm(dim=1, keepdim=True) + 1e-18)
+            if single:
+                pts_out = pts[0]
+                n_out = n[0]
+            else:
+                pts_out = pts
+                n_out = n
+            if return_numpy:
+                return _numpy(pts_out), _numpy(n_out)
+            return pts_out, n_out
+
+        if single:
+            pts = pts[0]
+        if return_numpy:
+            return _numpy(pts)
+        return pts
+
+
+    def sampleIsosurface(
+        self,
+        isosurface: str,
+        seed_point: ArrayLike,
+        target_distance: float,
+        volumeName: Optional[str] = None,
+        return_normals: bool = False,
+        max_samples: int = 1000,
+        n_steps: int = 100,
+        relax_substeps: int = 1,
+        growth_rate: float = 0.8,
+        neighbor_cap: int = 8,
+        method: str = 'distance',
+        seed: int = 1,
+    ):
+        
+        """
+        Place samples on an isosurface starting from ``seed_point`` using a spring/bubble
+        growth method. Points are iteratively grown outward from the seed across the
+        isosurface surface, with repulsion forces keeping them evenly spaced at roughly
+        ``target_distance`` apart.
+
+        Parameters
+        ----------
+        isosurface : str
+            Isosurface name (see :py:meth:`addIsosurface`).
+        seed_point : array-like, shape ``(ndim,)``
+            Starting location in model coordinates. Projected onto the isosurface before use.
+        target_distance : float
+            Target spacing between samples on the isosurface (model units).
+        volumeName : str, optional
+            If given, keep only samples where ``getVolume(volumeName, x=...)`` is True.
+        max_samples : int, optional
+            Maximum number of sample points to place. Default 200.
+        n_steps : int, optional
+            Number of growth iterations. Default 40.
+        relax_substeps : int, optional
+            Number of repulsion-relaxation sub-steps per growth iteration. Default 3.
+        growth_rate : float, optional
+            Probability [0, 1] of attempting to sprout a new point from any existing
+            point that has room. Lower values give slower, more uniform coverage. Default 0.8.
+        neighbor_cap : int, optional
+            A point with this many or more neighbours within ``1.1 * target_distance`` will
+            not sprout new candidates. Default 14.
+        method : str, optional
+            Neighbour-search backend. ``'distance'`` uses a fully-vectorised
+            pairwise ``torch.cdist`` and can work well with few points and a big GPU. 
+            ``'kdtree'`` uses ``scipy.spatial.cKDTree`` on CPU and is more
+            memory-efficient for large point sets. Defaults is 'distance'.
+        seed : int, optional
+            Random seed for reproducibility. Default 1.
+
+        Returns
+        -------
+        np.ndarray, shape ``(M, ndim)``
+            Projected sample positions on the isosurface (and inside ``volumeName`` if set).
+        """
+        
+        return_numpy = not isinstance(seed_point, torch.Tensor)
+        
+        method = method.lower()
+        assert method in ('distance', 'kdtree'), "method must be 'distance' or 'kdtree'."
+        assert isosurface in self.isosurfaces, f"Isosurface '{isosurface}' not found."
+        
+        if method == 'kdtree':
+            try:
+                from scipy.spatial import cKDTree
+            except ImportError:
+                raise ImportError("scipy is required for method='kdtree'. Install with `pip install scipy`.")
+
+        rng = np.random.default_rng(seed)
+        td = float(target_distance)
+
+        def _project(pts, return_normals=False):
+            # accepts torch tensor or numpy; always returns torch tensor(s)
+            if not isinstance(pts, torch.Tensor):
+                pts = _tensor(pts)
+            return self.projectTo(isosurface, pts, nsteps=6, return_normals=return_normals)
+
+        def _in_vol(pts):
+            if volumeName is None:
+                return torch.ones(len(pts), dtype=torch.bool, device=curlew.device)
+            m = self.getVolume(volumeName, x=pts, to_numpy=False, transform=True)
+            return m.reshape(-1)
+
+        def _pairs(p, radius):
+            """Return (i_idx, j_idx) tensors for all pairs within radius."""
+            if method == 'distance':
+                dists = torch.cdist(p, p)
+                mask = (dists < radius) & (
+                    torch.arange(len(p), device=curlew.device).unsqueeze(1)
+                    < torch.arange(len(p), device=curlew.device).unsqueeze(0)
+                )
+                return mask.nonzero(as_tuple=True)
+            else:
+                tree = cKDTree(_numpy(p))
+                pairs = list(tree.query_pairs(radius))
+                if not pairs:
+                    empty = torch.zeros(0, dtype=torch.long, device=p.device)
+                    return empty, empty
+                pairs_t = torch.as_tensor(pairs, dtype=torch.long, device=curlew.device) # N.B. long as these are indices
+                return pairs_t[:, 0], pairs_t[:, 1]
+        
+        def _neighbour_counts(p, radius):
+            """Return (N,) tensor of neighbour counts (excluding self)."""
+            if method == 'distance':
+                return (torch.cdist(p, p) < radius).sum(dim=1) - 1
+            else:
+                p = _numpy(p)
+                tree = cKDTree(p)
+                results = tree.query_ball_tree(tree, td * 1.1)
+                counts = torch.tensor([len(r) - 1 for r in results], dtype=torch.long, device=curlew.device)
+                return _tensor(counts)
+        
+        def _nearest_dist(cands, p):
+            """Return (E,) tensor of each candidate's distance to its nearest point in p."""
+            if method == 'distance':
+                return torch.cdist(cands, p).min(dim=1).values
+            else:
+                p = _numpy(p)
+                tree = cKDTree(p)
+                dists, _ = tree.query(_numpy(cands), k=1)
+                return _tensor(dists)
+        
+        # Seed
+        seed_arr = _tensor(seed_point)
+        if seed_arr.ndim == 1:
+            seed_arr = seed_arr.reshape(1, -1)
+        
+        # project and filter seed [points]
+        p = _project(seed_arr)
+        p = p[_in_vol(seed_arr)]
+        assert len(p) > 0, (
+            f"No valid seed points inside volume '{volumeName}'."
+        )
+
+        # Main growth loop
+        no_growth_steps = 0
+        no_growth_patience = 5  # stop if no new points added for this many consecutive steps
+        for i in range(int(n_steps)):
+
+            # --- Repulsion / relaxation ------------------------------------
+            for _ in range(int(relax_substeps)):
+                p = _project(p)  # project points
+                if len(p) < 2: break
+                mask = ~_in_vol(p) # we don't move points that have drifed outside the volume (they will be removed later anyway)
+                
+                # get pairs and apply repulsion force
+                if mask.any():
+                    i_idx, j_idx = _pairs(p, td * 1.2)
+                    if len(i_idx) > 0:
+                        diff = p[i_idx] - p[j_idx]
+                        dist = diff.norm(dim=1, keepdim=True).clamp(min=1e-9)
+                        push = (td - dist) * (diff / dist) * 0.5
+                        push = push * mask.unsqueeze(1) # don't push points that have drifed outside the volume
+                        forces = torch.zeros_like(p)
+                        forces.index_add_(0, i_idx, push)
+                        forces.index_add_(0, j_idx, -push)
+                        p = p + forces
+
+            if len(p) >= max_samples: break # too many points
+            if len(p) == 0: break # weird, but possible with restrictive volume?
+            
+            # --- Growth front ----------------------------------------------
+            p, n_vecs = _project(p, return_normals=True) # project points back onto isosurface (after movements above)
+            
+            # seed new particles
+            N, ndim = p.shape
+            counts = _neighbour_counts(p, td * 1.1)
+            eligible = (counts < neighbor_cap)
+            eligible &= torch.from_numpy(rng.random(N) < growth_rate).to(curlew.device)
+            if eligible.any():
+                p_elig = p[eligible]
+                n_elig = n_vecs[eligible]
+
+                v = torch.randn(len(p_elig), ndim, device=curlew.device)
+                v = v - n_elig * (v * n_elig).sum(dim=1, keepdim=True)
+                v = v / v.norm(dim=1, keepdim=True).clamp(min=1e-9)
+                cands = p_elig + v * td
+
+                far_enough = _nearest_dist(cands, p) >= td * 0.8
+                cands = cands[far_enough]
+
+                # also reject candidates too close to each other
+                if len(cands) >= 2:
+                    cand_cand_dists = torch.cdist(cands, cands)
+                    cand_cand_dists.fill_diagonal_(float("inf"))
+                    no_cand_clash = cand_cand_dists.min(dim=1).values >= td * 0.8
+                    cands = cands[no_cand_clash]
+
+                # candidates must also be within our volume
+                no_growth_steps += 1 # (N.b. will be reset to 0 if we add new samples)
+                if len(cands) > 0:
+                    cands = _project( cands[:max_samples - len(p)] )
+                    cands = cands[_in_vol(cands)]
+                    if len(cands) > 0:
+                        no_growth_steps = 0
+                        p = torch.vstack([p, cands]) # add new samples
+                
+                if no_growth_steps >= no_growth_patience: # early stopping
+                    print(f"Finishing after {i} steps.")
+                    break
+
+        # Final projection + volume filter
+        if len(p) == 0: # only space for one sample... (hopefully this doesn't happen often!)
+            ndim = seed_point.reshape(-1).shape[0]
+            return torch.zeros((0, ndim))
+        p, n_vecs = _project(p, return_normals=True)
+        ok = _in_vol(p)
+        p = p[ok]
+        n_vecs = n_vecs[ok]
+        
+        # return requested output and format
+        if return_normals:
+            if return_numpy:
+                return _numpy(p), _numpy(n_vecs)
+            return p, n_vecs
+        if return_numpy:
+            return _numpy(p)
+        return p
 
     def loss(self):
         """
