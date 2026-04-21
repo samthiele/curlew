@@ -97,7 +97,6 @@ def _build_rotation(n, stretch=0.5):
     e2  = np.cross(n,   e1); e2 /= np.linalg.norm(e2)
     return np.array([e1, e2, n/stretch])
 
-
 def _broadcast_param_1d(param, n: int, name: str) -> np.ndarray:
     """Scalar or length-n float array → (n,) float64."""
     a = np.asarray(param, dtype=np.float64)
@@ -106,7 +105,6 @@ def _broadcast_param_1d(param, n: int, name: str) -> np.ndarray:
     if a.shape == (n,):
         return a
     raise ValueError(f"{name} must be a scalar or shape ({n},); got {a.shape}")
-
 
 def _single_eshelby_tensors(
     position,
@@ -251,10 +249,6 @@ class EshelbyField( BaseAF ):
         Default False.
     max_ram_mb : float
         Receiver chunk budget for ``displacement`` / ``evaluate``.
-    clamp_fault_plane : bool, optional
-        If True, each source's contribution is scaled so the displaced point does not
-        cross that source's mid-plane (plane through the centroid perpendicular to
-        ``normals``). Applied per source before weighted summation. Default False.
 
     Notes
     -----
@@ -291,7 +285,6 @@ class EshelbyField( BaseAF ):
         weights=None,
         learnable_weights=False,
         max_ram_mb=2048,
-        clamp_fault_plane=False,
     ):
         positions = np.asarray(positions, dtype=np.float64)
         if positions.ndim != 2 or positions.shape[1] != 3:
@@ -319,7 +312,6 @@ class EshelbyField( BaseAF ):
 
         self.n_sources = n
         self.max_ram_mb = max_ram_mb
-        self._clamp_fault_plane = bool(clamp_fault_plane)
 
         R_list, RT_list, pos_list, sig_list, int_list = [], [], [], [], []
         n_hat_list = []
@@ -428,15 +420,10 @@ class EshelbyField( BaseAF ):
         return u * w.unsqueeze(-1)
 
     # implement the functions BaseAF requires
-    def evaluate(self, x, max_ram_mb=2048, k=None, clamp_fault_plane=None):
+    def evaluate(self, x, max_ram_mb=2048, k=None ):
         """
         Like ``displacement``, but only evaluates ``displacement`` on points where
         ``influence_mask`` is True; other points receive zero displacement.
-
-        Parameters
-        ----------
-        clamp_fault_plane : bool, optional
-            Passed to ``displacement`` for active points (``None`` → field default).
         """
         return_numpy = not isinstance(x, torch.Tensor)
         x_t = _tensor(x)
@@ -454,17 +441,14 @@ class EshelbyField( BaseAF ):
         u_flat = torch.zeros_like(flat)
         if bool(mflat.any()):
             u_flat[mflat] = self.displacement(
-                flat[mflat],
-                max_ram_mb=max_ram_mb,
-                clamp_fault_plane=clamp_fault_plane,
-            )
+                flat[mflat], max_ram_mb=max_ram_mb            )
         u_out = u_flat.reshape(*batch_shape, 3)
         if squeeze:
             u_out = u_out.squeeze(0)
         return _numpy(u_out) if return_numpy else u_out
 
     # this is where the magic happns!
-    def displacement(self, x, max_ram_mb=2048, clamp_fault_plane=None):
+    def displacement(self, x, max_ram_mb=2048):
         """
         Evaluate the total displacement at m receiver positions.
 
@@ -478,17 +462,11 @@ class EshelbyField( BaseAF ):
                 B = max_ram_mb × 1024² / (n_sources × 3 × bytes_per_element)
             Clamped to [1, m] so the value is always valid regardless of
             how small or large max_ram_mb is.  Default 2048 MB.
-        clamp_fault_plane : bool, optional
-            If True/False, overrides ``initField(..., clamp_fault_plane=...)``.
 
         Returns
         -------
         u : same type as x, matching shape
         """
-        do_clamp = (
-            self._clamp_fault_plane if clamp_fault_plane is None else bool(clamp_fault_plane)
-        )
-
         return_numpy = not isinstance(x, torch.Tensor)
         x = _tensor(x)
 
@@ -508,6 +486,7 @@ class EshelbyField( BaseAF ):
         batch_size = max(1, min(batch_size, m))
         u_out = torch.zeros_like(x_flat)
 
+        self._xi = np.zeros(len(x_flat))
         for start in range(0, m, batch_size):
             end = min(start + batch_size, m)
             xb = x_flat[start:end]
@@ -515,31 +494,23 @@ class EshelbyField( BaseAF ):
             x_loc = torch.einsum('nij,nbj->nbi', self._R, x_rel)
 
             rho2 = x_loc[..., 0]**2 + x_loc[..., 1]**2
-            inside = (
-                rho2 / self._r2.unsqueeze(1) +
-                x_loc[..., 2]**2 / self._t2.unsqueeze(1)
-            ) <= 1.
-            boundary = ~inside & ((
-                rho2 / self._r2.unsqueeze(1) + x_loc[..., 2]**2
-            ) <= 2. ) # boundary of interior and exterior
-            
-            self.inside = inside
-            self.boundary = boundary
-            
+            xi = (rho2 / self._r2.unsqueeze(1) +
+                  x_loc[..., 2]**2 / self._t2.unsqueeze(1)) # implicit function of ellipsoid
+            # Store a per-receiver diagnostic value for debugging/plotting.
+            # xi has shape (n_sources, B); collapse to (B,) to match self._xi.
+            self._xi[start:end] = xi.min(dim=0).values.detach().cpu().numpy()
+            inside = xi <= 1.
+                        
             grad_phi_i = self._grad_phi_int(x_loc)
             grad_phi_e = self._grad_phi_ext(x_loc, rho2)
-            inside = inside.unsqueeze(-1).expand_as(grad_phi_i)
-            boundary = boundary.unsqueeze(-1).expand_as(grad_phi_e)
+            inside = inside.unsqueeze(-1).expand_as(grad_phi_i) # add extra dims for vector broadcasting
             grad_phi = torch.where(inside, grad_phi_i, grad_phi_e)
-            grad_phi = torch.where(boundary, torch.zeros_like(grad_phi), grad_phi)
             
             u_loc = torch.einsum('nbj,nij->nbi', grad_phi, self._sig_scaled)
             u_global = torch.einsum('nij,nbj->nbi', self._RT, u_loc)
-            if do_clamp:
-                u_global = self._fault_plane_clamp_batched(x_rel, u_global)
             u_chunk = (u_global * self.weights[:, None, None]).sum(dim=0)
             u_out[start:end] = u_chunk
-
+            
         u_out = u_out.reshape(*batch_shape, 3)
         if squeeze:
             u_out = u_out.squeeze(0)
