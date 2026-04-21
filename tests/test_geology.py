@@ -701,6 +701,7 @@ def test_isosurfaces_and_volumes():
         input_dim=2,
         origin=np.array([0.0, 0.0]),
         axes=np.array([60.0, 30.0]),
+        decay=True, # greater values inside our ellipse
     )
     G.addIsosurface("ellipse_boundary", seed=np.array([60.0, 0.0]), field="ellipse")
     # Linear isosurface at y=0
