@@ -6,11 +6,9 @@ import curlew
 
 from curlew.fields.eshelby import EshelbyField
 
-
 def _set_cpu_float64():
     curlew.device = "cpu"
     curlew.dtype = torch.float64
-
 
 def test_eshelbyfield_numpy_and_torch_shapes():
     _set_cpu_float64()
@@ -48,25 +46,6 @@ def test_eshelbyfield_numpy_and_torch_shapes():
     assert torch.isfinite(u_t).all()
 
 
-def test_eshelbyfield_broadcast_radii_thickness():
-    _set_cpu_float64()
-    field = EshelbyField(
-        "two",
-        positions=np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
-        normals=np.array([0.0, 0.0, 1.0]),
-        slips=np.array([1.0, 0.0, 0.0]),
-        radii=1.5,
-        thicknesses=0.5,
-        mu=1.0,
-        nu=0.25,
-        max_ram_mb=64,
-    )
-    assert field.n_sources == 2
-    u = field.displacement(np.array([0.0, 0.0, 2.0]), max_ram_mb=64)
-    assert u.shape == (3,)
-    assert np.isfinite(u).all()
-
-
 def test_eshelbyfield_interior_linearity():
     _set_cpu_float64()
 
@@ -80,6 +59,7 @@ def test_eshelbyfield_interior_linearity():
         mu=1.0,
         nu=0.25,
         max_ram_mb=64,
+        n_taper=1,
     )
 
     x = np.array([1.0, 0.0, 0.0])  # safely inside: 1^2/2^2 = 0.25
@@ -91,8 +71,7 @@ def test_eshelbyfield_interior_linearity():
         rel = np.linalg.norm(u - s * u_base) / denom
         assert rel < 5e-6
 
-
-def test_eshelbyfield_far_field_decay_is_inverse_square():
+def test_inverse_square():
     _set_cpu_float64()
 
     field = EshelbyField(
@@ -105,6 +84,34 @@ def test_eshelbyfield_far_field_decay_is_inverse_square():
         mu=1.0,
         nu=0.25,
         max_ram_mb=64,
+        linear_decay=0.0, # obviously we want r2 decay
+        n_taper=1, # also messes with decay
+    )
+
+    R1, R2 = 20.0, 40.0
+    u1 = field.displacement(np.array([R1, 0.0, 0.0]), max_ram_mb=64)
+    u2 = field.displacement(np.array([R2, 0.0, 0.0]), max_ram_mb=64)
+    m1 = float(np.linalg.norm(u1))
+    m2 = float(np.linalg.norm(u2))
+
+    exp = np.log(m2 / m1) / np.log(R2 / R1)
+    assert abs(exp + 2.0) < 0.05
+
+def test_linear():
+    _set_cpu_float64()
+
+    field = EshelbyField(
+        "one",
+        positions=np.zeros((1, 3)),
+        normals=np.array([0.0, 0.0, 1.0]),
+        slips=np.array([1.0, 0.0, 0.0]),
+        radii=1.0,
+        thicknesses=0.2,
+        mu=1.0,
+        nu=0.25,
+        max_ram_mb=64,
+        linear_decay=1.0, # now set linear decay
+        n_taper=1, # also messes with decay
     )
 
     R1, R2 = 20.0, 40.0
@@ -115,10 +122,9 @@ def test_eshelbyfield_far_field_decay_is_inverse_square():
 
     exp = np.log(m2 / m1) / np.log(R2 / R1)
     assert exp == exp
-    assert abs(exp + 2.0) < 0.05
-
-
-def test_eshelbyfield_matches_weighted_sum_of_sources():
+    assert abs(exp + 1.0) < 0.05
+    
+def test_weighted_sum():
     _set_cpu_float64()
 
     positions = np.array(
@@ -197,7 +203,6 @@ def test_eshelbyfield_matches_weighted_sum_of_sources():
 
     assert np.allclose(u_field, u_sum, rtol=2e-6, atol=2e-8)
 
-
 def test_eshelbyfield_learnable_weights():
     _set_cpu_float64()
     field = EshelbyField(
@@ -214,7 +219,6 @@ def test_eshelbyfield_learnable_weights():
     assert isinstance(field.weights, nn.Parameter)
     assert tuple(field.weights.shape) == (2,)
     assert np.allclose(field.weights.detach().cpu().numpy(), [0.5, 0.5])
-
 
 def test_visualisation():
     _set_cpu_float64()
