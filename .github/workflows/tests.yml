@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.11"]
+        python-version: ["3.11"]
     #container:
     #  image: pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime # use pytorch + cuda image
     steps:
