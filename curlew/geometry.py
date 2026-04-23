@@ -392,13 +392,13 @@ class Grid(object):
           # build interpolators that convert indices to positions
           from scipy.interpolate import interp1d
           for i,vix in enumerate(contours):
-              ix = [ interp1d(np.arange(self.shape[i]), self.axes[i]) for i in range(len(self.shape)) ]
+              ix = [ interp1d(np.arange(self.shape[i]), self.axes[i], fill_value='extrapolate') for i in range(len(self.shape)) ]
               contours[i] = np.vstack( [ix[i]( vix[:, i] ) for i in range(len(self.shape))] ).T
 
-              if transform:
-                  for i,c in enumerate(contours):
-                    points = np.hstack([c, np.ones( (len(c),1) )]) # concatentate additional dimension
-                    contours[i] = (points @ self.matrix.T)[:,:-1] # apply and drop fake dimension
+          if transform:
+              for i,c in enumerate(contours):
+                points = np.hstack([c, np.ones( (len(c),1) )]) # concatentate additional dimension
+                contours[i] = (points @ self.matrix.T)[:,:-1] # apply and drop fake dimension
 
           # TODO; mask NaN areas from 2D contours
 
