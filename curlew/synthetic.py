@@ -224,7 +224,7 @@ def hutton( shape=(1500,1000), **kwargs ):
 
     return C, M
 
-def playfair( shape=(1500,1000), width=50, **kwargs ):
+def playfair( shape=(1500,1000), width=50, addFault=False, **kwargs ):
 
     """
     Return a synthetic model with a layer-cake stratigraphy cut
@@ -236,6 +236,8 @@ def playfair( shape=(1500,1000), width=50, **kwargs ):
         The width and height of the generated data. 
     width : float
         The half-width of the added dyke.
+    addFault : bool
+        If True, add a fault crosscutting the dykes and stratigraphy. Default is False. 
 
     Keywords
     ---------
@@ -258,7 +260,13 @@ def playfair( shape=(1500,1000), width=50, **kwargs ):
     for y in np.linspace(0, shape[1], 5): # generate 5 contacts
         s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
     
-    M = GeoModel( [s0, s1], grid=G, name='playfair' )
+    if addFault:
+        s2 = fault( 's2', 
+           C=LinearField( 'f2', input_dim=2, origin=(1050,500), gradient=(-np.cos( np.deg2rad(35) ), np.sin( np.deg2rad(35) ))  ),
+           offset=100, shortening = [0,-1] ) # extensional faults
+        M = GeoModel( [s0, s1, s2], grid=G, name='newcastle' )
+    else:
+        M = GeoModel( [s0, s1], grid=G, name='playfair' )
     s = M.predict(G)
     
     kwargs['pval'] = kwargs.get('pval', 1.0) # change default to sample all value constraints
@@ -267,7 +275,7 @@ def playfair( shape=(1500,1000), width=50, **kwargs ):
 
     return [C[1], C1[0], C[-1]], M
 
-def walker( shape=(1500,1000), width=[60,50,40,50,40], pos=[0,100,200,400,600], **kwargs ):
+def walker( shape=(1500,1000), width=[60,50,40,50,40], pos=[0,100,200,400,600], addFault=True, **kwargs ):
 
     """
     Return a synthetic model with a layer-cake stratigraphy cut
@@ -281,6 +289,8 @@ def walker( shape=(1500,1000), width=[60,50,40,50,40], pos=[0,100,200,400,600], 
         A list specifying the dyke widths.
     pos : float
         A list specifying the dyke positions in the x-axis. Must have the same length as width.
+    addFault : bool
+        If True, add a fault crosscutting the dykes and stratigraphy. Default is False.
     Keywords
     ---------
         All keywords are passed to `curlew.data.sample(...)`
@@ -303,7 +313,13 @@ def walker( shape=(1500,1000), width=[60,50,40,50,40], pos=[0,100,200,400,600], 
     for y in np.linspace(0, shape[1], 5): # generate 5 contacts
         s0.addIsosurface( 'i'+str(int(y)), seed=np.array([shape[0]/2, y]) )
     
-    M = GeoModel( [s0, s1], grid=G, name='playfair' )
+    if addFault:
+        s2 = fault( 's2', 
+           C=LinearField( 'f2', input_dim=2, origin=(1050,500), gradient=(-np.cos( np.deg2rad(35) ), np.sin( np.deg2rad(35) ))  ),
+           offset=100, shortening = [0,-1] ) # extensional faults
+        M = GeoModel( [s0, s1, s2], grid=G, name='newcastle' )
+    else:
+        M = GeoModel( [s0, s1], grid=G, name='walker' )
     s = M.predict(G)
     
     kwargs['pval'] = kwargs.get('pval', 1.0) # change default to sample all value constraints

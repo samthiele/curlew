@@ -1274,20 +1274,24 @@ class GeoField( object ):
             for _ in range(int(relax_substeps)):
                 p = _project(p)  # project points
                 if len(p) < 2: break
-                mask = ~_in_vol(p) # we don't move points that have drifed outside the volume (they will be removed later anyway)
+                out_of_vol = ~_in_vol(p) # points that drifted outside the volume (they'll be removed later anyway)
                 
                 # get pairs and apply repulsion force
-                if mask.any():
-                    i_idx, j_idx = _pairs(p, td * 1.2)
-                    if len(i_idx) > 0:
-                        diff = p[i_idx] - p[j_idx]
-                        dist = diff.norm(dim=1, keepdim=True).clamp(min=1e-9)
-                        push = (td - dist) * (diff / dist) * 0.5
-                        push = push * mask.unsqueeze(1) # don't push points that have drifed outside the volume
-                        forces = torch.zeros_like(p)
-                        forces.index_add_(0, i_idx, push)
-                        forces.index_add_(0, j_idx, -push)
-                        p = p + forces
+                i_idx, j_idx = _pairs(p, td * 1.2)
+                if len(i_idx) > 0:
+                    diff = p[i_idx] - p[j_idx]
+                    dist = diff.norm(dim=1, keepdim=True).clamp(min=1e-9)
+                    push = (td - dist) * (diff / dist) * 0.5
+
+                    # `push` is per-edge (E, ndim) while `out_of_vol` is per-point (N,).
+                    # Freeze only the endpoints that are outside the volume.
+                    mi = (~out_of_vol[i_idx]).unsqueeze(1)
+                    mj = (~out_of_vol[j_idx]).unsqueeze(1)
+
+                    forces = torch.zeros_like(p)
+                    forces.index_add_(0, i_idx, push * mi)
+                    forces.index_add_(0, j_idx, -push * mj)
+                    p = p + forces
 
             if len(p) >= max_samples: break # too many points
             if len(p) == 0: break # weird, but possible with restrictive volume?

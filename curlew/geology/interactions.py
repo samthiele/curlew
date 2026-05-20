@@ -31,7 +31,7 @@ class Overprint(LearnableBase):
     Base class for combining predictions from two consecutive scalar fields and "overprinting" some older
     scalar values to form unconformities or intrusions.
     """
-    def __init__(self, threshold : Union[str, list] = 0, mode='above'):
+    def __init__(self, threshold : Union[str, list] = 0, mode : str = 'above', defaultDomain : str ='child'):
         """
         Create a new "overprint" object for applying overprinting stratigraphic (e.g., unconformities) and
         igneous (e.g., dykes, intrusions) events.
@@ -49,11 +49,21 @@ class Overprint(LearnableBase):
                 - `"below"`: replace all regions less than than the provided threshold). Useful for e.g., intrusions.
                 - `"in"`: replace all regions between the provided thresholds (must be a tuple containing two values). Used for e.g., dykes.
                 - `"out"`: replace all regions outside the provided thresholds (must be a tuple containing two values). Not sure why this would be used.
+        
+        defaultDomain : str
+            The default domain to use if no domain is provided. Options are:
+                - `"child"`: use the child field as the domain. This is the default as for most
+                   unconformably surfaces the unconformity base is parallel to the overlying bedding. 
+                - `"parent"`: use the parent field to define the domain boundary (erosional surface). This can
+                   be useful if the erosional surface is parallel to the older bedding and younger units onlap onto this.
+            Note that for domain boundaries (i.e. GeoField instances with a defined `parent2` field), this parameter will
+            have no effect as the domain boundary is defined by a separate (third) field. 
         """
         super().__init__()
         self.threshold = threshold
         self.mode = mode
-
+        self.defaultDomain = defaultDomain.lower()
+        
     def apply(self, parent, child, domain=None ):
         """
         Combine two scalar fields, keeping the parent field where the child field is below a threshold.
@@ -77,7 +87,10 @@ class Overprint(LearnableBase):
             An updated array of shape (N, 2) containing the updated scalar values and event IDs.
         """
         assert self.thresh is not None, "`self.thresh` must be defined (by e.g. evaluating an isosurface) before calling `overprint`."
-        if domain is None: domain = child.scalar # child field determines the domain
+        if domain is None: 
+            if self.defaultDomain == 'child':domain = child.scalar # child field determines the domain
+            elif self.defaultDomain == 'parent': domain = parent.scalar
+            else: raise ValueError(f"Invalid default domain: {self.defaultDomain}. Should be 'child' or 'parent'.")
 
         if isinstance(self.thresh, list):
             thresh = float(self.thresh[0]) if len(self.thresh) == 1 else self.thresh
