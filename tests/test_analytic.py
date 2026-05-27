@@ -3,11 +3,11 @@ import torch
 
 def test_EllipsoidalField():
     from curlew.fields.analytical import EllipsoidalField
-    from curlew.geometry import grid
+    from curlew.geometry import Grid
 
     # Default: distance-like mode (unit circle)
     for dim in [2, 3]:
-        G = grid([12] * dim, step=[2.0] * dim, center=[0.0] * dim)
+        G = Grid([12] * dim, step=[2.0] * dim, center=[0.0] * dim)
         x = G.coords()
         field = EllipsoidalField(name="ell", input_dim=dim)
         out = field.forward(torch.tensor(x, dtype=torch.float32)).squeeze()
@@ -43,7 +43,7 @@ def test_EllipsoidalField():
     origin = np.array([10.0, 20.0])
     axes = np.array([5.0, 2.0])  # semi-axes
     E = EllipsoidalField(name="e2", input_dim=2, origin=origin, axes=axes, decay=True)
-    G2 = grid([20, 20], step=[1.0, 1.0], center=origin)
+    G2 = Grid([20, 20], step=[1.0, 1.0], center=origin)
     x2 = G2.coords()
     out2 = E.forward(torch.tensor(x2, dtype=torch.float32)).squeeze()
     assert out2.shape == (x2.shape[0],)
@@ -61,13 +61,12 @@ def test_EllipsoidalField():
     E_rot = EllipsoidalField(name="er", input_dim=2, origin=np.zeros(2), axes=np.ones(2), directions=directions, decay=True)
     assert abs(E_rot.forward(torch.tensor(np.zeros((1, 2)), dtype=torch.float32)).squeeze().item() - 1.0) < 1e-5
 
-
 def test_ALF():
     from curlew.fields.analytical import LinearField
-    from curlew.geometry import grid
+    from curlew.geometry import Grid
     
     for i in [2,3]:
-        G = grid( [10 for _i in range(i)],
+        G = Grid( [10 for _i in range(i)],
                   step = [2 for _i in range(i)] )
         x = G.coords()
         s0 = LinearField(name='f0', input_dim=i, gradient=np.ones(i), normalise=False )
@@ -87,15 +86,55 @@ def test_ALF():
             field = s0.forward( torch.tensor(x) ).squeeze()
             assert (field.numpy() == 2*(x[:,j] + 1)).all()
 
+def test_learnable():
+    import torch
+    from curlew import CSet, HSet
+    from curlew.fields.analytical import LinearField
+
+    true_origin = np.array([1.0, 2.0])
+    true_grad = np.array([0.5, -0.3])
+    rng = np.random.default_rng(0)
+    pts = rng.uniform(-5, 5, size=(64, 2))
+    vals = np.sum((pts - true_origin) * true_grad, axis=-1)
+
+    field = LinearField(
+        name='learnable_plane',
+        input_dim=2,
+        H=HSet().zero(value_loss=1.0),
+        origin=np.zeros(2),
+        gradient=np.array([1.0, 0.0]),
+        learnable=True,
+        normalise=False,
+    )
+    field.bind(CSet(
+        vp=np.vstack([pts, true_origin.reshape(1, -1)]),
+        vv=np.hstack([vals, 0.0]),
+    ))
+
+    assert isinstance(field.origin, torch.nn.Parameter)
+    assert isinstance(field.grad, torch.nn.Parameter)
+
+    loss1, _ = field.fit(epochs=1, vb=False, early_stop=None)
+    loss2, pebble2 = field.fit(epochs=300, vb=False, early_stop=None)
+
+    pred = field(torch.tensor(pts, dtype=torch.float64)).squeeze().detach().numpy()
+    assert loss2 < loss1
+    assert pebble2.total() < 1e-3
+    assert np.mean((pred - vals) ** 2) < 1e-4
+    assert np.allclose(field.grad.detach().cpu().numpy(), true_grad, atol=1e-3)
+    # origin is only defined up to shift perpendicular to grad; o·g fixes the plane
+    fitted_o = field.origin.detach().cpu().numpy()
+    assert np.allclose(fitted_o @ true_grad, true_origin @ true_grad, atol=1e-3)
+
 def test_multi():
     from curlew import GeoModel
     from curlew.geology import strati, fault, sheet
-    from curlew.geometry import grid
+    from curlew.geometry import Grid
     from curlew.fields.analytical import LinearField
 
     # define a grid covering our model domain
     dims = (1000,500)
-    G = grid( dims, step=(1,1), center=(dims[0]/2,dims[1]/2) ) 
+    G = Grid( dims, step=(1,1), center=(dims[0]/2,dims[1]/2) ) 
     cxy = G.coords()
     
     # create a model
@@ -135,9 +174,10 @@ def test_multi():
         assert k in g.structureLookup
     
     # check the evaluated scalar values match 
-    for sid,n in g.structureLookup.items():
+    for sid, ename in g.structureLookup.items():
+        fname = M.eidLookup[sid].getField(0).name
         mask = (g.structureID == sid)
-        assert np.percentile( np.abs( g.scalar[mask] - g.fields[n][mask] ), 99) < 1e-6 # almost all values should match
+        assert np.percentile( np.abs( g.scalar[mask] - g.fields[fname][mask] ), 99) < 1e-6
 
     # check stackValues function
     gs = g.stackValues( mn=0, mx=1 )
@@ -198,9 +238,9 @@ def test_fold():
     M = GeoModel( [s0, s1, s2, s3, s4, s5 ] )
 
     # evaluate it. Not sure how to check if it "worked"...
-    from curlew.geometry import grid
+    from curlew.geometry import Grid
     dims = (1000,500)
-    G = grid( dims, step=(1,1), center=(dims[0]/2,dims[1]/2) ) 
+    G = Grid( dims, step=(1,1), center=(dims[0]/2,dims[1]/2) ) 
     geo = M.predict(G)
     assert np.isfinite(geo.scalar).all() # scalar values should all be finite
     assert len( np.unique( geo.lithoID ) ) > 9 # should have lots of layers

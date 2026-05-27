@@ -74,14 +74,14 @@ class ConstantProperty(PropertyModelBase):
             for k, v in propDict.items():
                 self.propDict[k] = _tensor(v, dt=curlew.dtype, dev=curlew.device)
     
-    def predict(self, geode: curlew.geology.geofield.Geode) -> torch.Tensor:
+    def predict(self, geode: curlew.core.Geode):
         """
         Using the Geode, predict the property values based on the lithoID. Return an updated
         Geode with property values and names.
         
         Parameters
         ----------
-        geode : curlew.geology.geofield.Geode
+        geode : curlew.core.Geode
             A Geode object containing scalar field values and lithoIDs.
         
         Returns
@@ -160,7 +160,7 @@ class SoftConstantProperty(ConstantProperty):
         )
         self.soft_temp = soft_temp
 
-    def predict(self, geode: "curlew.geology.geofield.Geode"):
+    def predict(self, geode: curlew.core.Geode):
         """
         Predict property values using differentiable sigmoid domain blending.
 
@@ -321,7 +321,7 @@ class MLPProperty(PropertyModelBase, nn.Module):
     # Prediction
     # ──────────────────────────────────────────────────────────────────────
 
-    def predict(self, geode: "curlew.geology.geofield.Geode") -> "curlew.geology.geofield.Geode":
+    def predict(self, geode: curlew.core.Geode):
         """
         Predict property values from the scalar field stored in a Geode.
 

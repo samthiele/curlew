@@ -127,14 +127,13 @@ def test_add_cset_2d_and_3d(napari_viewer):
     gop = _xyz(2, nd)
     gov = np.ones_like(gop) * 0.02
 
-    # inequalities: one '=', one '>'
-    p1_eq = _xyz(2, nd)
-    p2_eq = _xyz(2, nd) + 0.1
+    # inequality and equality traces
     p1_gt = _xyz(2, nd) + 0.2
     p2_gt = _xyz(2, nd) - 0.2
-    iq = (2, [(p1_eq, p2_eq, "="), (p1_gt, p2_gt, ">")])
+    iq = (2, [(p1_gt, p2_gt, ">")])
+    eq = [_xyz(2, nd), _xyz(2, nd) + 0.1]
 
-    C = CSet(vp=vp, vv=vv, gp=gp, gv=gv, gop=gop, gov=gov, iq=iq)
+    C = CSet(vp=vp, vv=vv, gp=gp, gv=gv, gop=gop, gov=gov, iq=iq, eq=eq)
     layers = napari_viewer.addCSet(
         "constraints",
         C,

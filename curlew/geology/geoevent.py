@@ -6,7 +6,7 @@ events such as faults and sheet intrusions.
 
 import curlew
 from curlew import _tensor, _numpy
-from curlew.core import Geode
+from curlew.core import Geode, Pebble
 from curlew.fields import BaseNF
 from curlew.geology.interactions import Overprint, OffsetBase
 from curlew.geometry import Grid
@@ -20,6 +20,12 @@ import copy
 from typing import Optional, List, Tuple, Union
 ArrayLike = Union[np.ndarray, "torch.Tensor"]
 
+
+def _field_key(fobj, fallback):
+    """Return the storage key used in :attr:`Geode.fields` for a sub-field object."""
+    return fobj.name if hasattr(fobj, "name") else fallback
+
+
 def apply_child_undeform(x, end, sf):
     """
     Placeholder function to avoid Lambda functions. This needs to be dynamic as we may not know yet
@@ -29,11 +35,19 @@ def apply_child_undeform(x, end, sf):
     if sf == end:
         return x  # reached the end of the line; no need to transform anymore
     if sf.child is not None:
-        return sf.child.undeform(x)
-    else:
-        return x
+        x = sf.child.undeform(x)
+        if isinstance(x, Geode):
+            src_key = "model" if "model" in x.x else x.crs
+            if src_key and src_key in x.x:
+                pts = x.x[src_key]
+                if isinstance(pts, torch.Tensor):
+                    pts = pts.clone()
+                else:
+                    pts = np.array(pts, copy=True)
+                x.set_coords(sf.name, pts)
+    return x
 
-class GeoField( object ):
+class GeoEvent( object ):
     """
     A geological (implicit) field and associated objects that deterimine how it interacts with older and younger fields. Typically
     each geological field represents a specific event (e.g., faulting, intrusion, deposition, etc.) that combine to form a geological
@@ -68,7 +82,7 @@ class GeoField( object ):
             property (e.g., density, mineralogy, etc.). See `curlew.geology.property` for details, including implementations
             of constant and learnable forward models. If None, property predictions will not be computed.
         eid : int
-            A unique integer denoting the ID of this GeoField (and the associated geological event). If -1 (default), this will 
+            A unique integer denoting the ID of this GeoEvent (and the associated geological event). If -1 (default), this will 
             be updated when fields are combined into a GeoModel.
         anchors : list
             Optional list of dicts defining anchors to add to the added field. Anchors will be added by calling: `self.addAnchor(**argsD)` for each args in this list. 
@@ -82,6 +96,7 @@ class GeoField( object ):
         """
         self.name = name # name of this geological field (and, typically, the corresponding underlying neural or analytical field).
         self.eid = eid # position of this geological field in the event sequence
+        self.model = None # parent GeoModel, set when combined into a GeoModel. Can give useful global context if needed. 
         self.parent = None # older geological event; used when chaining multiple geological fields
         self.parent2 = None # a second older geological eveint; defined if this geological field represents a domain boundary.
         self.child = None # link to the next-youngest geological event
@@ -96,7 +111,7 @@ class GeoField( object ):
         self.anchors = {} # named anchor points in modern-day coordinates (paleo positions via getAnchor)
         self.volumes = {} # named boolean volumes (boolean functional domains; evaluated via getVolume)
         self.llookup = None # this will be defined if lithology IDs have been defined
-                            # (when GeoFields are combined into a GeoModel).
+                            # (when GeoEvents are combined into a GeoModel).
 
         # build underlying field
         if 'field' in kwargs:
@@ -128,7 +143,7 @@ class GeoField( object ):
         
     def addField(self, fieldName: str, type: BaseNF = None, anchors=[], isosurfaces=[], **kwargs):
         """
-        Add an additional underlying scalar field to this GeoField.
+        Add an additional underlying scalar field to this GeoEvent.
 
         Parameters
         ----------
@@ -168,6 +183,8 @@ class GeoField( object ):
         self.field.append(new_field)
         if not isinstance(new_field, float) and not isinstance(new_field, int): # not sure why you would do this, but hey... 
             new_field.transform = functools.partial(apply_child_undeform, sf=self)
+            if self.model is not None:
+                new_field.model = self.model
 
         # Attach anchors / isosurfaces for this underlying field during construction
         for anchor in anchors:
@@ -184,15 +201,9 @@ class GeoField( object ):
         if isinstance(self.field, list): return self.field
         else: return [self.field]
 
-    def getField(self, field=0) -> int:
-        """
-        Return a field associated to this GeoField object by index or name.
-
-        Parameters
-        ----------
-        field : int | str
-            If int, treated as list index. If str, matched against each underlying field's `name`.
-        """
+    # TODO - override the [ ] operator so that fields can be indexed by name
+    def __getitem__(self, field):
+        """Return a field belonging to this GeoEvent by name (str) or index (int). See `self.getField` for further details."""
         fields = self._field_list()
         if isinstance(field, int):
             return fields[field] # easy!
@@ -204,19 +215,19 @@ class GeoField( object ):
                 f"Unknown field '{field}'. Known: {[f.name for f in fields if hasattr(f,'name')]}"
             )
         raise TypeError("field must be an int index or a str field name.")
-
-    def copy(self):
-        """
-        Create a copy of this GeologicalField object for e.g., incorporation into a different model. Note that this will unlink any
-        parent, parent2 and child relations.
-        """
-        out = copy.deepcopy(self)
-        out.parent = None
-        out.parent2 = None
-        out.child = None
-        return out
     
-    def fit(self, epochs, cache=True, faultBuffer=0, **kwargs):
+    def getField(self, field=0) -> int:
+        """
+        Return a field associated to this GeoEvent object by index or name.
+
+        Parameters
+        ----------
+        field : int | str
+            If int, treated as list index. If str, matched against each underlying field's `name`.
+        """
+        return self[field]
+
+    def fit(self, epochs, cache=True, **kwargs):
         """
         Utility function for training fields in isolation. 
 
@@ -228,18 +239,13 @@ class GeoField( object ):
             If True, displacements applied by younger GeologicalField instances (linked to this one through `self.child`) will 
             be pre-computed to speed up training (by avoiding repeated evaluations of younger fields that will
             not change).
-        faultBuffer : int | optional
-            If greater that zero, constraints within this distance of younger faults will be removed (as these can 
-            often be reconstructed to misleading positions and are very sensitive to interpolation errors in younger
-            fields).
+        
         Keywords
         ----------
         batch_size : int
             The size of the batches used when retro-deforming the passed grid (to save RAM). Default is 50000.
         
         All other keywords are passed to `curlew.fields.NF.fit(...)`. These include:
-        learning_rate : float, optional
-            Reset eachGeologicalField's optimiser to the specified learning rate before training.
         best : bool, optional
             After training set neural field weights to the best loss.
         vb : bool, optional
@@ -252,7 +258,7 @@ class GeoField( object ):
         details : dict
             A more detailed breakdown of the final loss. 
             
-        If this GeoField has multiple fittable underlying fields, a list of these losses and details will be returned.
+        If this GeoEvent has multiple fittable underlying fields, a list of these losses and details will be returned.
         """
         fields = self._field_list()
         outList = []
@@ -264,28 +270,11 @@ class GeoField( object ):
             C = field.C 
             assert C is not None, f"Field '{field.name}' has no constraints."
             
-            
             # of evaluations of displacement fields
             # that will not change
             C0 = C # no need to reconstruct in many cases
             if cache and self.child is not None:
-                #if faultBuffer > 0:
-                    #from curlew.geology.interactions import FaultOffset
-                    #def buffer( arr ): # quick function for masking points on faults
-                    #    f = self.child
-                    #    mask = np.full( len(arr), True )
-                    #    while f is not None:
-                    #        if ((f.deformation is not None) and isinstance(f.deformation, FaultOffset)): # faults
-                    #            b = f.buffer( arr, f.deformation.contact, faultBuffer )
-                    #        elif (f.parent2 is not None):
-                    #            b = f.buffer( arr, f.bound, faultBuffer ) # domain boundary
-                    #        mask[ b ] = False # identify and remove points within buffer distance of a fault 
-                    #        f = f.child
-                    #    return mask
-                    #C0.filter(buffer)
-
-                # retro-deform other constraints
-                C0 = C.numpy().transform( self.child.undeform )
+                C0 = C.numpy().transform( self.child.undeform ) # retro-deform other constraints
             
             # inject paleo-coordinate anchors so the field can use them during training if needed
             for name, anchor in self.anchors.items():
@@ -320,7 +309,7 @@ class GeoField( object ):
     
     def forward(self, x: torch.Tensor, undef=True, field=0) -> torch.Tensor:
         """
-        Call the scalar field wrapped by this GeoField instance and return the
+        Call the scalar field wrapped by this GeoEvent instance and return the
         result in a `curlew.core.Geode` instance.
 
         Parameters
@@ -336,28 +325,45 @@ class GeoField( object ):
             A Geode object containing `x` (the positions that were evaluated) and `scalar` (the resulting values).
         """    
         fobj = self.getField(field)
+        fname = _field_key(fobj, self.name)
+        primary = field == 0
+        if not primary and isinstance(field, str):
+            f0 = self._field_list()[0]
+            primary = hasattr(f0, "name") and f0.name == field
 
         # constant field
-        if isinstance(fobj, float) or isinstance(fobj, int): 
+        if isinstance(fobj, float) or isinstance(fobj, int):
             if isinstance(x, Geode):
-                value = x
-                value.scalar = torch.full((len(x.x),), float(fobj), device=curlew.device, dtype=curlew.dtype)
+                x.fields[fname] = torch.full((len(x),), float(fobj), device=curlew.device, dtype=curlew.dtype)
+                if primary:
+                    x.scalar = x.fields[fname]
+                return x
+            return torch.full((len(x), 1), float(fobj), device=curlew.device, dtype=curlew.dtype)
+
+        # inject paleo-coordinate anchors as parameters so the field can use them if needed
+        for aname, anchor in self.anchors.items():
+            if isinstance(anchor, tuple) and (self.getField(anchor[0]) != fobj):
+                continue # ignore anchors associated to other fields
+            pos, direction = self.getAnchor(aname, to_numpy=False)
+            setattr(fobj, aname, pos)
+            if direction is not None:
+                setattr(fobj, aname + "_direction", direction)
+
+        # Auxiliary fields: evaluate at coordinates only so we do not overwrite ``Geode.scalar``.
+        eval_x = x.coords() if (isinstance(x, Geode) and not primary) else x
+        value = fobj.forward(eval_x, transform=undef)
+
+        if isinstance(x, Geode):
+            if isinstance(value, Geode):
+                s = value.scalar
             else:
-                value = torch.full((len(x), 1), float(fobj), device=curlew.device, dtype=curlew.dtype)
-        else:
-            # inject paleo-coordinate anchors as parameters so the field can use them if needed
-            for aname, anchor in self.anchors.items():
-                if isinstance(anchor, tuple) and (self.getField(anchor[0]) != fobj):
-                    continue # ignore anchors associated to other fields
-                pos, direction = self.getAnchor(aname, to_numpy=False)
-                setattr(fobj, aname, pos)
-                if direction is not None:
-                    setattr(fobj, aname + "_direction", direction)
-            value = fobj.forward(x, transform=undef) # evaluate the chosen underlying field
-        
-        if isinstance(value, Geode):
-            # keep legacy key; scalar corresponds to chosen underlying field
-            value.fields[self.name] = value.scalar
+                s = value.squeeze()
+                if s.ndim == 0:
+                    s = _tensor([s.detach().item()])
+            x.fields[fname] = s
+            if primary:
+                x.scalar = s
+            return x
         return value
 
     def predict(self, x: ArrayLike, combine=False, to_numpy=True, transform=True, values=None, 
@@ -380,7 +386,7 @@ class GeoField( object ):
             True if the coordinates should be undeformed (i.e. represent modern-day coordinates) or not (i.e. represent 
             this events paleo-coordinates).
         values : torch.Tensor
-            Pre-computed results of this GeoField (used sometimes to save recomputing). Default is None (values will be computed).
+            Pre-computed results of this GeoEvent (used sometimes to save recomputing). Default is None (values will be computed).
         litho : bool
             True (default) if lithology codes should be computed.
         props : bool
@@ -418,7 +424,7 @@ class GeoField( object ):
 
                 # evaluate isosurfaces to get threshold values, if needed (allows self.bound to containt str isosurface names)
                 assert self.overprint is not None, "Overprint must be defined for domain boundary."
-                self.overprint.thresh = self.getIsovalue(self.overprint.threshold) # this thresh separates the domain into two halves
+                self.overprint.updateThresh(self)
                 
                 # predict parent fields
                 parent = self.parent.predict( x, combine=True, to_numpy=False, transform=transform, gradient=gradient )
@@ -426,7 +432,8 @@ class GeoField( object ):
 
                 # apply overprint given domain boundary mask and return
                 out = self.overprint.apply( parent, parent2, domain=domain.scalar )
-                out.fields[self.name] = domain.scalar # also store the results evaluated from this field
+                out.x = {**parent.x, **parent2.x, **out.x}
+                out.fields[_field_key(self.getField(0), self.name)] = domain.scalar
             else: # NORMAL CASE - FAULTS OR OTHER GENERATIVE EVENTS
                 parent = self.parent.predict( x, combine=True, to_numpy=False, transform=transform, gradient=gradient )
                 child = self.predict( x, combine=False, to_numpy=False, transform=transform, gradient=gradient )
@@ -437,55 +444,56 @@ class GeoField( object ):
                     if isinstance(self.overprint, list):
                         out = parent
                         for o in self.overprint: # apply multiple overprint inequalities
-                            o.thresh = self.getIsovalues(values=o.threshold)
+                            o.updateThresh(self) # update isovalue used for boundary
                             out = o.apply( out, child )
                     else:
                         # evaluate isosurfaces to get threshold values
-                        self.overprint.thresh = self.getIsovalues(values=self.overprint.threshold)
+                        self.overprint.updateThresh(self) # update isovalue used for boundary
                         out = self.overprint.apply( parent, child, domain=None )
                 
                 # NO OVERPRINT DEFINED (PURELY KINEMATIC EVENTS LIKE FAULTS)
                 else:
                     out = parent # easy! :-)
-                    out.fields[self.name] = child.scalar # also add scalar values from this field
+                    out.x = {**parent.x, **child.x}
+                    out.fields[_field_key(self.getField(0), self.name)] = child.scalar
           
         else: # evaluate field results and put into a Geode object
 
-            # create an output Geode
-            out = Geode(x=x)
+            if isinstance(x, Geode):
+                out = Geode()
+                out.x = dict(x.x)
+                out.crs = x.crs
+                x = x.coords()
+            else:
+                out = Geode()
+
+            if transform is True:
+                out.set_coords("model", x, primary=True)
+                if self.child is None:
+                    pts = x.clone() if isinstance(x, torch.Tensor) else _tensor(x)
+                    out.set_coords(self.name, pts)
+            else:
+                out.set_coords(self.name, x, primary=True)
 
             if values is not None:
                 # already computed (e.g., by a gradient computation) for the first underlying field
                 out.scalar = values.squeeze()
 
-                # still populate Geode.fields for backward compatibility + any extra underlying fields
-                out.fields[self.name] = out.scalar
+                out.fields[_field_key(self.getField(0), self.name)] = out.scalar
                 if isinstance(self.field, list) and (len(self.field) > 1):
-                    x_eval = out.x
                     for i in range(1, len(self.field)):
                         fobj = self.field[i]
-                        fname = fobj.name if hasattr(fobj, "name") else f"{self.name}_{i}"
                         if isinstance(fobj, (float, int)):
-                            s = torch.full((len(x_eval),), float(fobj), device=curlew.device, dtype=curlew.dtype)
+                            out.fields[_field_key(fobj, f"{self.name}_{i}")] = torch.full(
+                                (len(out),), float(fobj), device=curlew.device, dtype=curlew.dtype
+                            )
                         else:
-                            v = self.forward(x_eval, undef=transform, field=i)
-                            s = v.scalar if isinstance(v, Geode) else v.squeeze()
-                        if s.ndim == 0:
-                            s = _tensor([s.detach().item()] )
-                        out.fields[fname] = s
+                            self.forward(out, undef=transform, field=i)
             else:
-                out = self.forward(out, undef=transform, field=0) # evaluate scalar value for first field
-                # If multiple fields exist, also evaluate and store the others (scalar stays as field 0).
+                out = self.forward(out, undef=transform, field=0)
                 if isinstance(self.field, list) and (len(self.field) > 1):
-                    x_eval = out.x
                     for i in range(1, len(self.field)):
-                        fobj = self.field[i]
-                        fname = fobj.name if hasattr(fobj, "name") else f"{self.name}_{i}"
-                        v = self.forward(x_eval, undef=transform, field=i)
-                        s = v.scalar if isinstance(v, Geode) else v.squeeze()
-                        if s.ndim == 0:
-                            s = _tensor([s.detach().item()] )
-                        out.fields[fname] = s
+                        self.forward(out, undef=transform, field=i)
             if out.scalar.ndim==0: # if only evaluating one location, ensure result is a vector
                 out.scalar = _tensor([out.scalar.detach().item()] )
             
@@ -534,13 +542,6 @@ class GeoField( object ):
                         anchor = self.getAnchor(n, to_numpy=True)
                         out.anchors[self.name][n] = anchor
                 
-            # which (temporal) reference was used for these results
-            if transform:
-                out.crs="model" # model coordinates
-                out.x = x # store the coordinates that were used for evaluation (not the possibly transformed ones currently in the Geode object)
-            else:
-                out.crs=transform.name # field coordinates
-
             # evaluate property (prediction) field if defined
             if (self.propertyField is not None) and props:
                 out = self.propertyField.predict(geode=out) # Takes in a Geode and returns updated Geode
@@ -631,6 +632,7 @@ class GeoField( object ):
             # return gradient array only
             return grad_out
 
+    # TODO - consider renaming this to "advect"? And adding a direction parameter (-1 undeforms, 1 deforms).
     def undeform(self, x: ArrayLike) -> torch.Tensor:
         """
         Remove deformation (displacements) from the passed set of coordinates.
@@ -652,17 +654,32 @@ class GeoField( object ):
         if isinstance( x, np.ndarray ): # cast numpy to torch if need be (should not be though)
             x = _tensor( x )
             tonp = True
+
+        if isinstance(x, Geode) and not x.x:
+            x.x = {}
         
         # remove any child deformation
         if self.child is not None:
             x = self.child.undeform( x ) # undeform to the time-step relevant for this GeologicalField
 
+        if isinstance(x, Geode):
+            src_key = "model" if "model" in x.x else x.crs
+            if src_key and src_key in x.x:
+                pts = x.x[src_key]
+                if isinstance(pts, torch.Tensor):
+                    pts = pts.clone()
+                else:
+                    pts = np.array(pts, copy=True)
+                x.set_coords(self.name, pts)
+
         # handle our own displacement
         if self.deformation is not None:
                 offset = self.displacement(x) # get deformation vectors
                 if isinstance(x, Geode):
-                    #n.b. offset == x in this case, and x.offsets[self.name] was defined by self.displacement call
-                    x.x = x.x + x.offsets[self.name]
+                    key = x.crs or "model"
+                    if key not in x.x and "model" in x.x:
+                        key = "model"
+                    x.x[key] = x.x[key] + x.offsets[self.name]
                 else:
                     x = x + offset # apply deformation to the input coordinates
         
@@ -671,6 +688,7 @@ class GeoField( object ):
             return _numpy(x)
         return x
 
+    # TODO - Add a direction parameter such that -1 undeforms and 1 deforms?
     def displacement(self, x: ArrayLike) -> np.ndarray:
         """
         Return the displacement vectors associated with this GeologicalField at the specified locations. These are the
@@ -696,13 +714,14 @@ class GeoField( object ):
             offset = torch.zeros_like(x) # no deformation
         else:
             if isinstance(x, Geode): # We are evaluating a full Geode object
+                pts = x.coords("model") if "model" in x.x else x.coords()
                 if not isinstance(self.deformation, list):
-                    offset = self.deformation.eval(x.x, self) # just one deformation function
+                    offset = self.deformation.eval(pts, self) # just one deformation function
                 else:
-                    offset = self.deformation[0].eval(x.x, self) # evaluate first offset function
+                    offset = self.deformation[0].eval(pts, self) # evaluate first offset function
                     if len(self.deformation) > 1: # evaluate remaining offset functions
                         for d in self.deformation[1:]:
-                            offset = offset + d.eval(x.x, self)
+                            offset = offset + d.eval(pts, self)
                 x.offsets[self.name] = offset # store offset in Geode
                 x.isosurfaces[self.name] = self.getIsovalues() # also store fault isosurfaces
                 x.anchors[self.name] = {} # also store anchor points 
@@ -748,7 +767,7 @@ class GeoField( object ):
 
             If several points are provided (e.g., known contact locations),
             the mean of their outputs used to determine the isosurface value.
-        field : specify which sub-field of this GeoField instance this isosurface is associated to. Defaults to 0 (first field).
+        field : specify which sub-field of this GeoEvent instance this isosurface is associated to. Defaults to 0 (first field).
         """
         assert (seed is None) or (value is None), "Either seed or value should be defined, not both."
         assert not( (seed is None) and (value is None)), "Either seed or value should be defined, not both."
@@ -759,7 +778,7 @@ class GeoField( object ):
 
     def addAnchor( self, name: str, position: ArrayLike = None, *, direction: ArrayLike = None, start: ArrayLike = None, end: ArrayLike = None, field=0 ):
         """
-        Add an anchor point or direction to this GeoField. Coordinates are in modern-day (present) coordinates.
+        Add an anchor point or direction to this GeoEvent. Coordinates are in modern-day (present) coordinates.
         During evaluation they are transformed to reconstructed (paleo) coordinates via undeform and
         exposed on the underlying field (position as ``name``, direction if applicable as ``name + '_direction'``).
 
@@ -787,7 +806,7 @@ class GeoField( object ):
         end : array-like, optional
             End position for a direction anchor. Must be used with ``start``. Reconstructed direction
             (end - start in paleo coordinates) is not normalised.
-        field : specify which sub-field of this GeoField instance this anchor is associated to. Defaults to 0 (first field).
+        field : specify which sub-field of this GeoEvent instance this anchor is associated to. Defaults to 0 (first field).
         """
         has_pos = position is not None
         has_dir = direction is not None
@@ -810,7 +829,7 @@ class GeoField( object ):
 
     def getAnchor( self, name: str, to_numpy: bool = True):
         """
-        Return the anchor position (and optionally direction) in reconstructed coordinates for this GeoField.
+        Return the anchor position (and optionally direction) in reconstructed coordinates for this GeoEvent.
         If ``self.child`` is not None, applies ``self.child.undeform`` to transform from
         modern-day to this field's reference frame; otherwise uses the stored point(s) as-is.
 
@@ -927,7 +946,11 @@ class GeoField( object ):
                 # Use `forward(field=...)` to avoid evaluating all underlying fields.
                 pts = _tensor(v)
                 pred = self.forward(Geode(x=pts), undef=True, field=fieldName)
-                i = torch.mean(pred.scalar).detach().item()
+                fname = _field_key(fobj, self.name)
+                if isinstance(pred, Geode):
+                    i = torch.mean(pred.fields[fname]).detach().item()
+                else:
+                    i = torch.mean(pred).detach().item()
             else:
                 i = v # explicit value
                 if offset != 0:
@@ -954,7 +977,7 @@ class GeoField( object ):
             numpy / torch array (True inside the volume, False elsewhere). The expression
             is evaluated with:
 
-            - one variable per underlying field name (e.g. GeoField name for field 0, plus
+            - one variable per underlying field name (e.g. GeoEvent name for field 0, plus
               any added field names)
             - one variable per isosurface name, containing that isosurface's numeric value
             - `np` and `torch`
@@ -965,15 +988,7 @@ class GeoField( object ):
         assert isinstance(expr, str) and len(expr) > 0, "expr must be a non-empty string."
         self.volumes[name] = expr
 
-    def getVolume(
-        self,
-        name: str,
-        x: ArrayLike = None,
-        *,
-        geode: Optional[Geode] = None,
-        to_numpy: bool = True,
-        transform: bool = True,
-    ):
+    def getVolume(self, name: str, x: ArrayLike = None, *, geode: Optional[Geode] = None, to_numpy: bool = True, transform: bool = True ):
         """
         Return the stored volume expression (if `x` and `geode` are None) or evaluate it.
 
@@ -1057,7 +1072,7 @@ class GeoField( object ):
         Parameters
         ----------
         isosurface : str
-            Name registered with :py:meth:`addIsosurface` on this ``GeoField``.
+            Name registered with :py:meth:`addIsosurface` on this ``GeoEvent``.
         pts : array-like, shape ``(N, ndim)`` or ``(ndim,)``
             Model coordinates to project.
         nsteps : int
@@ -1129,6 +1144,7 @@ class GeoField( object ):
         return pts
 
 
+    # TODO - remove this if not using Eshelby fault formulation? (as it is a bit niche)
     def sampleIsosurface(
         self,
         isosurface: str,
@@ -1356,42 +1372,17 @@ class GeoField( object ):
 
     def loss(self):
         """
-        Compute loss associated with the underlying field and learnable property, deformation or overprint objects.
+        Compute loss(es) associated with the underlying field(s) and learnable property, deformation or overprint objects.
         """
-
-        # constant fields have no loss
-        if (isinstance(self.field, int) or isinstance(self.field, float)): return _tensor(0.0, dev=curlew.device), {}
-
-        loss, details = self.field.loss() 
+        if isinstance(self.field, (int, float)):
+            return Pebble() # no loss for constant fields
+        pebble = self.field.loss()
         for o in [self.propertyField, self.deformation, self.overprint]:
-            if o is not None: 
-                ll, dets = o.loss()
-                loss = loss + ll
-                details.update(dets)
-        return loss, details
-
-    def zero(self):
-        """
-        Zero optimiser associated with the underlying field and learnable property, deformation or overprint objects. 
-        """
-        if not (isinstance(self.field, int) or isinstance(self.field, float)): self.field.zero()
-        if self.propertyField is not None: self.propertyField.zero()
-        if self.deformation is not None: self.deformation.zero()
-        if self.overprint is not None: self.overprint.zero()
-
-    def step(self):
-        """
-        Step optimiser associated with the underlying field and learnable property, deformation or overprint objects. 
-        """
-        if not (isinstance(self.field, int) or isinstance(self.field, float)): self.field.step()
-        if self.propertyField is not None: self.propertyField.step()
-        if self.deformation is not None: self.deformation.step()
-        if self.overprint is not None: self.overprint.step()
-    
-    def set_rate(self, lr=1e-3):
-        """
-        Set the learning rate for the underlying field and learnable property, deformation or overprint objects.
-        """
-        for o in [self.field, self.propertyField, self.deformation, self.overprint]:
-            if (o is not None) and (not(isinstance(self.field, int) or isinstance(self.field, float))) and (o.optim is not None):
-                o.set_rate(lr=lr)
+            if o is None:
+                continue
+            o_pebble = o.loss()
+            pebble = pebble + o_pebble
+            group = getattr(o, "name", None) or f"{self.name}:{type(o).__name__}"
+            if getattr(o, "optim", None) is not None and pebble.optim.get(group) is None:
+                pebble = pebble + Pebble(optim={group: o.optim})
+        return pebble

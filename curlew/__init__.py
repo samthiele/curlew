@@ -147,7 +147,7 @@ def _numpy(x):
 # import things we want to expose under the `curlew` namespace
 from curlew.fields import BaseNF
 from curlew.geology.geomodel import GeoModel
-from curlew.geology.geofield import GeoField
+from curlew.geology.geoevent import GeoEvent
 from curlew import core
 from curlew import synthetic
 from curlew import geology

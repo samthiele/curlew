@@ -202,7 +202,6 @@ def _single_eshelby_tensors(
     n_hat_g = _tensor(n_np)
     return R, RT, pos, sig_scaled, int_scale, r2, t2, r2t2, r2_t2, D_floor, _4pi_r2t, far_r2_cutoff, n_hat_g
 
-
 class EshelbyField( BaseAF ):
     """
     Vectorised superposition of oblate spheroidal Eshelby inclusions.
@@ -292,6 +291,40 @@ class EshelbyField( BaseAF ):
         ``weights`` — (n,) ``nn.Parameter`` or buffer.
     """
 
+    @staticmethod
+    def _force3D(arr, *, name: str = 'arr'):
+        """
+        Ensure coordinates/vectors are 3D.
+
+        - If input has last-dimension 3, return it unchanged.
+        - If input has last-dimension 2, lift to the x–z plane by inserting y=0:
+          (x, z) -> (x, 0, z)
+
+        Works for both NumPy arrays and torch tensors (preserving dtype/device for torch).
+        """
+        if not isinstance(arr, (torch.Tensor, np.ndarray)):
+            arr = np.asarray(arr, dtype=np.float64) # handle lists, tuples, etc.
+        if arr.ndim < 1:
+            raise ValueError(f"{name} must have at least 1 dimension; got {tuple(arr.shape)}")
+        if arr.shape[-1] == 3:
+            return arr
+        if arr.shape[-1] == 2:
+            if isinstance(arr, torch.Tensor):
+                out = torch.zeros((*arr.shape[:-1], 3), device=arr.device, dtype=arr.dtype)
+            elif isinstance(arr, np.ndarray):
+                out = np.zeros((*arr.shape[:-1], 3), dtype=np.float64)
+            out[..., 0] = arr[..., 0]
+            out[..., 2] = arr[..., 1]
+            return out
+        
+        raise ValueError(f"{name} must have last dimension 2 or 3; got {tuple(arr.shape)}")
+
+    @staticmethod
+    def _checkDim(u: torch.Tensor, input_was_2d: bool) -> torch.Tensor:
+        if not input_was_2d: return u
+        if u.shape[-1] > 2:  return u[..., (0, 2)] # drop back to x–z plane 2D representation
+        return u # already converted to 2D
+
     def initField (
         self,
         positions,
@@ -311,27 +344,33 @@ class EshelbyField( BaseAF ):
         plastic_damp=True,
         plastic_xi_lo=0.7,
         plastic_xi_hi=1.5,
-        linear_decay=1.0,
+        linear_decay=0.0,
         surface_height=None,
     ):
         positions   = np.asarray(positions,  dtype=np.float64)
-        if positions.ndim != 2 or positions.shape[1] != 3:
-            raise ValueError(f"positions must have shape (n, 3); got {positions.shape}")
+        if positions.ndim != 2 or positions.shape[1] not in (2, 3):
+            raise ValueError(f"positions must have shape (n, 2) or (n, 3); got {positions.shape}")
+        self.is2D = (positions.shape[1] == 2) # store if this is in 2D mode or 3D mode
+        positions = self._force3D(positions, name="positions")
         n_real = int(positions.shape[0])
         if n_real == 0:
             raise ValueError("positions must be non-empty (n >= 1)")
 
         normals = np.asarray(normals, dtype=np.float64)
-        if normals.shape == (3,):
-            normals = np.broadcast_to(normals, (n_real, 3)).copy()
+        if normals.shape in ((2,), (3,)):
+            normals = np.broadcast_to(normals, (n_real, normals.shape[0])).copy()
+        if normals.shape == (n_real, 2):
+            normals = self._force3D(normals, name="normals")
         elif normals.shape != (n_real, 3):
-            raise ValueError(f"normals must be (3,) or (n, 3); got {normals.shape}")
+            raise ValueError(f"normals must be (2,), (3,), (n, 2) or (n, 3); got {normals.shape}")
 
         slips = np.asarray(slips, dtype=np.float64)
-        if slips.shape == (3,):
-            slips = np.broadcast_to(slips, (n_real, 3)).copy()
+        if slips.shape in ((2,), (3,)):
+            slips = np.broadcast_to(slips, (n_real, slips.shape[0])).copy()
+        if slips.shape == (n_real, 2):
+            slips = self._force3D(slips, name="slips")
         elif slips.shape != (n_real, 3):
-            raise ValueError(f"slips must be (3,) or (n, 3); got {slips.shape}")
+            raise ValueError(f"slips must be (2,), (3,), (n, 2) or (n, 3); got {slips.shape}")
 
         radii       = _broadcast_param_1d(radii,           n_real, "radii")
         thicknesses = _broadcast_param_1d(thicknesses,     n_real, "thicknesses")
@@ -340,7 +379,7 @@ class EshelbyField( BaseAF ):
 
         w_arr = _broadcast_param_1d(1.0 if weights is None else weights, n_real, "weights")
 
-        # ── Free-surface mirror sources ────────────────────────────────────────
+        # Mirror sources (if surface height is provided) to approximate free-surface effects
         use_mirror = surface_height is not None
         if use_mirror:
             zh = float(surface_height)
@@ -437,11 +476,13 @@ class EshelbyField( BaseAF ):
         self._far_r2_cutoff = _tensor(far_list)
         self._radii      = torch.sqrt(self._r2)
 
-        # ── Taper geometry (n includes mirror sources) ─────────────────────────
+        # Taper geometry (n includes mirror sources)
         T = self._N_TAPER
         taper_r_np          = np.linspace(0.5, 1.0, T) if T > 1 else np.array([1.0])
         self._TAPER_RADII   = _tensor(taper_r_np)
-        raw                 = np.cos(taper_r_np * (math.pi / 2.0))
+        # Linear taper weights (normalised). For T==1, use full weight 1 to avoid 0/0.
+        raw                 = np.linspace(0.0, 1.0, T) if T > 1 else np.array([1.0])
+        # raw                 = np.cos(raw * (math.pi / 2.0)) # cosine bell taper
         self._TAPER_WEIGHTS = _tensor(raw / raw.sum())
 
         r2_tap    = self._r2.unsqueeze(1) * self._TAPER_RADII.unsqueeze(0) ** 2
@@ -454,19 +495,21 @@ class EshelbyField( BaseAF ):
         self._Df_tap    = (torch.sqrt(t2_tap) / r_tap) ** 4 * 0.25
         self._pi_tap    = 4.0 * math.pi * r2_tap * torch.sqrt(t2_tap)
 
-        # ── Weights (mirror weights already negated in w_arr) ─────────────────
+        # Weights (mirror weights already negated in w_arr)
         w_init = _tensor(w_arr)
         if learnable_weights:
             self.weights = nn.Parameter(w_init.clone())
         else:
             self.register_buffer("weights", w_init, persistent=True)
 
-    # ──────────────────────────────────────────────────────────────────────
+    # which sources to compute for each observer? (faster evaluation on large grids)
     def influence_mask(self, x, k=None):
         """
         True for receivers within spherical distance k*r of *any* source centroid.
         """
-        x_t     = _tensor(x)
+        x_in = _tensor(x)
+        input_was_2d = (x_in.ndim > 0) and (x_in.shape[-1] == 2)
+        x_t = self._force3D(x_in, name="receivers") if (self.is2D and input_was_2d) else x_in
         squeeze = x_t.shape == (3,)
         if squeeze:
             x_t = x_t.unsqueeze(0)
@@ -486,13 +529,15 @@ class EshelbyField( BaseAF ):
             m = m.squeeze(0)
         return m
 
-    # ──────────────────────────────────────────────────────────────────────
+    # called by EshelbyField.forward( ... ) and used by e.g., deformation objects
     def evaluate(self, x, max_ram_mb=2048, k=None):
         """
         Like ``displacement`` but skips points outside ``influence_mask``.
         """
         return_numpy = not isinstance(x, torch.Tensor)
-        x_t     = _tensor(x)
+        x_in = _tensor(x)
+        input_was_2d = (x_in.ndim > 0) and (x_in.shape[-1] == 2)
+        x_t = self._force3D(x_in, name="receivers") if (self.is2D and input_was_2d) else x_in
         mask    = self.influence_mask(x_t, k=k)
         squeeze = x_t.shape == (3,)
         if squeeze:
@@ -510,25 +555,18 @@ class EshelbyField( BaseAF ):
         u_out = u_flat.reshape(*batch_shape, 3)
         if squeeze:
             u_out = u_out.squeeze(0)
+        u_out = self._checkDim(u_out, input_was_2d)
         return _numpy(u_out) if return_numpy else u_out
 
-    # ──────────────────────────────────────────────────────────────────────
+    # this is where the magic happens! ...compute the displacement field given the set of Eshelby ellipsoids
     def displacement(self, x, max_ram_mb=2048):
         """
         Evaluate the total displacement at m receiver positions.
-
-        Corrections applied
-        -------------------
-        1. Cosine-bell taper over ``n_taper`` concentric sub-ellipses — all
-           taper levels are evaluated in a single vectorised pass (no Python
-           loop), with the taper dimension T fused into the batch.
-        2. Plastic damping — slip-perpendicular displacement suppressed near
-           the rim via a smoothstep on xi (the ellipsoidal coordinate).
-        3. Equatorial crossing check — per-source displacement rescaled so no
-           receiver is moved across the source mid-plane.
         """
         return_numpy = not isinstance(x, torch.Tensor)
-        x       = _tensor(x)
+        x_in = _tensor(x)
+        input_was_2d = (x_in.ndim > 0) and (x_in.shape[-1] == 2)
+        x = self._force3D(x_in, name="receivers") if (self.is2D and input_was_2d) else x_in
         squeeze = x.shape == (3,)
         if squeeze:
             x = x.unsqueeze(0)
@@ -539,9 +577,9 @@ class EshelbyField( BaseAF ):
         x_flat      = x.reshape(-1, 3)
         m           = x_flat.shape[0]
 
+        # Memory budget (accounts also for the extra taper dimension in working tensors)
         bytes_per_element = {torch.float16: 2, torch.float32: 4,
                              torch.float64: 8}.get(x_flat.dtype, 4)
-        # Memory budget accounts for the extra taper dimension in working tensors
         batch_size = int(max_ram_mb * 1024**2 /
                          (self.n_sources * self._N_TAPER * 3 * bytes_per_element * 2.0))
         batch_size = max(1, min(batch_size, m))
@@ -576,7 +614,7 @@ class EshelbyField( BaseAF ):
             xi_outer = (rho2 / self._r2.unsqueeze(1) +
                         x_loc[..., 2]**2 / self._t2.unsqueeze(1))      # (n, B)
 
-            # ── 1. Vectorised taper ────────────────────────────────────────
+            # Vectorised taper (create a "soft" ellipse by superimposing multiple sub-ellipses with varied radius)
             # Expand x_loc / rho2 over taper dimension
             x_loc_t = x_loc.unsqueeze(1).expand(-1, self._N_TAPER, -1, -1).contiguous()  # (n, T, B, 3)
             rho2_t  = rho2.unsqueeze(1).expand(-1, self._N_TAPER, -1).contiguous()       # (n, T, B)
@@ -614,7 +652,7 @@ class EshelbyField( BaseAF ):
                 u_global = u_par + a.unsqueeze(-1) * u_perp
 
             # Equatorial crossing check
-            n_hat    = self._n_hat[:, None, :]                         # (n, 1, 3)
+            n_hat    = self._n_hat[:, None, :]                        # (n, 1, 3)
             d_before = (x_rel * n_hat).sum(dim=-1)                    # (n, B)
             d_after  = ((x_rel + u_global) * n_hat).sum(dim=-1)       # (n, B)
             crossing = (torch.sign(d_before) != torch.sign(d_after)) & (d_before.abs() > 0.0)
@@ -642,8 +680,193 @@ class EshelbyField( BaseAF ):
         u_out = u_out.reshape(*batch_shape, 3)
         if squeeze:
             u_out = u_out.squeeze(0)
+        u_out = self._checkDim(u_out, input_was_2d)
         return _numpy(u_out) if return_numpy else u_out
 
+    def getEllipseField(
+        self,
+        *,
+        name: str = "eshelby_ellipse",
+        kernel: str = "min",
+        deformed: bool = False,
+        thickness : np.array = None,
+        radius : np.array = None,
+    ):
+        """
+        Construct a :class:`curlew.fields.point.PointKernelField` whose implicit
+        0-level set matches the inclusion boundary.
+
+        - In **2D mode** (`self.is2D=True`, where coordinates are interpreted as ``(x, z)``),
+          the boundary is the **projection of the equatorial circle** (local ``z=0``) into
+          the ``(x, z)`` plane: an ellipse.
+
+        - In **3D mode** (`self.is2D=False`), the boundary is the full **ellipsoid surface**
+          defined by `(x_loc^2 + y_loc^2)/r^2 + z_loc^2/t^2 = 1`.
+
+        Notes
+        -----
+        The returned field evaluates a signed "distance-like" quantity:
+        - `-1` at the inclusion centre
+        - `0` on the boundary
+        - positive outside
+
+        Deformation option
+        ------------------
+        If `deformed=True`, the returned boundary is adjusted to *approximately* represent
+        the inclusion geometry in deformed coordinates by scaling the local semi-axes
+        `(r, r, t)` according to the imposed **local eigenstrain** (scaled by `weights`):
+
+        - stretch along local x: `s_x = 1 + w * eps_xx*`
+        - stretch along local y: `s_y = 1 + w * eps_yy*`
+        - stretch along local z: `s_z = 1 + w * eps_zz*`
+
+        Then `r_eff = r * 0.5*(s_x+s_y)` and `t_eff = t * s_z`.
+
+        This is a small-strain, diagonal-only approximation (it ignores shear-induced
+        axis rotation and higher-order terms), but is often sufficient for visualising
+        "opened" / "dilated" inclusions in modern coordinates.
+        """
+        from curlew.fields.point import PointKernelField
+
+        # sepcified R and thickness?
+        r_eff = None
+        t_eff = None
+        if isinstance(radius, (float,int)):
+            r_eff = _tensor([radius for _ in self._radii])
+        elif r_eff is not None:
+            r_eff = _tensor( radius )
+        if isinstance(thickness, (float,int)):
+            t_eff = _tensor([thickness for _ in self._radii])
+        elif t_eff is not None:
+            t_eff = _tensor( thickness )
+                    
+        # Optional deformed axes (local principal-axis scaling)
+        if deformed:
+            # Reconstruct per-source local eigenstrain eps* in the same way as construction:
+            # eps* = 0.5 (v ⊗ n + n ⊗ v) / (2 t), with n = e3 in local frame.
+            # Here v is the (unit) slip direction in local frame, and overall magnitude is weights.
+            t = torch.sqrt(self._t2).clamp(min=1e-12)  # (n,)
+            v_loc = torch.einsum("nij,nj->ni", self._R, self._slip_hat)  # (n, 3)
+            n_loc = v_loc.new_tensor([0.0, 0.0, 1.0]).expand_as(v_loc)  # (n, 3)
+            eps_loc = (torch.einsum("ni,nj->nij", v_loc, n_loc) + torch.einsum("ni,nj->nij", n_loc, v_loc))
+            eps_loc = eps_loc * (0.5 / (2.0 * t)[:, None, None])  # (n, 3, 3)
+
+            w = self.weights
+            if w.ndim != 1:
+                w = w.reshape(-1)
+            w = w.to(device=eps_loc.device, dtype=eps_loc.dtype)
+            # Use only diagonal stretch factors (small-strain length change along axes).
+            sx = 1.0 + w * eps_loc[:, 0, 0]
+            sy = 1.0 + w * eps_loc[:, 1, 1]
+            sz = 1.0 + w * eps_loc[:, 2, 2]
+            # Keep positive (avoid sign flips)
+            sx = sx.clamp(min=1e-6)
+            sy = sy.clamp(min=1e-6)
+            sz = sz.clamp(min=1e-6)
+
+            if r_eff is None:
+                r_eff = self._radii * (0.5 * (sx + sy))
+            if t_eff is None:
+                t_eff = t * sz
+        else:
+            if r_eff is None:
+                r_eff = self._radii
+            if t_eff is None:
+                t_eff = torch.sqrt(self._t2)
+
+        if self.is2D:
+            # Seed positions for PointKernelField; the values callable below is analytic,
+            # but PKF requires seed positions to define tensor shapes.
+            centers = self._pos[:, (0, 2)]  # (n, 2)
+            radii = r_eff.clamp(min=1e-12)  # (n,)
+
+            # Projection geometry:
+            # local equatorial circle: (X, Y, Z=0) with X^2 + Y^2 = r^2.
+            # global coordinates: p = pos + RT @ [X, Y, 0]
+            # projected 2D coords: (x, z) = pos_xz + A @ [X, Y]
+            RT = self._RT  # (n, 3, 3), local -> global rotation
+            A00 = RT[:, 0, 0]
+            A01 = RT[:, 0, 1]
+            A10 = RT[:, 2, 0]
+            A11 = RT[:, 2, 1]
+            A = torch.stack(
+                [torch.stack([A00, A01], dim=-1), torch.stack([A10, A11], dim=-1)],
+                dim=-2,
+            )  # (n, 2, 2)
+
+            AA_T = A @ A.transpose(-1, -2)  # (n, 2, 2)
+            G = torch.linalg.pinv(AA_T)  # (n, 2, 2); pseudo-inverse handles degenerate cases
+
+            def _ellipse_signed_distance_like(
+                x: torch.Tensor,
+                vectors: torch.Tensor,
+                euclid: torch.Tensor,
+                cid,
+                seeds: torch.Tensor,
+                normals: torch.Tensor | None,
+                value_kwargs: dict | None = None,
+            ) -> torch.Tensor:
+                # x: (M, 2)
+                x_t = x.to(device=centers.device, dtype=centers.dtype)
+                centers_t = centers.to(device=x_t.device, dtype=x_t.dtype)  # (n, 2)
+                G_t = G.to(device=x_t.device, dtype=x_t.dtype)  # (n, 2, 2)
+                r_t = radii.to(device=x_t.device, dtype=x_t.dtype)  # (n,)
+
+                d = x_t.unsqueeze(1) - centers_t.unsqueeze(0)  # (M, n, 2)
+                q = torch.einsum("mni,nij,mnj->mn", d, G_t, d)  # (M, n)
+                s = torch.sqrt(torch.clamp(q, min=0.0)) / r_t.unsqueeze(0)  # (M, n)
+                return (s - 1.0).unsqueeze(-1)  # (M, n, 1)
+
+            return PointKernelField(
+                name=name,
+                input_dim=2,
+                output_dim=1,
+                positions=centers,
+                normals=None,
+                values=_ellipse_signed_distance_like,
+                kernel=kernel,
+            )
+
+        # 3D: implicit ellipsoid surface in local coordinates.
+        centers3 = self._pos  # (n, 3)
+        R = self._R  # (n, 3, 3) global -> local
+        r2 = (r_eff ** 2).clamp(min=1e-24)  # (n,)
+        t2 = (t_eff ** 2).clamp(min=1e-24)  # (n,)
+
+        def _ellipsoid_signed_distance_like(
+            x: torch.Tensor,
+            vectors: torch.Tensor,
+            euclid: torch.Tensor,
+            cid,
+            seeds: torch.Tensor,
+            normals: torch.Tensor | None,
+            value_kwargs: dict | None = None,
+        ) -> torch.Tensor:
+            # x: (M, 3)
+            x_t = x.to(device=centers3.device, dtype=centers3.dtype)
+            c = centers3.to(device=x_t.device, dtype=x_t.dtype)  # (n, 3)
+            R_t = R.to(device=x_t.device, dtype=x_t.dtype)  # (n, 3, 3)
+            r2_t = r2.to(device=x_t.device, dtype=x_t.dtype)  # (n,)
+            t2_t = t2.to(device=x_t.device, dtype=x_t.dtype)  # (n,)
+
+            d = x_t.unsqueeze(1) - c.unsqueeze(0)  # (M, n, 3)
+            d_loc = torch.einsum("nij,mnj->mni", R_t, d)  # (M, n, 3)
+            rho2 = d_loc[..., 0] ** 2 + d_loc[..., 1] ** 2  # (M, n)
+            q = rho2 / r2_t.unsqueeze(0) + (d_loc[..., 2] ** 2) / t2_t.unsqueeze(0)  # (M, n)
+            s = torch.sqrt(torch.clamp(q, min=0.0))  # (M, n)
+            return (s - 1.0).unsqueeze(-1)  # (M, n, 1)
+
+        return PointKernelField(
+            name=name,
+            input_dim=3,
+            output_dim=1,
+            positions=centers3,
+            normals=None,
+            values=_ellipsoid_signed_distance_like,
+            kernel=kernel,
+        )
+
+    # helper function for computing the exterior potential gradient (grad phi)
     def _grad_phi_ext_k(self, x_loc, rho2, r2, t2, r2t2, r2_t2, D_floor, pi_r2t):
         """
         Exterior ∇φ — fully vectorised over sources (n), taper levels (T),

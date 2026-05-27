@@ -3,12 +3,8 @@ Implement fourier-feature based neural fields for scalar potential representatio
 """
 
 import curlew
-from curlew.core import HSet
-import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from tqdm import tqdm
 from curlew.fields import BaseNF
 
 class NFF(BaseNF):

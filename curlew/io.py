@@ -1,9 +1,68 @@
 """
 Functions for performing common IO operations.
 """
-
 import os
+from pathlib import Path
 import numpy as np
+import torch
+
+def saveModel(path, model):
+    """
+    Save a :class:`~curlew.geology.geomodel.GeoModel` or
+    :class:`~curlew.geology.geoevent.GeoEvent` to disk.
+
+    Uses :func:`torch.save`, which handles PyTorch tensors, ``nn.Module`` fields,
+    and optimiser state in a way that is consistent with the rest of curlew.
+
+    Parameters
+    ----------
+    path : str | os.PathLike
+        Output file path (e.g. ``"my_model.pt"``).
+    model : GeoModel | GeoEvent
+        The geological model or event to save.
+    """
+    from curlew.geology.geoevent import GeoEvent
+    from curlew.geology.geomodel import GeoModel
+
+    if not isinstance(model, (GeoModel, GeoEvent)):
+        raise TypeError(
+            f"saveModel expects a GeoModel or GeoEvent, got {type(model).__name__}"
+        )
+    path = Path(path)
+    if path.parent and str(path.parent) not in ("", "."):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(model, path)
+
+def loadModel(path, map_location=None):
+    """
+    Load a :class:`~curlew.geology.geomodel.GeoModel` or
+    :class:`~curlew.geology.geoevent.GeoEvent` written by :func:`saveModel`.
+
+    Parameters
+    ----------
+    path : str | os.PathLike
+        Path to the saved model file.
+    map_location : str | torch.device | callable, optional
+        Device mapping passed to :func:`torch.load` (e.g. ``"cpu"`` or
+        ``curlew.device``). Defaults to :data:`curlew.device`.
+
+    Returns
+    -------
+    GeoModel | GeoEvent
+        The restored model or event.
+    """
+    import curlew
+    from curlew.geology.geoevent import GeoEvent
+    from curlew.geology.geomodel import GeoModel
+
+    path = Path(path)
+    if map_location is None:
+        map_location = curlew.device
+
+    try:
+        return torch.load(path, weights_only=False, map_location=map_location)
+    except TypeError:
+        return torch.load(path,  map_location=map_location)    
 
 def saveOBJ(filename, xyz, rgb, faces):
     """

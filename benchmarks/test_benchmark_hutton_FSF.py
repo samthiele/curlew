@@ -15,7 +15,7 @@ if str(_benchmarks_dir) not in sys.path:
     sys.path.insert(0, str(_benchmarks_dir))
 from benchmark_memory import record_benchmark_memory, get_peak_memory_mb
 from curlew.geology.geomodel import GeoModel
-from curlew.geometry import grid
+from curlew.geometry import Grid
 from curlew.fields.series import FSF
 import curlew
 from curlew.synthetic import hutton
@@ -31,7 +31,7 @@ _hutton_C_Ms = None
 _hutton_M = None
 
 # Shared constraint grid so later benchmarks reuse it (no recalculation)
-G = grid(dims, step=(10, 10), center=(dims[0] / 2, dims[1] / 2), sampleArgs=dict(N=1024))
+G = Grid(dims, step=(10, 10), center=(dims[0] / 2, dims[1] / 2), sampleArgs=dict(N=1024))
 
 
 def benchmark_results_to_csv(benchmarks_root=None):
@@ -94,8 +94,10 @@ def benchmark_results_to_csv(benchmarks_root=None):
 def test_benchmark_01_forward_hutton(benchmark, request):
     """Benchmark: generate synthetic (C, Ms) and constraint grid. Result feeds inverse."""
     def forward_hutton():
-        C, Ms = hutton(dims, breaks=10, cmap='prism', pval=1.0)
-        for _c in C:
+        from curlew.synthetic import extract_constraints
+        Ms = hutton(dims, breaks=10, cmap='prism', pval=1.0)
+        C = extract_constraints(Ms, ['s0', 's1'])
+        for _c in C.values():
             _c.grid = G
             _c.delta = 10
         return (C, Ms)
@@ -112,15 +114,15 @@ def test_benchmark_02_inverse_hutton_FSF(benchmark, request):
     C, Ms = _hutton_C_Ms
     def inverse_hutton():
         H = HSet(value_loss='1.0', mono_loss='0.01', thick_loss='1.0')
-        s0 = strati('basement', C=C[0], H=H, type=FSF, base=-np.inf,
+        s0 = strati('basement', C=C['s0'], H=H, type=FSF, base=-np.inf,
                     rff_features=64, length_scale_range=[500, 2000])
                     #hidden_layers=[32], rff_features=64, length_scales=[500 / 2 * np.pi])
-        s1 = strati('unconformity', C=C[1], H=H.copy(mono_loss="1.0", thick_loss=1.0),
+        s1 = strati('unconformity', C=C['s1'], H=H.copy(mono_loss="1.0", thick_loss=1.0),
                     type=FSF, base="base", rff_features=64, length_scale_range=[2000, 4000])
                     #hidden_layers=[32], rff_features=64, length_scales=[2000 / 2 * np.pi])
         s1.isosurfaces = Ms['s1'].isosurfaces
         s0.isosurfaces = Ms['s0'].isosurfaces
-        s1.addIsosurface("base", seed=Ms.fields[1].field.origin)
+        s1.addIsosurface("base", seed=Ms['s1'].field.origin)
         M = GeoModel([s0, s1])
         M.prefit(epochs=nepoch, best=True, vb=False)
         return M
@@ -134,7 +136,7 @@ def test_benchmark_03_predict_hutton_FSF(benchmark, request):
     global _hutton_M
     assert _hutton_M is not None, "Run test_benchmark_02_inverse_hutton first"
     M = _hutton_M
-    G2 = grid(dims, step=(2, 2), center=(dims[0] / 2, dims[1] / 2), sampleArgs=dict(N=1024))
+    G2 = Grid(dims, step=(2, 2), center=(dims[0] / 2, dims[1] / 2), sampleArgs=dict(N=1024))
     sxy = G2.coords()
 
     benchmark(lambda: M.predict(sxy))

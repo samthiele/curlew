@@ -178,7 +178,41 @@ def poisson_disk_indices_3d(
 
     return np.asarray(chosen, dtype=np.int64)
 
-import numpy as np
+def grid( extent : tuple | np.ndarray, size : tuple, **kwds ):
+    """
+    Construct a grid using the provided extent (or the bounds of passed point set) and
+    voxel size (float) or grid dimensions (int). 
+    
+    Parameters
+    ----------
+    extent : tuple | np.ndarray
+        The extent of the grid in each dimension as [(xmin,ymin,...), (xmax, ymax, ...)]. If a tuple is provided, it is interpreted as the bounds of the grid in each dimension.
+        If a numpy array is provided, the min and max of these points in each dimension will be computed and used as the bounds.
+    size : tuple
+        The size of the grid in each dimension. If a float is provided, it is interpreted as the voxel size in each dimension.
+        If an integer is provided, it is interpreted as the number of grid cells in each dimension.
+    **kwds : dict
+        Additional keyword arguments are passed directly to `Grid.__init__`.
+    """
+    # get grid bounds if not passed directly
+    if isinstance(extent, np.ndarray):
+        extent = (extent.min(axis=0), extent.max(axis=0))
+
+    ndim = len(extent[0])
+    if isinstance(size, (float, int)):
+        size = tuple([size] * ndim)
+
+    # Grid.dims is the coordinate span along each axis (not the number of cells).
+    span = tuple(extent[1][i] - extent[0][i] for i in range(ndim))
+    step = tuple(
+        span[i] / s if isinstance(s, int) else s
+        for i, s in enumerate(size)
+    )
+
+    # define grid centerpoint
+    kwds['center'] = tuple((extent[0][i] + extent[1][i]) / 2 for i in range(ndim))
+
+    return Grid(span, step, **kwds)
 
 class Grid(object):
     """
@@ -439,30 +473,7 @@ class Grid(object):
             new_grid._setCache(self._cache)
         return new_grid
     
-def grid( dims : tuple, step : tuple, center=None, sampleArgs={} ):
-    """
-    Utility function to quickly generate and return an n-dimensional grid of points.
-
-    Parameters
-    ----------
-    dims : tuple
-        A tuple of the form (xdim, ydim, ...) defining the extent of the grid in each dimension. Note that this is in 
-        units (e.g. meters) rather than number of grid cells.
-    step : tuple
-        A tuple of the form (xstep, ystep, ...) defining the size of each grid cell in each dimension.
-    origin : np.ndarray or None
-        A NumPy array containing the middle (the center point) of the grid. If None, the center is set to the origin.
-    sampleArgs : dict, optional
-        Additional arguments for sampling with `Grid.draw()`. Defaults to an empty dictionary. Can be used to 
-        e.g., set the number of random grid points (`N`) drawn for global constraints while training a neural field.
-
-    Returns
-    -------
-    A Grid instance for this grid.
-    """
-    return Grid( dims, step, center=center, sampleArgs=sampleArgs)
-
-# TODO - make this return a Grid object
+# TODO - make this return a Grid object?
 def section(dims : tuple, origin : np.ndarray, normal : np.ndarray, width : float = None, height : float = None, step=None):
     """
     Create a grid of 3D points on a plane. Useful for evaluating and plotting
@@ -541,115 +552,6 @@ def section(dims : tuple, origin : np.ndarray, normal : np.ndarray, width : floa
     
     return grid.shape, grid.reshape((-1,3))
 
-def _extrude_array(arr, step=(0,100,0), n=3, y="up" ):
-    """
-    Extrude a 2D array into 3D by inserting a new coordinate.
-
-    Given an array of shape (n,2), returns an array of shape (n,3) where a new coordinate, 
-    is calculated as multiples of the step vector.
-
-    Parameters
-    ----------
-    arr : array-like of shape (n, 2)
-        The input 2D array to be extruded.
-    step : array-like of shape (n, 3)
-        The offset by which each entry is extruded for each step.
-    n : int
-        The number of extrusions (duplications and offsets) to make.
-    y : str
-        Defines how the 2D y-axis is interpreted. Options are:
-        - "north": Input data is treated as 2D map information.
-        - "up": Input data is treated as 2D section information.
-
-    Returns
-    -------
-    extruded : np.ndarray of shape (n, 3)
-        Each row is structured as [original[0], new_coordinate, original[1]].
-    """
-    arr = np.asarray(arr)
-    if arr.shape[1] != 2:
-        raise ValueError("Input array must have shape (n,2)")
-    
-    step = np.asarray(step)
-    if len(step) != 3:
-        raise ValueError("Step vector must have shape (3,)")
-    
-    # add new dimension
-    d = np.zeros( len(arr), arr.dtype)
-    if 'up' in y.lower():
-        arr = np.array([(arr[i,0], d[i], arr[i,1]) for i in range(len(d))])
-    else:
-        arr = np.array([(arr[i,0], arr[i,1], d[i]) for i in range(len(d))])
-    
-    # do extrusion
-    extruded = np.vstack([arr + i*step[None,:] for i in range(n)])
-    return extruded
-
-def extrude( C, step=(0,100,0), n=3, y="up" ):
-    """
-    Dulicate and extrude constraints in the passed CSet instance
-    to fake 3D data.
-
-    Parameters
-    ----------
-    C : CSet, list
-        The input CSet(s), containing 2D data to be extruded.
-    step : array-like of shape (n, 3)
-        The offset by which each entry is extruded for each step.
-    n : int
-        The number of extrusions (duplications and offsets) to make.
-    y : str
-        Defines how the 2D y-axis is interpreted. Options are:
-        - "north": Input data is treated as 2D map information.
-        - "up": Input data is treated as 2D section information.
-
-    Returns
-    -------
-    extruded : CSet
-        A CSet (or list thereof) with added 3D constraints.
-    """
-    if isinstance(C, list) or isinstance(C, tuple):
-        return [extrude(c, step=step, n=n, y=y) for c in C]
-    
-    out = C.copy()
-    out._offset = None # needs to be recalculated
-    for k in dir(C):
-        if '_' in k:
-            continue # ignore
-        if callable( C.__getattribute__(k) ):
-            continue # ignore
-        if (k[-1] == 'p') or (k == 'grid'):
-            xy = C.__getattribute__(k)
-            if xy is not None:
-                assert xy.shape[-1] == 2, "Error, constraint %s is not 2D"%k
-                xyz = _extrude_array( xy, step, n, y)
-                out.__setattr__(k, xyz)
-        else:
-            val = C.__getattribute__(k)
-            if val is not None:
-                if len( val.shape ) == 1: # scalar constraints
-                    valE = np.hstack([val for i in range(n)] )
-                elif 'g' in k: # gv and gov gradient constraints
-                    valE = []
-                    for i in range(n):
-                        for v in val:
-                            if y == "up":
-                                valE.append([v[0], 0, v[1]])
-                            else:
-                                valE.append([v[0], v[1], 0])
-                    valE = np.array(valE)
-                else: # other N-D vector constraints
-                    valE = np.vstack([val for i in range(n)] )
-                out.__setattr__(k, valE)
-    return out
-
-def clip( points, thresh, width, height, normal, origin):
-    """
-    Clip a numpy array of points or a CSet instance to within the specified distance
-    of the defined section.
-    """
-    pass
-
 def triangle_wave(x, A=1, T=2*np.pi, n_terms=11):
     """
     Approximates a triangle wave using a Fourier series.
@@ -720,6 +622,10 @@ class Transform:
 
         if self.matrix.shape not in [(3, 3), (4, 4)]:
             raise ValueError("Transform matrix must be 3x3 or 4x4")
+
+    def isIdentity(self) -> bool:
+        """Return True if this transform is the identity matrix."""
+        return np.allclose(self.matrix, np.eye(self.matrix.shape[0]))
 
     def set(self, mat: ArrayLike):
         """Set the transform matrix."""

@@ -39,5 +39,27 @@ def test_OBJ(tmp_path):
     rgb = np.clip( (np.random.rand(100,3) * 255), 0, 255 ).astype(np.uint8)
     saveOBJ( tmp_path / "test.obj", xyz=xyz, rgb=rgb, faces=faces ) # check OBJ writes
     assert os.path.exists( tmp_path / "test.obj" ) # not the robust test; but better than nothing...
-    
 
+def test_model_io(tmp_path):
+    import curlew
+    from curlew.io import saveModel, loadModel
+    from curlew.synthetic import steno
+    
+    # build synthetic model and check it saves / loads
+    curlew.default_dim = 2
+    M = steno()
+    path = tmp_path / "steno.pt"
+    saveModel(path, M)
+    M2 = loadModel(path)
+    assert M2.name == M.name
+    assert len(M2.events) == len(M.events)
+    xy = M.grid.coords()[:50]
+    g1 = M.predict(xy)
+    g2 = M2.predict(xy)
+    assert np.max(np.abs(g1.scalar - g2.scalar)) < 1e-6
+
+    # extract one event and check it also saves / loads
+    path_evt = tmp_path / "s0.pt"
+    saveModel(path_evt, M.events[0])
+    E2 = loadModel(path_evt)
+    assert E2.name == M.events[0].name

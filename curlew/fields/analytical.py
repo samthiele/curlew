@@ -6,6 +6,7 @@ these can also be used to build geological models.
 import numpy as np
 import curlew
 import torch
+import torch.nn as nn
 from curlew import _tensor
 from curlew.geometry import blended_wave, Transform
 from curlew.fields import BaseAF
@@ -27,11 +28,18 @@ class LinearField( BaseAF ):
     normalise : bool, optional
         Normalise the gradient vector to have a length of one (such that the resulting
         field is a distance field). Default is False.
+    learnable : bool, optional
+        If True, ``origin`` and ``gradient`` are registered as ``nn.Parameter`` instances
+        and can be optimised with ``field.fit(...)``. Default is False.
+    learning_rate : float, optional
+        Optimiser learning rate used when ``learnable=True``. Default is 1e-1.
     """
     def initField( self,
                    origin: np.ndarray = None,
                    gradient: np.ndarray = None,
-                   normalise: bool = False ):
+                   normalise: bool = False,
+                   learnable: bool = False,
+                   learning_rate: float = 1e-1 ):
 
         # store origin and gradient as torch tensors
         if origin is None:
@@ -39,19 +47,28 @@ class LinearField( BaseAF ):
         if gradient is None:
             gradient = np.zeros( self.input_dim )
             gradient[-1] = 1
-        self.origin = _tensor( origin, dt=curlew.dtype, dev=curlew.device )
         self.normalise = normalise
         self.mnorm = np.linalg.norm(gradient)
+        grad_arr = np.array(gradient, dtype=float)
         if normalise:
-            gradient = gradient / self.mnorm
+            grad_arr = grad_arr / self.mnorm
             self.mnorm = 1.0
-        self.grad = _tensor( gradient, dt=curlew.dtype, dev=curlew.device )
+        if learnable:
+            self.origin = nn.Parameter(_tensor(origin, dt=curlew.dtype, dev=curlew.device))
+            self.grad = nn.Parameter(_tensor(grad_arr, dt=curlew.dtype, dev=curlew.device))
+            self.init_optim(lr=learning_rate)
+        else:
+            self.origin = _tensor(origin, dt=curlew.dtype, dev=curlew.device)
+            self.grad = _tensor(grad_arr, dt=curlew.dtype, dev=curlew.device)
 
     def evaluate( self, x: torch.Tensor ):
         """
         Evaluate the linear function determining the scalar field values.
         """
-        return torch.sum( (x - self.origin[None,:]) * self.grad[None,:], axis=-1 )
+        grad = self.grad
+        if self.normalise:
+            grad = grad / (torch.norm(grad) + 1e-8)
+        return torch.sum( (x - self.origin[None,:]) * grad[None,:], axis=-1 )
 
 class QuadraticField( BaseAF ):
     """
@@ -302,8 +319,9 @@ class EllipsoidalField(BaseAF):
 
     def evaluate(self, x: torch.Tensor):
         """
+        Evaluate in canonical coordinates (``BaseSF.forward`` applies ``self.T`` first).
         """
-        r = torch.linalg.norm(x, dim=1)
+        r = torch.linalg.norm(x, dim=-1)
         if self.decay:
             # 1 at the center, 0 at/after the boundary (r >= 1)
             return torch.clamp(1 - r, min=0)

@@ -56,7 +56,7 @@ class Overprint(LearnableBase):
                    unconformably surfaces the unconformity base is parallel to the overlying bedding. 
                 - `"parent"`: use the parent field to define the domain boundary (erosional surface). This can
                    be useful if the erosional surface is parallel to the older bedding and younger units onlap onto this.
-            Note that for domain boundaries (i.e. GeoField instances with a defined `parent2` field), this parameter will
+            Note that for domain boundaries (i.e. GeoEvent instances with a defined `parent2` field), this parameter will
             have no effect as the domain boundary is defined by a separate (third) field. 
         """
         super().__init__()
@@ -73,10 +73,10 @@ class Overprint(LearnableBase):
 
         Parameters
         ----------
-        parent : curlew.geofield.Geode
-            A `Geode` (output object) from the older GeoField.
-        child : curlew.geofield.Geode
-            A `Geode` (output object) from the younger GeoField.
+        parent : curlew.core.Geode
+            A `Geode` (output object) from the older GeoEvent.
+        child : curlew.core.Geode
+            A `Geode` (output object) from the younger GeoEvent.
         domain : torch.Tensor
             An (N,) array defining the implicit field to use as a domain mask that determines
             which regions are overprinted (as described by `self.mode`). If None (default) `child.scalar`
@@ -89,7 +89,9 @@ class Overprint(LearnableBase):
         assert self.thresh is not None, "`self.thresh` must be defined (by e.g. evaluating an isosurface) before calling `overprint`."
         if domain is None: 
             if self.defaultDomain == 'child':domain = child.scalar # child field determines the domain
-            elif self.defaultDomain == 'parent': domain = parent.scalar
+            elif self.defaultDomain == 'parent': 
+                field = self.getBaseField(field) # get the name of the parent field (as some values of parent.scalar might have already been overprinted by earlier events!)
+                domain = parent.fields[field.name]
             else: raise ValueError(f"Invalid default domain: {self.defaultDomain}. Should be 'child' or 'parent'.")
 
         if isinstance(self.thresh, list):
@@ -115,8 +117,35 @@ class Overprint(LearnableBase):
         # combine results and return an updated Geode object
         return parent.combine( child, mask )
 
+    def getBaseField(self, field):
+        """ Recurse backwards through the model field to find the 
+            generative event that determines the base of the domain. Typically
+            this is the parent field, though we want to skip through deformation events."""
+        if self.defaultDomain == 'child':
+            return field # that's very easy
+        else:
+            assert field.parent is not None, "Parent field is not defined yet `defaultDomain` is 'parent'."
+            if field.parent.overprint is not None:
+                return field.parent # easy; parent is a generative event
+            else:
+                return self.getBaseField(field.parent) # recurse backwards
+    
+    def updateThresh(self, field):
+        """ Set the threshold value using the given field and this Overprint object's threshold value or name"""
+        field = self.getBaseField(field)
+        if isinstance(self.threshold, (tuple, list)):
+            self.thresh = [
+                field.getIsovalue(t) if isinstance(t, str) else t
+                for t in self.threshold
+            ]
+        elif isinstance(self.threshold, str):
+            assert self.threshold in field.isosurfaces, f"Isosurface {self.threshold} not found in field {field.name}"
+            self.thresh = field.getIsovalue(self.threshold)
+        else:
+            self.thresh = self.threshold
+        
     def __repr__(self):
-        return f"Overprint(mode='{self.mode}', thresh={self.thresh})"
+        return f"Overprint(mode='{self.mode}', thresh={self.threshold})"
 
 # OFFSETTING RELATIONS - functions used to move things around (kinematic fields; these are the real shakers and movers).
 # ------------------------------------------------------------------------------------------------------------------------
@@ -126,7 +155,7 @@ class OffsetBase(LearnableBase):
     """
     def eval( self, x, G ):
         """
-        Get displacement vectors for points `X` based on GeoField `G`. This will be called by the GeoField and return the results of self.disp(...).
+        Get displacement vectors for points `X` based on GeoEvent `G`. This will be called by the GeoEvent and return the results of self.disp(...).
         """
         o = self.disp( x, G )
         return o
@@ -137,7 +166,7 @@ class OffsetBase(LearnableBase):
     
     def dss( self, x, G, normalize=False ):
         """
-        Evaluate the scalar field gradient (ds) and value (s)  for the points `X` given GeoField `G`. Note that 
+        Evaluate the scalar field gradient (ds) and value (s)  for the points `X` given GeoEvent `G`. Note that 
         this assumes `x` is already transformed into the local (paleo) coordinate system relevant for `G`.
         """
         # get gradient of scalar field at X and associated value
@@ -152,7 +181,7 @@ class OffsetBase(LearnableBase):
 
     def disp( self, X, G ):
         """
-        Compute displacement vectors for points `X` based on GeoField `G`. Child classess implementing specific types of offset should implement this function.
+        Compute displacement vectors for points `X` based on GeoEvent `G`. Child classess implementing specific types of offset should implement this function.
         """
         raise NotImplementedError
     
@@ -182,7 +211,7 @@ class VFieldOffset(OffsetBase):
         dt : float, optional
             The time step size. Default is -1.0, i.e. reconstruct backwards in time. +1 can be used to deform paleo-coordinates forward in time. 
         eval_transform : bool, optional
-            Whether to evaluate the field in the local coordinate system of the GeoField. Default is False.
+            Whether to evaluate the field in the local coordinate system of the GeoEvent. Default is False.
         """
         super().__init__()
         if field is not None and not isinstance(field, BaseSF):
@@ -267,7 +296,7 @@ class SheetOffset(VFieldOffset):
 
 class FaultOffset(VFieldOffset):
     """
-    Fault-related displacement from the gradient of the GeoField's implicit surface, integrated
+    Fault-related displacement from the gradient of the GeoEvent's implicit surface, integrated
     with :class:`VFieldOffset` (default ``n_steps=2``, ``dt=1``). The instantaneous "velocity"
     at each Euler sub-step is the mode-II slip vector constructed from ``dss`` (same construction
     as the historical single-step fault offset). For strongly curved faults, increase ``n_steps``
@@ -409,7 +438,7 @@ class FoldOffset( OffsetBase ):
     
     def disp( self, X, G ):
         """
-        Compute displacement vectors for points `X` based on GeoField `G`.
+        Compute displacement vectors for points `X` based on GeoEvent `G`.
         """
         ds, s = self.dss(X,G,normalize=False) # get gradient direction
         #ds, s = G.field.compute_gradient( X, normalize=False,

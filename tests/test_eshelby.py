@@ -220,6 +220,218 @@ def test_eshelbyfield_learnable_weights():
     assert tuple(field.weights.shape) == (2,)
     assert np.allclose(field.weights.detach().cpu().numpy(), [0.5, 0.5])
 
+def test_eshelby2d():
+    _set_cpu_float64()
+    curlew.default_dim = 2
+    
+    # A simple x–z plane setup: 2D coords are interpreted as (x, z)
+    field_2d = EshelbyField(
+        "e2d",
+        positions=np.array([[0.0, 0.0]], dtype=float),  # (x, z)
+        normals=np.array([1.0, 0.0], dtype=float),      # normal along +x
+        slips=np.array([0.0, 1.0], dtype=float),        # slip along +z
+        radii=1.0,
+        thicknesses=0.2,
+        mu=1.0,
+        nu=0.25,
+        max_ram_mb=64,
+        n_taper=1,
+    )
+
+    # Equivalent 3D field in the x–z plane (y=0)
+    field_3d = EshelbyField(
+        "e3d",
+        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+        normals=np.array([1.0, 0.0, 0.0], dtype=float),
+        slips=np.array([0.0, 0.0, 1.0], dtype=float),
+        radii=1.0,
+        thicknesses=0.2,
+        mu=1.0,
+        nu=0.25,
+        max_ram_mb=64,
+        n_taper=1,
+    )
+
+    # Receiver points in 2D (x, z)
+    pts2 = np.array(
+        [
+            [0.1, 0.0],
+            [0.5, 0.2],
+            [2.0, -0.4],
+            [-1.5, 0.75],
+        ],
+        dtype=float,
+    )
+    u2 = field_2d.displacement(pts2, max_ram_mb=64)
+    assert isinstance(u2, np.ndarray)
+    assert u2.shape == pts2.shape
+    assert np.isfinite(u2).all()
+
+    pts3 = np.zeros((pts2.shape[0], 3), dtype=float)
+    pts3[:, 0] = pts2[:, 0]
+    pts3[:, 2] = pts2[:, 1]
+    u3 = field_3d.displacement(pts3, max_ram_mb=64)
+    assert isinstance(u3, np.ndarray)
+    assert u3.shape == pts3.shape
+
+    # 2D result should match 3D restricted to (x, z)
+    assert np.allclose(u2, u3[:, (0, 2)], rtol=2e-6, atol=2e-8)
+
+    # test also accepts a single 2D point
+    field = EshelbyField(
+        "one2d",
+        positions=np.array([[0.0, 0.0]], dtype=float),
+        normals=np.array([0.0, 1.0], dtype=float),
+        slips=np.array([1.0, 0.0], dtype=float),
+        radii=2.0,
+        thicknesses=1.0,
+        mu=1.0,
+        nu=0.25,
+        max_ram_mb=64,
+        n_taper=1,
+    )
+    u = field.displacement(np.array([0.5, 0.25], dtype=float), max_ram_mb=64)
+    assert isinstance(u, np.ndarray)
+    assert u.shape == (2,)
+    assert np.isfinite(u).all()
+
+
+def test_getEllipseField_projected_boundary_sign():
+    _set_cpu_float64()
+
+    # Normal with a non-zero y-component so the equatorial circle projects to
+    # a non-degenerate ellipse in the (x, z) display plane.
+    n = np.array([0.2, 0.9, 0.25], dtype=float)
+    n = n / np.linalg.norm(n)
+
+    field = EshelbyField(
+        "ellipse_src",
+        positions=np.array([[0.0, 0.0]], dtype=float),  # (x, z) with centre at origin
+        normals=n,
+        slips=np.array([1.0, 0.0, 0.0], dtype=float),
+        radii=2.0,
+        thicknesses=0.5,
+        mu=1.0,
+        nu=0.25,
+        max_ram_mb=64,
+        n_taper=1,
+    )
+    assert field.is2D
+
+    pkf = field.getEllipseField()
+
+    # Ellipse-centre: value should be -1 by construction.
+    x0 = torch.tensor([[0.0, 0.0]], dtype=curlew.dtype, device=curlew.device)
+    v0 = float(pkf.forward(x0).reshape(-1)[0].detach().cpu().numpy())
+    assert abs(v0 + 1.0) < 1e-9
+
+    # Construct projected boundary points by sampling the local equatorial circle
+    # (local z=0) and projecting to (x, z) via the stored RT rotation.
+    RT0 = field._RT[0]      # (3, 3) local -> global
+    pos0 = field._pos[0]    # (3,)
+    r = float(field._radii[0].detach().cpu().numpy())
+
+    thetas = [0.0, float(np.pi / 3.0), float(np.pi / 2.0)]
+    x_boundary_pts = []
+    for th in thetas:
+        u_local = torch.tensor(
+            [r * np.cos(th), r * np.sin(th), 0.0],
+            dtype=curlew.dtype,
+            device=curlew.device,
+        )
+        p_global = pos0 + RT0 @ u_local
+        xz = torch.tensor(
+            [[float(p_global[0].detach().cpu().numpy()), float(p_global[2].detach().cpu().numpy())]],
+            dtype=curlew.dtype,
+            device=curlew.device,
+        )
+        x_boundary_pts.append(xz)
+        vb = float(pkf.forward(xz).reshape(-1)[0].detach().cpu().numpy())
+        assert abs(vb) < 1e-6
+
+    # Check scaling along the ray to a boundary point: value(s) = alpha - 1
+    x_b0 = x_boundary_pts[0]
+    v_in = float(pkf.forward(x_b0 * 0.5).reshape(-1)[0].detach().cpu().numpy())
+    v_out = float(pkf.forward(x_b0 * 2.0).reshape(-1)[0].detach().cpu().numpy())
+    assert abs(v_in + 0.5) < 2e-6
+    assert abs(v_out - 1.0) < 2e-6
+
+
+def test_getEllipseField_3d_ellipsoid_boundary_sign():
+    _set_cpu_float64()
+
+    field = EshelbyField(
+        "ellipsoid_src",
+        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+        normals=np.array([0.3, 0.4, 0.866025403784], dtype=float),  # arbitrary unit-ish
+        slips=np.array([1.0, 0.0, 0.0], dtype=float),
+        radii=2.0,
+        thicknesses=0.5,
+        mu=1.0,
+        nu=0.25,
+        max_ram_mb=64,
+        n_taper=1,
+    )
+    assert not field.is2D
+
+    pkf = field.getEllipseField()
+
+    # Center: -1
+    x0 = torch.tensor([[0.0, 0.0, 0.0]], dtype=curlew.dtype, device=curlew.device)
+    v0 = float(pkf.forward(x0).reshape(-1)[0].detach().cpu().numpy())
+    assert abs(v0 + 1.0) < 1e-9
+
+    # A point on the surface: choose local point (r, 0, 0) and rotate to global.
+    RT0 = field._RT[0]
+    r = float(field._radii[0].detach().cpu().numpy())
+    p_surf = RT0 @ torch.tensor([r, 0.0, 0.0], dtype=curlew.dtype, device=curlew.device)
+    xs = p_surf.unsqueeze(0)
+    vs = float(pkf.forward(xs).reshape(-1)[0].detach().cpu().numpy())
+    assert abs(vs) < 1e-6
+
+    # Scaling along that ray: alpha-1
+    v_in = float(pkf.forward(xs * 0.5).reshape(-1)[0].detach().cpu().numpy())
+    v_out = float(pkf.forward(xs * 2.0).reshape(-1)[0].detach().cpu().numpy())
+    assert abs(v_in + 0.5) < 2e-6
+    assert abs(v_out - 1.0) < 2e-6
+
+
+def test_getEllipseField_deformed_moves_thickness_outwards_for_opening():
+    _set_cpu_float64()
+
+    # Pure opening: slip parallel to normal -> eps_zz* > 0 in local frame.
+    n = np.array([0.0, 0.0, 1.0], dtype=float)
+    slip = np.array([0.0, 0.0, 1.0], dtype=float)
+
+    r = 2.0
+    t = 1.0
+    w = 0.2
+
+    field = EshelbyField(
+        "open",
+        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+        normals=n,
+        slips=slip,
+        radii=r,
+        thicknesses=t,
+        weights=w,
+        mu=1.0,
+        nu=0.25,
+        max_ram_mb=64,
+        n_taper=1,
+    )
+
+    pkf_u = field.getEllipseField(deformed=False)
+    pkf_d = field.getEllipseField(deformed=True)
+
+    # On the undeformed boundary along +local z (global z here): value ~ 0 for undeformed,
+    # but should be negative (inside) for deformed because the thickness increased.
+    x_old = torch.tensor([[0.0, 0.0, t]], dtype=curlew.dtype, device=curlew.device)
+    vu = float(pkf_u.forward(x_old).reshape(-1)[0].detach().cpu().numpy())
+    vd = float(pkf_d.forward(x_old).reshape(-1)[0].detach().cpu().numpy())
+    assert abs(vu) < 1e-6
+    assert vd < -1e-3
+    
 def test_visualisation():
     _set_cpu_float64()
 

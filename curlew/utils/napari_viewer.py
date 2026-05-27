@@ -851,7 +851,7 @@ class NapariViewer:
 
         if hasattr(hole, "numpy") and callable(hole.numpy):
             hole = hole.numpy()
-        x = np.asarray(hole.x, dtype=np.float64)
+        x = np.asarray(hole.coords() if hasattr(hole, "coords") else hole.x, dtype=np.float64)
         lid = np.asarray(hole.lithoID).ravel()
         if x.shape[0] < 2:
             return None
@@ -977,11 +977,11 @@ class NapariViewer:
                     opacity=opacity,
                 )
             else:
-                if geode.x is None:
+                if not geode.x:
                     raise ValueError(
                         f"Cannot add {suffix}: geode has no grid and no x coordinates"
                     )
-                gx = np.asarray(geode.x, dtype=np.float64)
+                gx = np.asarray(geode.coords(), dtype=np.float64)
                 if flat.shape[0] != gx.shape[0]:
                     raise ValueError(
                         f"{suffix}: length {flat.shape[0]} does not match x rows {gx.shape[0]}"
@@ -1055,9 +1055,9 @@ class NapariViewer:
                     layers[n].vertex_colors = vertex_colors
 
         if displacement and geode.offsets:
-            if geode.x is None:
+            if not geode.x:
                 raise ValueError("geode.offsets requires geode.x for vector origins")
-            x0 = np.asarray(geode.x, dtype=np.float64)
+            x0 = np.asarray(geode.coords(), dtype=np.float64)
             for key, disp in geode.offsets.items():
                 nm = f"offset_{key}"
                 d = np.asarray(disp, dtype=np.float64)
@@ -1226,11 +1226,6 @@ class NapariViewer:
 
             cmap_lhs = mpl_colormaps["Reds"]
             cmap_rhs = mpl_colormaps["Blues"]
-            cmap_eq = mpl_colormaps["viridis"]
-
-            eq_pts_parts: list[np.ndarray] = []
-            eq_rgba_parts: list[np.ndarray] = []
-            eq_sym_parts: list[str] = []
             n_iq = max(1, len(iq_list))
             for i, entry in enumerate(iq_list):
                 P1, P2, rel = entry
@@ -1241,15 +1236,6 @@ class NapariViewer:
                 t = 0.0 if n_iq <= 1 else (i / (n_iq - 1))
                 col_lhs = np.asarray(cmap_lhs(t), dtype=np.float32)
                 col_rhs = np.asarray(cmap_rhs(t), dtype=np.float32)
-                col_eq = np.asarray(cmap_eq(t), dtype=np.float32)
-
-                if rel_s == "=":
-                    if p1.shape[0] > 0:
-                        p1n = self._to_napari_xyz(p1)
-                        eq_pts_parts.append(p1n)
-                        eq_rgba_parts.append(np.tile(col_eq, (p1n.shape[0], 1)))
-                        eq_sym_parts.extend(["diamond"] * p1n.shape[0])
-                    continue
 
                 # inequality: choose symbols by relationship and side
                 # '>' : LHS cross, RHS hbar; '<' : LHS hbar, RHS cross
@@ -1259,7 +1245,7 @@ class NapariViewer:
                     lhs_sym, rhs_sym = ("hbar", "cross")
                 else:
                     raise ValueError(
-                        f"Unsupported inequality relation {rel_s!r}; expected '=', '<', or '>'"
+                        f"Unsupported inequality relation {rel_s!r}; expected '<' or '>'"
                     )
 
                 pts_parts: list[np.ndarray] = []
@@ -1299,20 +1285,36 @@ class NapariViewer:
                     self._cnt += 1
                     layers[nm] = layer
 
+        if C.eq is not None:
+            from matplotlib import colormaps as mpl_colormaps
+
+            cmap_eq = mpl_colormaps["viridis"]
+            eq_pts_parts: list[np.ndarray] = []
+            eq_rgba_parts: list[np.ndarray] = []
+            eq_sym_parts: list[str] = []
+            n_eq = max(1, len(C.eq))
+            for i, trace in enumerate(C.eq):
+                pts = np.asarray(trace, dtype=np.float64)
+                if pts.shape[0] == 0:
+                    continue
+                t = 0.0 if n_eq <= 1 else (i / (n_eq - 1))
+                col_eq = np.asarray(cmap_eq(t), dtype=np.float32)
+                ptn = self._to_napari_xyz(pts)
+                eq_pts_parts.append(ptn)
+                eq_rgba_parts.append(np.tile(col_eq, (ptn.shape[0], 1)))
+                eq_sym_parts.extend(["diamond"] * ptn.shape[0])
             if eq_pts_parts:
                 nm_eq = f"{name}_eq"
                 self._remove_layer_if_present(nm_eq)
-                eq_xyz = np.concatenate(eq_pts_parts, axis=0)
-                eq_rgba = np.concatenate(eq_rgba_parts, axis=0)
                 eq_layer = self.viewer.add_points(
-                    eq_xyz,
+                    np.concatenate(eq_pts_parts, axis=0),
                     name=nm_eq,
-                    face_color=eq_rgba,
+                    face_color=np.concatenate(eq_rgba_parts, axis=0),
                     symbol=np.asarray(eq_sym_parts, dtype=object),
                     size=iq_size,
                     out_of_slice_display=True,
                 )
-                eq_layer.visible = False # hidden by default.
+                eq_layer.visible = False
                 self._layers[nm_eq] = eq_layer
                 self._cnt += 1
                 layers[nm_eq] = eq_layer

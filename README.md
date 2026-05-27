@@ -56,6 +56,23 @@ Kamath, A. V., Thiele, S. T., Moulard, M., Grose, L., Tolosana-Delgado, R., Hill
 
 ## Versions and change log
 
+### v1.2 - another significant refactoring (sorry)
+
+- Renamed `GeoField` to `GeoEvent` to avoid confusion with scalar fields themselves (inheriting from `BaseSF`). Updated `GeoEvent` so that they can contain multiple 
+separate underlying fields and (using these) define `volumes` within the model. These
+volumes can be used to e.g., define finite faults. 
+
+- Updated the `Overprint` class to allow onlap relationships in which the
+unconformity geometry is determined by the older (rather than the younger)
+implicit field.
+
+- Simplified synthetic model creation so that extracted constraints are 
+added directly to the created `BaseSF` instances, and added 2D and 3D options
+so that 3D test data can be more easily generated.
+
+- Added the `Pebble` class (inspired by `Geode`) to help more easily create, track
+  and combine losses and their associated optimsers.
+
 ### v1.1 - major restructure, introduced napari-based 3D viewer
 
 Upgrades to the geology/modeling core, especially an improved structure for the `GeoField` class and associated deformation events. Added new field types, including Fourier series fields, which tend to converge faster and better than Fourier neural fields. Also included a prototype napari-based 3D visualization tool that runs nicely in parallel to jupyter notebook environments.
