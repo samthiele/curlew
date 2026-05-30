@@ -30,11 +30,10 @@ Quickly get up to speed with `curlew` using these [CoLab tutorials](https://driv
 
 ### Documentation
 
-Documentation is automatically built and served through [GitHub Pages](https://samthiele.github.io/curlew/):
-- [Stable (`main`)](https://samthiele.github.io/curlew/) — default API reference
+Documentation is built and served through [GitHub Pages](https://samthiele.github.io/curlew/):
+- [Stable (`main`)](https://samthiele.github.io/curlew/) — more stable API version
 - [Development (`dev`)](https://samthiele.github.io/curlew/dev/) — latest changes on the dev branch
 
-A banner at the top of each page links between the two versions.
 
 ## Support and feedback
 
