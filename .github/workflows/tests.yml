@@ -94,6 +94,8 @@ jobs:
         python -m pip install --upgrade pip
         pip install pdoc3
         python -m pip install numpy torch matplotlib tqdm plyfile
+        # pdoc imports all curlew submodules
+        python -m pip install "napari[all]"
         if [ -f src-main/requirements.txt ]; then pip install -r src-main/requirements.txt; fi
 
     - name: Build stable documentation (main)

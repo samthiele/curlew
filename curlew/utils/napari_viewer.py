@@ -18,11 +18,13 @@ if TYPE_CHECKING:
     from curlew.fields.eshelby import EshelbyField
     from matplotlib.colors import Colormap as MplColormap
 
-# try loading napari
+# Optional dependency — do not fail at import time (e.g. pdoc must load this module).
 try:
     import napari
-except ImportError as e:  # pragma: no cover - optional dependency
-    assert False, "Please install napari (`pip install napari[all]`) to use napariViewer"
+except ImportError:  # pragma: no cover - optional dependency
+    napari = None  # type: ignore[misc, assignment]
+
+_NAPARI_INSTALL_MSG = "Please install napari (`pip install napari[all]`) to use NapariViewer"
 
 
 def resolve_cmap(cmap=None):
@@ -197,6 +199,8 @@ class NapariViewer:
         viewer=None,
         **viewer_kwds,
     ):
+        if napari is None:
+            raise ImportError(_NAPARI_INSTALL_MSG)
         if ndisplay is None:
             ndisplay = curlew.default_dim
         if ndisplay not in (2, 3):
