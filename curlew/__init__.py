@@ -2,7 +2,7 @@
 
 A toolkit for building 2- and 3- dimensional geological models using neural fields.
 
-<img src="https://github.com/samthiele/curlew/blob/main/banner.png?raw=true" width="200">
+<img src="https://github.com/samthiele/curlew/blob/main/banner.png?raw=true" height="300">
 
 ## Getting started
 
@@ -50,7 +50,7 @@ Currently, curlew supports a variety of learnable (complex/fitted) and analytica
 - `curlew.fields.ListricField` for listric faults.
 - `curlew.fields.EllipsoidalField` for ellipsoidal geometries (e.g., intrusion bodies, finite faults, etc.)
 
-**`curlew.geology.GeoEvent` (Geological events)**
+**`curlew.geology.geoevent.GeoEvent` (Geological events)**
 
 Geological meaning is given to scalar fields through the `GeoEvent` class. This encapsulates one or more `BaseSF` instances and defines 
 how they interact with older and younger fields in the model. Currently, two different relationships are supported:
@@ -64,25 +64,25 @@ Geologically meaningful isosurfaces (lithological contacts, fault surfaces, etc.
 using the `addIsosurface` and `addVolume` methods. Importantly, and unlike most geological modelling tools, isosurfaces can be defined either as fixed values (e.g., `1.0`) or by whichever value the model evaluates
 at a given seed point (or the average of multiple seed points). Crucially, the latter form allows isosurfaces to be defined independent of the underlying field values.  
 
-**`curlew.base.GeoModel` (models)**
+**`curlew.geology.geomodel.GeoModel` (models)**
 
 The `GeoModel` class is used to construct the graph of `GeoEvent` instances that ultimately define model evaluation flow and topology. 
 It also provides a high-level interface for evaluating model predictions at arbitrary points in space and defining global to local 
 coordinate system transforms (i.e. local grids). Models can be saved and loaded using the `curlew.io.saveModel` and `curlew.io.loadModel` functions.
 
-**`curlew.base.Geode` (model outputs)**
+**`curlew.core.Geode` (model outputs)**
 
 The `Geode` class is used to store the diverse outputs of a model. These include the scalar field values, lithology and structure IDs, 
 predicted properties (e.g., density), and applied deformations (e.g., fault offset). The `Geode` class can also be used to store the model's grid, coordinate system transforms, 
 and other metadata.
 
-**`curlew.base.Pebble` (losses and optimisers)**
+**`curlew.core.Pebble` (losses and optimisers)**
 
 The `Pebble` class is used to store losses and optimisers. This includes the loss values, the weights (hyperparameters) used to balance each loss, 
 and the optimisers used to update the model's parameters. Generally it is only necessary to create a new `Pebble` object if you want to 
 create a custom loss function or new type of learnable object.
 
-**`curlew.base.CSet` (model constraints)**
+**`curlew.core.CSet` (model constraints)**
 
 Geological information used to fit learnable fields (or offset/overprint objects) are stored in a `CSet` object. When constructing a new model
 it is typical to construct a `CSet` for each `GeoEvent` instance based on the available data. These data include (but are not limited to):
@@ -95,7 +95,7 @@ it is typical to construct a `CSet` for each `GeoEvent` instance based on the av
 - grid constraints (grid covering the model domain, to sample global constraints from)
 - trend constraints (a preferred global gradient orientation)
 
-**`curlew.base.HSet` (model hyperparameters)**
+**`curlew.core.HSet` (model hyperparameters)**
 
 The dark-side of neural field interpolation. This class contains the various hyperparameters that can be used to 
 balance/tune complex (multi-objective) loss functions. Most fields should use ~1-3 individual loss terms (with the remaining hyperparameters set to 0),
