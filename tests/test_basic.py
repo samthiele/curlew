@@ -258,7 +258,7 @@ def test_pebble():
     assert total.optim["g2"] is opt2
 
     desc = str(total)
-    assert desc.startswith("L=3 ")
+    assert desc.startswith("L=3")
     assert "g1/data=1" in desc
     assert "g2/reg=2" in desc
     assert "\n" not in desc
@@ -280,7 +280,7 @@ def test_pebble():
     assert snapshot.detached
     assert isinstance(snapshot.losses["g1"]["data"], np.ndarray)
     assert snapshot.optim == {"g1": None, "g2": None}
-    assert str(snapshot).startswith("L=3 ")
+    assert str(snapshot).startswith("L=3")
 
     with pytest.raises(ValueError, match="detached and active"):
         total + snapshot
@@ -290,4 +290,40 @@ def test_pebble():
         snapshot.zero()
     with pytest.raises(RuntimeError, match="detached Pebble"):
         snapshot.step()
+
+def test_softOverprint():
+    """Soft overprint weights propagate gradients to the domain scalar; hard lithoID is unchanged."""
+    import torch
+    from curlew.core import Geode
+    from curlew.geology.interactions import Overprint
+
+    domain = torch.tensor([0.0, 1.0, 2.0], requires_grad=True)
+    parent = Geode(
+        softLithoID=torch.tensor([1.0, 1.0, 1.0]),
+        softStructureID=torch.tensor([0.0, 0.0, 0.0]),
+        lithoID=torch.tensor([1, 1, 1], dtype=torch.int),
+        scalar=torch.zeros(3),
+        structureID=torch.zeros(3, dtype=torch.int),
+    )
+    child = Geode(
+        softLithoID=torch.tensor([5.0, 5.0, 5.0]),
+        softStructureID=torch.tensor([2.0, 2.0, 2.0]),
+        lithoID=torch.tensor([5, 5, 5], dtype=torch.int),
+        scalar=domain,
+        structureID=torch.full((3,), 2, dtype=torch.int),
+    )
+    op = Overprint(threshold=0.5, mode='above', lithoSharpness=10.0, structureSharpness=10.0)
+    op.thresh = 0.5
+    out = op.apply(parent, child)
+
+    assert torch.all(out.lithoID == torch.tensor([1, 5, 5], dtype=torch.int))
+    assert torch.all(out.structureID == torch.tensor([0, 2, 2], dtype=torch.int))
+    assert out.softLithoID[0] < 2.0
+    assert out.softLithoID[-1] > 4.0
+    assert out.softStructureID[0] < 1.0
+    assert out.softStructureID[-1] > 1.5
+
+    out.softLithoID.sum().backward()
+    assert domain.grad is not None
+    assert domain.grad.abs().sum() > 0
 

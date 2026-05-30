@@ -17,8 +17,8 @@ def plot2D( sxy, grid, C=None, ticksize=50, lw=1, cmap='rainbow', levels=None, a
         containing RGB values to plot instead.
     grid : curlew.geometry.Grid
         A grid defining the points at which the values of `sxy` are located.
-    C : np.ndarray, optional
-        A constraint set containing the (2D) points to overlay on the plot.
+    C : curlew.core.CSet, optional
+        Constraint set whose points are overlaid on the plot (converted to NumPy internally).
     ticksize : int, optional
         The size of the orientation ticks to add to the plot.
     lw : float, optional
@@ -63,6 +63,7 @@ def plot2D( sxy, grid, C=None, ticksize=50, lw=1, cmap='rainbow', levels=None, a
 
     # plot data
     if C is not None:
+        C = C.numpy() # no torch
         # plot value constraints
         if (C.vp is not None) and (C.pp is None): # don't plot value constraints if a property constraint is defined
             if vmn is None: vmn,vmx = np.percentile( C.vv.squeeze(), (0,100) )

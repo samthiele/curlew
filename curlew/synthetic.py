@@ -227,8 +227,8 @@ def sample( G, M, pv=None, breaks=19, init=100, xstep=300, pval=0.6, cmap='tab20
 
     np.random.seed(seed)
 
-    sf = G.grid.reshape(G.scalar)
-    sid = G.grid.reshape(G.structureID.astype(int))
+    sf = G.grid.reshape(curlew._numpy(G.scalar))
+    sid = G.grid.reshape(curlew._numpy(G.structureID).astype(int))
     xy = G.grid.reshape(G.grid.coords())
     constraints = {
         int(k): {"vp": [], "vv": [], "gp": [], "gv": [], "gop": [], "gov": [], "eq": []}
@@ -304,7 +304,11 @@ def steno( shape=None, **kwargs ):
     extent = _physical_extent(shape)
     ndim = _model_ndim(shape)
 
-    s0 = strati('s0', C=QuadraticField( 'f0', input_dim=ndim, gradient=_g2((0.00001, 1), ndim), curve=_g2((-0.00005, 0), ndim), origin=_p2((1000, 500), ndim) ) )
+    s0 = strati('s0', C=QuadraticField( 'f0', 
+                                       input_dim=ndim, 
+                                       gradient=_g2((0.00001, 1), ndim), 
+                                       curve=_g2((-0.00005, 0), ndim), 
+                                       origin=_p2((1000, 500), ndim) ) )
 
     for seed, name in _isosurface_seeds(extent, ndim, 5):
         s0.addIsosurface(name, seed=seed)
@@ -375,13 +379,15 @@ def hutton( shape=None, **kwargs ):
     extent = _physical_extent(shape)
     ndim = _model_ndim(shape)
 
-    s0 = strati('s0', C=QuadraticField( 'f1', input_dim=ndim, gradient=_g2((0, 1), ndim), origin=_p2((0, 0), ndim), curve=_g2((-0.00002, 0), ndim) ))
+    s0 = strati('s0', C=QuadraticField( 'f1', input_dim=ndim, gradient=_g2((0, 1), ndim), 
+                                       origin=_p2((0, 0), ndim), curve=_g2((-0.00002, 0), ndim) ))
     d1 = fold('d1', origin=_p2((0, 0), ndim),
                     extension=_g2((0, 1), ndim),
                     compression=_g2((1, 0.3), ndim),
                     wavelength=2000,
                     amplitude=250, sharpness=0.7)
-    s1 = strati('s1', C=QuadraticField( 'f1', input_dim=ndim, gradient=_g2((0.1, 0.9), ndim), origin=_p2((1000, 500), ndim), curve=_g2((-0.00002, 0), ndim) ), base=0)
+    s1 = strati('s1', C=QuadraticField( 'f1', input_dim=ndim, gradient=_g2((0.1, 0.9), ndim), 
+                                       origin=_p2((1000, 500), ndim), curve=_g2((-0.00002, 0), ndim) ), base=0)
 
     for seed, name in _isosurface_seeds(extent, ndim, 5):
         s0.addIsosurface(name, seed=seed)

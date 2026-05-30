@@ -201,6 +201,15 @@ class GeoEvent( object ):
         if isinstance(self.field, list): return self.field
         else: return [self.field]
 
+    def _overprint_litho_sharpness(self):
+        """``lithoSharpness`` from a single or list ``Overprint`` (list: first entry)."""
+        op = self.overprint
+        if op is None:
+            return 1.0
+        if isinstance(op, list):
+            return op[0].lithoSharpness
+        return op.lithoSharpness
+
     # TODO - override the [ ] operator so that fields can be indexed by name
     def __getitem__(self, field):
         """Return a field belonging to this GeoEvent by name (str) or index (int). See `self.getField` for further details."""
@@ -255,10 +264,10 @@ class GeoEvent( object ):
         -------
         loss : float
             The loss of the final (best if best=True) model state.
-        details : dict
-            A more detailed breakdown of the final loss. 
-            
-        If this GeoEvent has multiple fittable underlying fields, a list of these losses and details will be returned.
+        pebble : Pebble
+            A detailed breakdown of the final loss.
+
+        If this GeoEvent has multiple fittable underlying fields, a list of ``(loss, pebble)`` tuples is returned.
         """
         fields = self._field_list()
         outList = []
@@ -367,34 +376,38 @@ class GeoEvent( object ):
         return value
 
     def predict(self, x: ArrayLike, combine=False, to_numpy=True, transform=True, values=None, 
-                      litho : bool = True, props=True, isosurfaces=True, gradient : bool = False) -> np.ndarray:
+                      litho : bool = True, props=True, isosurfaces=True, gradient : bool = False):
         """
-        Predict scalar values belonging to this and/or previousGeologicalFields.
+        Predict scalar values belonging to this and/or previous geological fields.
 
         Parameters
         ----------
-        x : np.ndarray | torch.tensor | curlew.geometry.Grid
-            An array of shape (N, input_dim) containing the modern-day coordinates at which to evaluate
-            this (and previous) GeologicalField.
-        combine: bool
-            True if previous scalar fields should be aggregated to give a combined
-            scalar field output. Otherwise, evaluate the scalar field related to this
-            specific structure alone. Default is False.
-        to_numpy : bool
-            True if the results should be cast to a numpy array rather than a `torch.Tensor`.
-        transform : bool
-            True if the coordinates should be undeformed (i.e. represent modern-day coordinates) or not (i.e. represent 
-            this events paleo-coordinates).
-        values : torch.Tensor
-            Pre-computed results of this GeoEvent (used sometimes to save recomputing). Default is None (values will be computed).
-        litho : bool
-            True (default) if lithology codes should be computed.
-        props : bool
-            True (default) if properties should be computed when a `propertyField` is defined.
-        isosurfaces : bool
-            True (default is False) if isosurface (and anchor) values should be computed and stored. Default is True. 
-        gradient : bool
-            True if the gradient at each `x` should also be calculated. Default is False.
+        x : np.ndarray | torch.Tensor | curlew.geometry.Grid | Geode
+            Coordinates at which to evaluate, shape (N, input_dim), or a grid / Geode supplying them.
+        combine : bool, optional
+            If True, aggregate with older fields in the event tree. If False, evaluate this event only.
+            Default is False.
+        to_numpy : bool, optional
+            If True (default), cast array outputs to NumPy. If False, keep torch tensors and populate
+            ``softLithoID`` / ``softStructureID`` where applicable.
+        transform : bool, optional
+            If True (default), ``x`` is in modern-day coordinates and older deformations are applied.
+            If False, ``x`` is in this event's paleo-coordinates.
+        values : torch.Tensor, optional
+            Pre-computed scalar values for this event (skips field evaluation when provided).
+        litho : bool, optional
+            If True (default), compute ``lithoID`` (and soft lithology when ``to_numpy=False``).
+        props : bool, optional
+            If True (default), evaluate ``propertyField`` when defined.
+        isosurfaces : bool, optional
+            If True (default), store isosurface thresholds and anchor positions on the output Geode.
+        gradient : bool, optional
+            If True, also compute ``gradient`` at each point. Default is False.
+
+        Returns
+        -------
+        curlew.core.Geode
+            Model outputs at ``x`` (scalar field, structure/lithology IDs, optional properties, etc.).
         """
         
         # check torch types 
@@ -498,6 +511,10 @@ class GeoEvent( object ):
                 out.scalar = _tensor([out.scalar.detach().item()] )
             
             out.structureID = torch.full( (len(out.scalar),), self.eid, device=curlew.device, dtype=torch.int)
+            if not to_numpy:
+                out.softStructureID = torch.full(
+                    (len(out.scalar),), float(self.eid), device=curlew.device, dtype=curlew.dtype
+                )
             out.structureLookup = {**out.structureLookup, **{self.eid : self.name}}
 
             
@@ -512,6 +529,10 @@ class GeoEvent( object ):
             if self.llookup is not None:
                 lid = self.llookup.get(self.name, -1)
             out.lithoID = torch.full( (len(out.scalar),), lid, device=curlew.device, dtype=torch.int)
+            if not to_numpy: # initialise softLithoID output
+                out.softLithoID = torch.full(
+                    (len(out.scalar),), float(lid), device=curlew.device, dtype=curlew.dtype
+                )
             out.lithoLookup = {**out.lithoLookup, **{-1 : "Undefined", lid : self.name }}
             iso_values = None
             if litho and (self.overprint is not None) and (self.parent2 is None): # only define lithologies for generative events (obviously)
@@ -526,8 +547,11 @@ class GeoEvent( object ):
                         if self.llookup is not None:
                             assert k in self.llookup, "Lithology lookup must contain all isosurfaces in generative fields"
                             i = self.llookup[k]
-                        out.lithoLookup[i] = k # store link betweein ID and lithology name
+                        out.lithoLookup[i] = k # store link between ID and lithology name
                         out.lithoID[mask] = i # update lithology ID array
+                        if not to_numpy: # also compute a soft lithology ID for learning with
+                            w = torch.sigmoid(self._overprint_litho_sharpness() * (out.scalar - v))
+                            out.softLithoID = w * float(i) + (1.0 - w) * out.softLithoID
 
             if isosurfaces:
                 # evaluate isosurfaces to get either threshold values (if 
@@ -903,7 +927,9 @@ class GeoEvent( object ):
         ----------
         values : list, None
             A list of isosurface names to evaluate. If None, all isosurfaces will be evaluated.
-
+        offset : float, optional
+            If defined, offset isosurface seed points by the specified distance in the gradient direction. Can be useful 
+            for e.g., extracting buffer geometries.
         Returns
         --------
         Either a list of isosurface values or a dictionary of isosurface names and corresponding

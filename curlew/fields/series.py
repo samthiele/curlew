@@ -115,7 +115,8 @@ class FSF(BaseNF):
             lengths = torch.pow(torch.tensor(10.0, dtype=curlew.dtype, device=curlew.device), lo + u[:,0]*(hi-lo))
             k_raw   = torch.erfinv(2.0*u[:,1:]-1.0) * (2.0**0.5)
         else:
-            lengths = torch.logspace(lo, hi, rff_features, dtype=curlew.dtype, device=curlew.device)
+            #lengths = torch.logspace(lo, hi, rff_features, dtype=curlew.dtype, device=curlew.device) # doesn't work on MPS
+            lengths = torch.pow(10.0, torch.linspace(lo, hi, rff_features, dtype=curlew.dtype, device=curlew.device))
             k_raw   = torch.randn(rff_features, self.input_dim, device=curlew.device, dtype=curlew.dtype)
             
         Omega = 2.0 * torch.pi * k_raw / lengths.unsqueeze(1)     # (F, dim)

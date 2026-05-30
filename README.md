@@ -30,7 +30,11 @@ Quickly get up to speed with `curlew` using these [CoLab tutorials](https://driv
 
 ### Documentation
 
-Documentation is automatically built and served through [GitHub pages](https://samthiele.github.io/curlew/). 
+Documentation is automatically built and served through [GitHub Pages](https://samthiele.github.io/curlew/):
+- [Stable (`main`)](https://samthiele.github.io/curlew/) — default API reference
+- [Development (`dev`)](https://samthiele.github.io/curlew/dev/) — latest changes on the dev branch
+
+A banner at the top of each page links between the two versions.
 
 ## Support and feedback
 
@@ -72,6 +76,10 @@ so that 3D test data can be more easily generated.
 
 - Added the `Pebble` class (inspired by `Geode`) to help more easily create, track
   and combine losses and their associated optimsers.
+
+- Added option for custom losses to be defined at the `GeoModel` level, to enable 
+  workflows that optimise all fields as a stack (e.g., fitting to large datasets that
+  cannot easily be broken down to the per-field level [ e.g., gravity inversion ]). 
 
 ### v1.1 - major restructure, introduced napari-based 3D viewer
 

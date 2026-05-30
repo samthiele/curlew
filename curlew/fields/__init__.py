@@ -648,6 +648,6 @@ class BaseNF(BaseSF):
             self._last_iq_worst_indices = None
 
 # import other child classes for easy access
-from curlew.fields.analytical import LinearField, QuadraticField, PeriodicField, ListricField
+from curlew.fields.analytical import LinearField, QuadraticField, PeriodicField, ListricField, EllipsoidalField
 from curlew.fields.fourier import NFF
 from curlew.fields.series import FSF

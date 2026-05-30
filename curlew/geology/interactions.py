@@ -31,13 +31,14 @@ class Overprint(LearnableBase):
     Base class for combining predictions from two consecutive scalar fields and "overprinting" some older
     scalar values to form unconformities or intrusions.
     """
-    def __init__(self, threshold : Union[str, list] = 0, mode : str = 'above', defaultDomain : str ='child'):
+    def __init__(self, threshold : Union[str, list] = 0, mode : str = 'above', defaultDomain : str ='child',
+                 lithoSharpness : float = 1.0, structureSharpness : float = 1.0):
         """
         Create a new "overprint" object for applying overprinting stratigraphic (e.g., unconformities) and
         igneous (e.g., dykes, intrusions) events.
 
         Parameters
-        -----------
+        ----------
         threshold : float, tuple, str
             The threshold above which the child field will "overprint" the parent one. Can be a single value
             (integer or string representing relevant isosurface name) to overprint older rocks above or below
@@ -58,11 +59,19 @@ class Overprint(LearnableBase):
                    be useful if the erosional surface is parallel to the older bedding and younger units onlap onto this.
             Note that for domain boundaries (i.e. GeoEvent instances with a defined `parent2` field), this parameter will
             have no effect as the domain boundary is defined by a separate (third) field. 
+        lithoSharpness : float
+            Sigmoid sharpness for ``softLithoID`` at this overprint boundary (and isosurface lithology assignment on
+            the associated generative event). Larger values give harder lithology transitions, smaller values give smoother transitions
+            that can improve convergence for models learning using lithology IDs.
+        structureSharpness : float
+            Sigmoid sharpness for ``softStructureID`` at this overprint boundary. Behaviour is the same as for `lithoSharpness`.
         """
         super().__init__()
         self.threshold = threshold
         self.mode = mode
         self.defaultDomain = defaultDomain.lower()
+        self.lithoSharpness = lithoSharpness
+        self.structureSharpness = structureSharpness
         
     def apply(self, parent, child, domain=None ):
         """
@@ -77,45 +86,81 @@ class Overprint(LearnableBase):
             A `Geode` (output object) from the older GeoEvent.
         child : curlew.core.Geode
             A `Geode` (output object) from the younger GeoEvent.
-        domain : torch.Tensor
-            An (N,) array defining the implicit field to use as a domain mask that determines
-            which regions are overprinted (as described by `self.mode`). If None (default) `child.scalar`
-            will be used, to give a typical e.g., unconformity or intrusion.
+        domain : torch.Tensor, optional
+            An (N,) implicit field used as the overprint domain (see ``self.mode``). If None (default),
+            ``child.scalar`` is used for a typical unconformity or intrusion.
         Returns
         -------
-        numpy.ndarray
-            An updated array of shape (N, 2) containing the updated scalar values and event IDs.
+        curlew.core.Geode
+            Combined parent/child outputs with overprint applied.
         """
         assert self.thresh is not None, "`self.thresh` must be defined (by e.g. evaluating an isosurface) before calling `overprint`."
         if domain is None: 
             if self.defaultDomain == 'child':domain = child.scalar # child field determines the domain
             elif self.defaultDomain == 'parent': 
-                field = self.getBaseField(field) # get the name of the parent field (as some values of parent.scalar might have already been overprinted by earlier events!)
-                domain = parent.fields[field.name]
+                assert hasattr(self, 'domainEvent'), "updateThresh must be called before apply when defaultDomain is 'parent'."
+                domain = parent.fields[self.domainEvent.name]
             else: raise ValueError(f"Invalid default domain: {self.defaultDomain}. Should be 'child' or 'parent'.")
 
+        mask, soft_litho_weight, soft_structure_weight = self._overprint_weights(domain)
+
+        # combine results and return an updated Geode object
+        return parent.combine(
+            child, mask,
+            soft_litho_weight=soft_litho_weight,
+            soft_structure_weight=soft_structure_weight,
+        )
+
+    def _soft_weight(self, domain, thresh, sharpness):
+        """Sigmoid-smoothed overprint weight for a scalar threshold or interval."""
+        if isinstance(thresh, (float, int)):
+            return torch.sigmoid(sharpness * (domain - thresh))
+
+        soft_weight = torch.zeros(len(domain), device=curlew.device, dtype=curlew.dtype)
+        for i in np.arange(len(thresh), step=2):
+            T = thresh[i:(i+2)]
+            t_lo, t_hi = float(np.min(T)), float(np.max(T))
+            soft_interval = (
+                torch.sigmoid(sharpness * (domain - t_lo))
+                * torch.sigmoid(sharpness * (t_hi - domain))
+            )
+            soft_weight = torch.maximum(soft_weight, soft_interval)
+        return soft_weight
+
+    def _overprint_weights(self, domain):
+        """
+        Hard and soft overprint weights from the domain scalar field.
+
+        Returns a hard 0/1 mask (for ``lithoID``, ``structureID``, etc.) and sigmoid-smoothed
+        weights for ``softLithoID`` and ``softStructureID`` using ``lithoSharpness`` and
+        ``structureSharpness`` respectively.
+        """
         if isinstance(self.thresh, list):
             thresh = float(self.thresh[0]) if len(self.thresh) == 1 else self.thresh
         else:
             thresh = float(self.thresh)
 
-        # apply threshold
         if isinstance(thresh, (float, int)):
-            # 1 in areas where child > thresh
-            mask = (domain > thresh) #torch.sigmoid(self.sharpness * (domain - thresh))
+            mask = (domain > thresh)
         else:
             mask = torch.zeros(len(domain), device=curlew.device, dtype=curlew.dtype)
             for i in np.arange(len(thresh), step=2):
                 T = thresh[i:(i+2)]
-                lower_mask = domain > np.min(T) #torch.sigmoid(self.sharpness * (domain - np.min(T)))
-                upper_mask = domain < np.max(T) #torch.sigmoid(self.sharpness * ( np.max(T) - domain))
-                mask = torch.logical_or( mask, lower_mask * upper_mask)  # 1 in areas where thresh[0] < child < thresh[1]
+                t_lo, t_hi = float(np.min(T)), float(np.max(T))
+                lower_mask = domain > t_lo
+                upper_mask = domain < t_hi
+                mask = torch.logical_or(mask, lower_mask * upper_mask)
+
+        soft_litho_weight = self._soft_weight(domain, thresh, self.lithoSharpness)
+        soft_structure_weight = self._soft_weight(domain, thresh, self.structureSharpness)
+
         mask = mask.type(curlew.dtype)
         if ('below' in self.mode.lower()) or ('out' in self.mode.lower()):
-            mask = 1 - mask # flip mask
+            mask = 1 - mask
+            soft_litho_weight = 1 - soft_litho_weight
+            soft_structure_weight = 1 - soft_structure_weight
 
-        # combine results and return an updated Geode object
-        return parent.combine( child, mask )
+        return mask, soft_litho_weight, soft_structure_weight
 
     def getBaseField(self, field):
         """ Recurse backwards through the model field to find the 
@@ -131,8 +176,17 @@ class Overprint(LearnableBase):
                 return self.getBaseField(field.parent) # recurse backwards
     
     def updateThresh(self, field):
-        """ Set the threshold value using the given field and this Overprint object's threshold value or name"""
-        field = self.getBaseField(field)
+        """
+        Resolve ``self.threshold`` to numeric values and store them in ``self.thresh``.
+
+        Parameters
+        ----------
+        field : curlew.geology.GeoEvent
+            The generative event whose isosurfaces supply named thresholds. Also sets
+            ``self.domainEvent`` when ``defaultDomain`` is ``'parent'``.
+        """
+        self.domainEvent = self.getBaseField(field)
+        field = self.domainEvent
         if isinstance(self.threshold, (tuple, list)):
             self.thresh = [
                 field.getIsovalue(t) if isinstance(t, str) else t

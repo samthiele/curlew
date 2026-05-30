@@ -458,13 +458,13 @@ class HSet:
         ori_loss : float  | str
             Factor applied to orientation losses. Default is 1 (as this is fixed to the range 0 to 1).
         thick_loss : float  | str
-            Factor applied to thickness loss. Default is 1 (as this loss is also generally small).
+            Factor applied to thickness loss. Default is 0 (disabled); set to 1 or a string fraction to enable.
         mono_loss : float  | str
-            Factor applied to monotonicity (divergence) loss. Default is "0.01" (initialise automatically). 
+            Factor applied to monotonicity (divergence) loss. Default is 0 (disabled); ``"0.01"`` initialises automatically. 
         flat_loss : float  | str
-            Factor applied to global trend misfit. Default is 0.1 (as this shouldn't be too strongly applied).
+            Factor applied to global trend misfit. Default is 0 (disabled); 0.1 is a typical value when enabled.
         prop_loss : float  | str
-            Factor applied to scale the loss resulting from reconstructed property fields (i.e. forward model misfit).
+            Factor applied to property-field (forward model) loss. Default is 0 (disabled).
         iq_loss : float | str
             Factor applied to scale the loss resulting from any provided inequality constraints.
         eq_loss : float | str
@@ -485,10 +485,10 @@ class HSet:
     value_loss : float = 1
     grad_loss : float = 1
     ori_loss : float = 0
-    thick_loss : float = 1
-    mono_loss : float = "0.01"
-    flat_loss : float = 0.1
-    prop_loss : float = "1.0"
+    thick_loss : float = 0 # 1
+    mono_loss : float = 0 # "0.01"
+    flat_loss : float = 0 # 0.1
+    prop_loss : float = 0 # "1.0"
     iq_loss : float = 0
     eq_loss : float = 0
     use_dynamic_loss_weighting : bool = False
@@ -536,9 +536,11 @@ class Geode( object ):
         grid (curlew.geometry.Grid): A `curlew.geometry.Grid` class if points were sampled from a regular grid.
         crs (str) : The default coordinate-system key into ``x`` for this Geode.
         lithoID (torch.tensor or np.ndarray): (N,) array of lithology classes defined by isosurfaces described in the relevant `GeoEvent` instance(s).
+        softLithoID (torch.tensor): Differentiable proxy for ``lithoID`` (populated when ``predict(..., to_numpy=False)``).
         lithoLookup (dict): A dictionary where keys are lithoID integers and values are the name of the associated isosurfaces.
         structureID (torch.tensor or np.ndarray): (N,) array of structure IDs denoting the index of the `GeoEvent` responsible for each lithology / value
                                                   in the model result.
+        softStructureID (torch.tensor): Differentiable proxy for ``structureID`` (populated when ``predict(..., to_numpy=False)``).
         structureLookup (dict): A dictionary where keys are structureIDs and values give the name of the corresponding `GeoEvent`.
         scalar (torch.tensor or np.ndarray): (N,) array of the scalar values evaluated at each `x`.
         properties (torch.tensor or np.ndarray): (N,d) array of property values derived at each `x`.
@@ -553,9 +555,11 @@ class Geode( object ):
     crs : str = None # default coordinate-system key into ``x``
 
     lithoID : torch.tensor = None
+    softLithoID : torch.tensor = None  # differentiable lithology proxy (training only)
     lithoLookup : dict = field(default_factory=dict)
 
     structureID : torch.tensor = None
+    softStructureID : torch.tensor = None  # differentiable structure proxy (training only)
     structureLookup : dict = field(default_factory=dict)
 
     scalar : torch.tensor = None # scalar field values
@@ -671,13 +675,35 @@ class Geode( object ):
             args.setdefault('crs', geodes[0].crs)
         return Geode(**args)
 
-    def combine(self, younger, weight):
+    def combine(self, younger, weight, soft_litho_weight=None, soft_structure_weight=None):
         """
         Combine the results from this Geode with results from a (typically younger) one, using the 
         specified weights. Both Geodes must be evaluated at the same coordinates.
+
+        Parameters
+        ----------
+        younger : Geode
+            Results from the younger ``GeoEvent`` (same length and coordinate systems as ``self``).
+        weight : torch.Tensor
+            Hard overprint weights (typically 0/1) for ``scalar``, ``structureID``, and ``lithoID``.
+        soft_litho_weight : torch.Tensor, optional
+            Differentiable overprint weights for ``softLithoID``. Defaults to ``weight``.
+        soft_structure_weight : torch.Tensor, optional
+            Differentiable overprint weights for ``softStructureID``. Defaults to ``weight``.
+
+        Returns
+        -------
+        Geode
+            Combined model outputs.
         """
         assert len(self) == len(younger), "Both Geodes must be evaluated at the same coordinates."
         iweight = 1-weight
+        if soft_litho_weight is None:
+            soft_litho_weight = weight
+        if soft_structure_weight is None:
+            soft_structure_weight = weight
+        isoft_litho = 1 - soft_litho_weight
+        isoft_structure = 1 - soft_structure_weight
 
         # combine basic attributes
         args = dict(x={**self.x, **younger.x}, grid=younger.grid, crs=younger.crs, # always take these from the younger object
@@ -709,15 +735,27 @@ class Geode( object ):
         # combine scalar values, structure IDs and lithoIDs (if defined)
         args['scalar'] = younger.scalar*weight + self.scalar*iweight
         args['structureID'] = torch.round((younger.structureID*weight + self.structureID*iweight)).to(dtype=torch.int) # round to integer
+        if (self.softStructureID is not None) and (younger.softStructureID is not None):
+            args['softStructureID'] = younger.softStructureID*soft_structure_weight + self.softStructureID*isoft_structure
+        elif younger.softStructureID is not None:
+            args['softStructureID'] = younger.softStructureID*soft_structure_weight
+        elif self.softStructureID is not None:
+            args['softStructureID'] = self.softStructureID*isoft_structure
         if (self.lithoID is not None) and (younger.lithoID is not None):
             args['lithoID'] = torch.round(younger.lithoID*weight + self.lithoID*iweight).to(dtype=torch.int) # round to integer
+        if (self.softLithoID is not None) and (younger.softLithoID is not None):
+            args['softLithoID'] = younger.softLithoID*soft_litho_weight + self.softLithoID*isoft_litho
+        elif younger.softLithoID is not None:
+            args['softLithoID'] = younger.softLithoID*soft_litho_weight
+        elif self.softLithoID is not None:
+            args['softLithoID'] = self.softLithoID*isoft_litho
 
         return Geode(**args)
 
     def stackValues(self, mn=0, mx=1):
         """
-        Scale scalar values so that they vary between mn and mx for each structural field, and then add offsets 
-        so that there are no overlaps between structures. This can be useful for e.g., plotting or isosurface 
+        Return a copy of this Geode with scalar values scaled so that they vary between mn and mx for each structural field, and increase
+        monotonically with the structure ID so that there are no overlaps between structures. This can be useful for plotting or isosurface 
         extraction.
 
         Parameters
@@ -736,7 +774,7 @@ class Geode( object ):
         out = self.numpy()
 
         # get the unique structure IDs
-        ids = np.unique(out.structureID)
+        ids = np.sort( np.unique(out.structureID) )[::-1]
 
         # create a new array to hold the stacked values
         stacked = np.zeros_like(out.scalar)
@@ -898,9 +936,9 @@ class Pebble( object ):
                 weighted = weight * val
                 total += weighted
                 label = f"{group}/{name}" if multi_group else name
-                parts.append(f"{label}={weighted:.4g}")
+                parts.append(f"{label}={weighted:.3f}")
 
-        return f"L={total:.4g} " + " ".join(parts)
+        return f"L={total:.3f} " + " ".join(parts)
 
     def total(self):
         """Return the weighted sum of all loss terms (tensor if active, float if detached)."""
@@ -958,13 +996,18 @@ class Pebble( object ):
         weight : float, optional
             The weight (hyperparameter) to apply to the loss term. Default is 1.0.
         optim : torch.optim.Optimizer, optional
-            The optimiser to use for this loss term. Can be None if an optimiser for this group has already been defined.
+            The optimiser to use for this loss term. Can be None if an optimiser for this group has already been defined. Can also 
+            be a dictionary of optimisers (keyed by group name) if this loss relates to multiple groups.
         """
         self._require_active("push")
         self.losses.setdefault(group, {})[name] = loss
         self.weights.setdefault(group, {})[name] = weight
         if optim is not None:
-            self.optim[group] = optim
+            if isinstance(optim, dict):
+                for k, v in optim.items(): # add multiple optimisers
+                    self.optim[k] = v
+            else:
+                self.optim[group] = optim
         
     def __add__(self, other):
         """Combine two Pebbles by merging their internal dicts."""

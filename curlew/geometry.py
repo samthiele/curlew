@@ -361,7 +361,7 @@ class Grid(object):
         else:
             return out
     
-    def contour(self, values, iso, normals=False, transform=True, mask=None ):
+    def contour(self, values, iso, normals=False, transform=True, mask=None, erodeMask=0 ):
       """
       Use values computed for this grid to extract 2D (lines) or 3D (surfaces) contours. Requires scikit-image.
 
@@ -381,6 +381,12 @@ class Grid(object):
               Can be provided either as a ravelled 1D array with the same length as `values`, or
               as an array already shaped like this grid (`self.shape`). Masked-out regions are
               ignored by the contouring algorithm.
+          erodeMask : int
+              If non-zero and `mask` is provided, morphologically filter the combined mask
+              before contouring. Positive values apply binary erosion (trim boundary voxels);
+              negative values apply binary dilation (expand the mask by ``abs(erodeMask)``
+              iterations). Dilation is often needed when the mask boundary coincides with the
+              isosurface being extracted. Default is 0 (no filtering).
       
       Returns
       --------
@@ -391,7 +397,8 @@ class Grid(object):
       except:
           assert False, "Please install scikit-image using `pip install scikit-image`"
       
-      # ensure mask has the correct dtype and shape
+      vol = self.reshape(values)
+      contour_mask = np.isfinite(vol)
       if mask is not None:
           m = np.asarray(mask)
           if m.dtype != bool:
@@ -405,14 +412,18 @@ class Grid(object):
                   "volume_mask must be either 1D (len(values),) or shaped like the grid (self.shape). "
                   f"Got volume_mask.shape={m.shape}, expected {(len(values),)} or {self.shape}."
               )
+          contour_mask = contour_mask & mask
+          if erodeMask:
+              if erodeMask > 0:
+                  from scipy.ndimage import binary_erosion
+                  contour_mask = binary_erosion(contour_mask, iterations=int(erodeMask))
+              else:
+                  from scipy.ndimage import binary_dilation
+                  contour_mask = binary_dilation(contour_mask, iterations=int(-erodeMask))
 
       if self.ndim == 3: # marching cubes
           from skimage.measure import marching_cubes
-          vol = self.reshape(values) # predicted value as (3D) grid
-          mc_mask = np.isfinite(vol) # also remove nans for mask (marching cubes will then ignore nans)
-          if mask is not None:
-              mc_mask = mc_mask & mask
-          vix, faces, norm, _ = marching_cubes( vol, level=iso, mask=mc_mask ) # find isosurface using marching cubes 
+          vix, faces, norm, _ = marching_cubes( vol, level=iso, mask=contour_mask ) # find isosurface using marching cubes 
 
           # build interpolators that convert indices to positions
           from scipy.interpolate import interp1d
@@ -443,11 +454,7 @@ class Grid(object):
               return verts, faces
       elif self.ndim == 2: # marching squares
           from skimage.measure import find_contours
-          img = self.reshape(values)
-          ms_mask = np.isfinite(img)
-          if mask is not None:
-              ms_mask = ms_mask & mask
-          contours = find_contours( img, iso, mask=ms_mask)
+          contours = find_contours( vol, iso, mask=contour_mask)
 
           # build interpolators that convert indices to positions
           from scipy.interpolate import interp1d

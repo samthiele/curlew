@@ -36,8 +36,8 @@ def test_hutton():
                 base=-np.inf, # basal surface (important for unconformities)
                 hidden_layers=[], # hidden layers in the multi-layer perceptron that parameterises our field
                 activation=None,
-                rff_features=128, # number of random sin and cos features to create for each scale 
-                length_scales=[500/2*np.pi,]) # the length scales in our model
+                rff_features=64, # number of random sin and cos features to create for each scale 
+                length_scales=[300*np.pi,]) # the length scales in our model
 
     # define interpolator for unconformity field
     s1 = strati('unconformity', # name of created geological neural field (GNF)
@@ -47,13 +47,13 @@ def test_hutton():
                 base="base", # basal surface (important for unconformities). In this case these have a value of 0.
                 hidden_layers=[], # no need for hidden layers!
                 activation=None,
-                rff_features=128, # number of random sin and cos features to create for each scale 
+                rff_features=64, # number of random sin and cos features to create for each scale 
                 length_scales=[2000/2*np.pi,]) # the length scales in our model
     
     # define isosurfaces
     s1.isosurfaces = Ms['s1'].isosurfaces
     s0.isosurfaces = Ms['s0'].isosurfaces
-    s1.addIsosurface("base", seed=Ms.events[1].field.origin) # layer near the base of the unconformity
+    s1.addIsosurface("base", seed=Ms['s1'].field.origin) # layer near the base of the unconformity
 
     # combine into a geomodel
     M = GeoModel([s0,s1])
@@ -83,6 +83,9 @@ def test_hutton():
     assert (pred.structureID == 2).any() # check some basement is present
     assert (pred.structureID == 1).any() # check some unconformity is present
 
+    pred2 = pred.stackValues() # check stackValues function runs
+    assert np.max(pred.scalar) != np.max(pred2.scalar) # TODO - make this test more strict?
+    
     # check lithoIDs were assigned correctly
     lithoNames = set( pred.lithoLookup.values() )
     assert 'basement' in lithoNames
@@ -129,8 +132,8 @@ def test_hutton_FSF():
                 H=H, # interpolator hyperparameters
                 type=FSF,
                 base=-np.inf, # basal surface (important for unconformities)
-                rff_features=128, # number of random sin and cos features to create for each scale 
-                length_scale_range=[500, 500]) # the length scales in our model
+                rff_features=64, # number of random sin and cos features to create for each scale 
+                length_scale_range=[300*np.pi, 500*np.pi]) # the length scales in our model
 
     # define interpolator for unconformity field
     s1 = strati('unconformity', # name of created geological neural field (GNF)
@@ -138,13 +141,13 @@ def test_hutton_FSF():
                 H=H.copy(mono_loss="1.0", thick_loss=1.0), # change some hyperparams
                 type=FSF,
                 base="base", # basal surface (important for unconformities). In this case these have a value of 0.
-                rff_features=128, # number of random sin and cos features to create for each scale 
+                rff_features=64, # number of random sin and cos features to create for each scale 
                 length_scale_range=[2000, 2000]) # the length scales in our model
     
     # define isosurfaces
     s1.isosurfaces = Ms['s1'].isosurfaces
     s0.isosurfaces = Ms['s0'].isosurfaces
-    s1.addIsosurface("base", seed=Ms.events[1].field.origin) # layer near the base of the unconformity
+    s1.addIsosurface("base", seed=Ms['s1'].field.origin) # layer near the base of the unconformity
 
     # combine into a geomodel
     M = GeoModel([s0,s1])
@@ -808,6 +811,125 @@ def test_project_and_sample_isosurface():
         else:
             _check_sample(np.array([70.0, 5.0, 2.0], dtype=float), method="kdtree")
             _check_sample(torch.tensor([70.0, 5.0, 2.0], device=curlew.device, dtype=curlew.dtype), method="kdtree")
+    finally:
+        curlew.default_dim = prev_dim
+
+def test_onlap():
+    """
+    Test onlap functionality using simple (synthetic) 3D model.
+
+    Checks that combined prediction succeeds and that isosurfaces defining
+    unconformity/onlap relations can be contoured from structure-masked fields
+    when the mask is dilated (negative ``erodeMask``).
+    """
+    from curlew.geology import strati, fold
+    from curlew.fields.analytical import LinearField
+    
+    prev_dim = curlew.default_dim # needed so we can set dim back to not interfere with other tests
+    try:
+        curlew.default_dim = 3
+
+        # setup a grid
+        vs = (5000.0, 5000.0, 2000.0)
+        G = Grid(
+            center=(-757471, 876690, -163835),
+            dims=(303 * vs[0], 347 * vs[1], 275 * vs[2]),
+            step=(40000, 40000, 16000),
+        )
+
+        # build a model with a basement, unconformity, and two units
+        s0 = strati(
+            "s0",
+            C=None,
+            type=LinearField,
+            origin=(-757471, 876690, -163835),
+            gradient=(0.1, 0.1, 1.0),
+            base="basement",
+        )
+        s0.addIsosurface("basement", seed=np.array((-757471, 876690, -163835 - 1000)))
+
+        d1 = fold(
+            "d1",
+            origin=G.center,
+            extension=np.array([0, 0, 1]),
+            compression=np.array([1, 0.3, 0]),
+            wavelength=5500000,
+            amplitude=250000,
+            sharpness=0.7,
+        )
+
+        s1 = strati(
+            "s1",
+            C=None,
+            type=LinearField,
+            origin=G.center,
+            gradient=(0.0, 0.1, 1.0),
+            base="basement",
+            onlap=True,
+        )
+        s1.addIsosurface("uc1", seed=np.array((-757471, 876690, -163835 + 50000)))
+
+        s2 = strati(
+            "s2",
+            C=None,
+            type=LinearField,
+            origin=G.center,
+            gradient=(0.0, -0.1, 1.0),
+            base="uc1",
+            onlap=True,
+        )
+
+        s3 = strati(
+            "s3",
+            C=None,
+            type=LinearField,
+            origin=G.center,
+            gradient=(0.0, 0.0, 1.0),
+            base="uc2",
+            onlap=False,
+        )
+        s3.addIsosurface("uc2", seed=np.array((-757471, 876690, -163835 + 70000)))
+
+        M = GeoModel([s0, d1, s1, s2, s3], grid=G, name="WCSB")
+
+        assert s1.overprint.defaultDomain == "parent"
+        assert s2.overprint.defaultDomain == "parent"
+        assert s3.overprint.defaultDomain == "child"
+
+        pred = M.predict(G)
+        assert len(np.unique(pred.structureID)) >= 3
+        assert s0.eid in pred.structureID
+        assert s1.eid in pred.structureID or s2.eid in pred.structureID
+
+        # check that isosurfacing works
+        try:
+            import skimage  # noqa: F401
+        except:
+            curlew.default_dim = prev_dim
+            return
+
+        needs_dilate = []
+        for e in M.events:
+            if e.overprint is None:
+                continue
+            for name, iso in e.getIsovalues().items():
+                scalar = np.asarray(pred.fields[e.name])
+                mask = pred.structureID == e.eid
+                try:
+                    G.contour(scalar, iso=iso, mask=mask, erodeMask=0)
+                except RuntimeError:
+                    needs_dilate.append((e.name, name)) # we wanted this error
+                else:
+                    # check valid isosurface if the above did not throw an error 
+                    verts, faces = G.contour(scalar, iso=iso, mask=mask, erodeMask=0)
+                    assert len(verts) > 0 and len(faces) > 0
+
+                # isosurface should certainly work after applying 2x dilations
+                verts, faces = G.contour(scalar, iso=iso, mask=mask, erodeMask=-2)
+                assert len(verts) > 0 and len(faces) > 0
+
+        assert needs_dilate, "Expected at least one masked isosurface to require mask dilation"
+        assert ("s1", "uc1") in needs_dilate
     finally:
         curlew.default_dim = prev_dim
 

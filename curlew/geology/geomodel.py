@@ -132,15 +132,14 @@ class GeoModel( LearnableBase ):
         fault offset while keeping fault geometry fixed.
 
         Parameters
-        ------------
-        name, str | GeoEvent | list:
-            The name of the GeoEvent to freeze. Can also be a list of names or instances. If None, 
-            the specified freeze will be applied to all GeoEvents in this model. Use `'forward'` to 
-            address any defined forward model.
-        geometry : bool
-            True if the geometry of the specified GeoEvent should be frozen. Default is True. 
-        params : bool
-            True if other parameters (e.g., fault slip) associated with the specified GeoEvents should be frozen. Default is False.
+        ----------
+        name : str | GeoEvent | list, optional
+            The name of the GeoEvent to freeze, or a list of names/instances. If None, apply to all
+            events. Use ``'forward'`` to address any defined forward model.
+        geometry : bool, optional
+            If True (default), freeze field geometry for the selected event(s).
+        params : bool, optional
+            If True, also freeze learnable parameters (e.g. fault slip). Default is False.
         """
         if name is None:
             name = [f for f in self.events] # apply to all
@@ -173,10 +172,8 @@ class GeoModel( LearnableBase ):
 
         Returns
         -------
-        loss : float
-            The loss of the final (best if best=True) model state.
-        pebble : Pebble
-            A detailed breakdown of the final loss.
+        dict
+            Maps each ``GeoEvent`` name to the final ``Pebble`` from isolated training.
         """
         out = {}
         for F in self.events[::-1]:
@@ -184,7 +181,7 @@ class GeoModel( LearnableBase ):
             out[F.name] = pebble
         return out
 
-    def fit(self, epochs, early_stop=(100, 1e-4), best=True, vb=True, prefix='Training'):
+    def fit(self, epochs, early_stop=(100, 1e-4), custom_loss=None, best=True, vb=True, prefix='Training'):
         """
         Train all GeoEvents in this model to fit the specified constraints
         simultaneously.
@@ -193,10 +190,13 @@ class GeoModel( LearnableBase ):
         ----------
         epochs : int
             The number of epochs to train each GeoEvent for.
-        early_stop : tuple,
-            Tuple containing early stopping criterion. This should be (n,t) such that optimisation
-            stops after n iterations with <= t improvement in the loss. Set to None to disable. Note 
-            that early stopping is only applied if `best = True`. 
+        early_stop : tuple, optional
+            Early stopping as ``(n, t)``: stop after ``n`` epochs with improvement ``<= t``. Set to
+            None to disable. Only used when ``best=True``.
+        custom_loss : list of callable, optional
+            Functions ``f(pebble, model, C) -> Pebble`` called each epoch after event losses are
+            accumulated. ``pebble`` holds per-event terms; ``model`` is this ``GeoModel``; ``C`` is
+            the bound ``CSet`` (or None). Each function should return a ``Pebble`` to merge.
         best : bool, optional
             After training set the neural field weights to the best loss.
         vb : bool, optional
@@ -211,7 +211,6 @@ class GeoModel( LearnableBase ):
         pebble : Pebble
             A detailed breakdown of the final loss. 
         """
-
         bar = range(epochs)
         if vb:
             bar = tqdm(range(epochs), desc=prefix, bar_format="{desc}: {n_fmt}/{total_fmt}|{postfix}")
@@ -221,12 +220,16 @@ class GeoModel( LearnableBase ):
         best_count = 0
         eps = early_stop[1] if early_stop is not None else 0
 
-        for epoch in bar:
-            pebble = Pebble()
-            for F in self.events[::-1]:
-                pebble = pebble + F.loss()
+        if custom_loss is None:
+            custom_loss = []
 
-            total = pebble.total()
+        for epoch in bar:
+            pebble = Pebble() # initialise loss
+            for F in self.events[::-1]:
+                pebble = pebble + F.loss() # add loss incurred by each GeoEvent (and associated learnables like deformations, overprints, etc.)
+            for loss_func in custom_loss:
+                pebble = pebble + loss_func(pebble, self, self.C) # add custom loss functions if they have been defined
+            total = pebble.total() # compute total loss
             if total.item() < (best_loss + eps):
                 best_loss = total.item()
                 best_pebble = pebble.detach()
@@ -261,16 +264,6 @@ class GeoModel( LearnableBase ):
 
         return best_loss, best_pebble
 
-    def custom_fit( self, loss_func, epochs ):
-        
-        # TODO: implement this
-        
-        # should be a utility function for fitting a custom loss function
-        # (and ignoring all [ or some?? ] fields default loss terms)
-        
-        # the fit function above can be used as a guide on how to implement this.
-        pass
-    
     def predict(self, x : np.ndarray, coords="global", **kwargs):
         """
         Create model predictions at the specified points.
@@ -290,9 +283,9 @@ class GeoModel( LearnableBase ):
         All keywords are passed directly to `GeoEvent.predict()`.
 
         Returns
-        --------
-        S : An array of shape (N,1) containig the predicted scalar values and corresponding GeoEvent
-            that "created" them.
+        -------
+        curlew.core.Geode
+            Combined model prediction at ``x`` (scalar, structure/lithology IDs, properties, etc.).
         """
 
         # update isosurface lookup (incase the defined isosurfaces have been changed)
