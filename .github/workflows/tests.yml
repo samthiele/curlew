@@ -108,16 +108,16 @@ jobs:
         python -m pip install ./src-dev
         pdoc --html curlew --output-dir _pdoc_dev --force
 
+    - name: Inject version switcher banner
+      run: |
+        python ci/.github/scripts/inject_docs_banner.py _pdoc_main stable
+        python ci/.github/scripts/inject_docs_banner.py _pdoc_dev dev
+
     - name: Assemble site
       run: |
         mkdir -p _site/dev
         cp -r _pdoc_main/curlew/. _site/
         cp -r _pdoc_dev/curlew/. _site/dev/
-
-    - name: Inject version switcher banner
-      run: |
-        python ci/.github/scripts/inject_docs_banner.py _site stable
-        python ci/.github/scripts/inject_docs_banner.py _site/dev dev
 
     - name: Upload Pages artifact
       uses: actions/upload-pages-artifact@v3
