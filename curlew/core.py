@@ -58,7 +58,7 @@ class LearnableBase(nn.Module):
             param_group['lr'] = lr
 
     def loss(self):
-        """Compute loss term(s) where relevant and return associated `Pebble` object encapsulating
+        """Compute loss term(s) where relevant and return associated `curlew.core.Pebble` object encapsulating
            these."""
         return Pebble()
     
@@ -67,7 +67,7 @@ class LearnableBase(nn.Module):
         Affine transform from global to model coordinates.
 
         Scalar fields use the parent GeoModel's ``T``. A GeoModel uses its own ``T``.
-        Field-local ``Transform`` objects (``self.T`` on ``BaseSF``) are not used here.
+        Field-local ``curlew.geometry.Transform`` objects (``self.T`` on ``curlew.fields.BaseSF``) are not used here.
         """
         m = getattr(self, "model", None)
         if m is not None:
@@ -354,7 +354,7 @@ class CSet:
 
         Parameters
         ----------
-        T : Transform
+        T : curlew.geometry.Transform
             GeoModel transform (global → model when ``inverse=False``).
         inverse : bool
             If False (default), map ``crs='global'`` to ``crs='model'``.
@@ -530,23 +530,23 @@ class Geode( object ):
 
     Attributes:
         x (dict): Maps coordinate-system names to (N,d) position arrays. Keys include
-                  ``"global"``, ``"model"``, each ``GeoEvent`` name, and ``"<fieldName>_local"``
+                  ``"global"``, ``"model"``, each ``curlew.geology.geoevent.GeoEvent`` name, and ``"<fieldName>_local"``
                   for fields with a non-identity local transform (i.e. only for fields actively using
                   global anisotropy of some form).
         grid (curlew.geometry.Grid): A `curlew.geometry.Grid` class if points were sampled from a regular grid.
         crs (str) : The default coordinate-system key into ``x`` for this Geode.
-        lithoID (torch.tensor or np.ndarray): (N,) array of lithology classes defined by isosurfaces described in the relevant `GeoEvent` instance(s).
+        lithoID (torch.tensor or np.ndarray): (N,) array of lithology classes defined by isosurfaces described in the relevant `curlew.geology.geoevent.GeoEvent` instance(s).
         softLithoID (torch.tensor): Differentiable proxy for ``lithoID`` (populated when ``predict(..., to_numpy=False)``).
         lithoLookup (dict): A dictionary where keys are lithoID integers and values are the name of the associated isosurfaces.
-        structureID (torch.tensor or np.ndarray): (N,) array of structure IDs denoting the index of the `GeoEvent` responsible for each lithology / value
+        structureID (torch.tensor or np.ndarray): (N,) array of structure IDs denoting the index of the `curlew.geology.geoevent.GeoEvent` responsible for each lithology / value
                                                   in the model result.
         softStructureID (torch.tensor): Differentiable proxy for ``structureID`` (populated when ``predict(..., to_numpy=False)``).
-        structureLookup (dict): A dictionary where keys are structureIDs and values give the name of the corresponding `GeoEvent`.
+        structureLookup (dict): A dictionary where keys are structureIDs and values give the name of the corresponding `curlew.geology.geoevent.GeoEvent`.
         scalar (torch.tensor or np.ndarray): (N,) array of the scalar values evaluated at each `x`.
         properties (torch.tensor or np.ndarray): (N,d) array of property values derived at each `x`.
         propertyNames (list): List of `d` property names corresponding to each dimension of `self.properties`.
-        fields (dict): Dict of scalar values at each `x`, keyed by underlying field name (``BaseSF.name``), not ``GeoEvent`` name.
-        offsets (dict): Dict containing the individual displacement fields evaluated at each `x` for each `GeoEvent` instance in the model.
+        fields (dict): Dict of scalar values at each `x`, keyed by underlying field name (``curlew.fields.BaseSF.name``), not ``curlew.geology.geoevent.GeoEvent`` name.
+        offsets (dict): Dict containing the individual displacement fields evaluated at each `x` for each `curlew.geology.geoevent.GeoEvent` instance in the model.
     """
 
     # local constraints
@@ -682,8 +682,8 @@ class Geode( object ):
 
         Parameters
         ----------
-        younger : Geode
-            Results from the younger ``GeoEvent`` (same length and coordinate systems as ``self``).
+        younger : curlew.core.Geode
+            Results from the younger ``curlew.geology.geoevent.GeoEvent`` (same length and coordinate systems as ``self``).
         weight : torch.Tensor
             Hard overprint weights (typically 0/1) for ``scalar``, ``structureID``, and ``lithoID``.
         soft_litho_weight : torch.Tensor, optional
@@ -693,7 +693,7 @@ class Geode( object ):
 
         Returns
         -------
-        Geode
+        curlew.core.Geode
             Combined model outputs.
         """
         assert len(self) == len(younger), "Both Geodes must be evaluated at the same coordinates."

@@ -83,9 +83,9 @@ class Overprint(LearnableBase):
         Parameters
         ----------
         parent : curlew.core.Geode
-            A `Geode` (output object) from the older GeoEvent.
+            A `curlew.core.Geode` (output object) from the older `curlew.geology.geoevent.GeoEvent`.
         child : curlew.core.Geode
-            A `Geode` (output object) from the younger GeoEvent.
+            A `curlew.core.Geode` (output object) from the younger `curlew.geology.geoevent.GeoEvent`.
         domain : torch.Tensor, optional
             An (N,) implicit field used as the overprint domain (see ``self.mode``). If None (default),
             ``child.scalar`` is used for a typical unconformity or intrusion.
@@ -181,7 +181,7 @@ class Overprint(LearnableBase):
 
         Parameters
         ----------
-        field : curlew.geology.GeoEvent
+        field : curlew.geology.geoevent.GeoEvent
             The generative event whose isosurfaces supply named thresholds. Also sets
             ``self.domainEvent`` when ``defaultDomain`` is ``'parent'``.
         """
@@ -242,7 +242,7 @@ class OffsetBase(LearnableBase):
 class VFieldOffset(OffsetBase):
     """
     Integrate a "velocity" field to derive displacements. 
-    If `field` is a `BaseSF`, its forward pass is treated as the velocity `v(x)`. 
+    If `field` is a `curlew.fields.BaseSF`, its forward pass is treated as the velocity `v(x)`. 
     Subclasses may omit `field` and override `_velocity` instead (see `SheetOffset`, `FaultOffset`).
     """
     def __init__(
@@ -258,7 +258,7 @@ class VFieldOffset(OffsetBase):
 
         Parameters
         ----------
-        field : `BaseSF`, optional
+        field : `curlew.fields.BaseSF`, optional
             The velocity field to integrate. If None, the subclass must override `_velocity`.
         n_steps : int, optional
             The number of Euler steps to take. Default is 4 (assumes quite a smooth displacement field!).
@@ -306,7 +306,7 @@ class VFieldOffset(OffsetBase):
 class SheetOffset(VFieldOffset):
     """
     Dyke/sill-style opening in the gradient direction of the host scalar field, integrated with
-    :class:`VelFieldOffset` (default ``n_steps=1``, ``dt=1``).
+    :class:`~curlew.geology.interactions.VFieldOffset` (default ``n_steps=1``, ``dt=1``).
     """
 
     def __init__(
@@ -351,7 +351,7 @@ class SheetOffset(VFieldOffset):
 class FaultOffset(VFieldOffset):
     """
     Fault-related displacement from the gradient of the GeoEvent's implicit surface, integrated
-    with :class:`VFieldOffset` (default ``n_steps=2``, ``dt=1``). The instantaneous "velocity"
+    with :class:`~curlew.geology.interactions.VFieldOffset` (default ``n_steps=2``, ``dt=1``). The instantaneous "velocity"
     at each Euler sub-step is the mode-II slip vector constructed from ``dss`` (same construction
     as the historical single-step fault offset). For strongly curved faults, increase ``n_steps``
     (and/or reduce ``dt``) instead of using a separate corrector pass.

@@ -26,5 +26,8 @@ sandbox
 .vscode/
 .VSCodeCounter
 
+# cursor
+.cursor/
+
 # MACOSX
 .DS_STORE

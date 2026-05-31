@@ -52,9 +52,9 @@ class BaseSF(LearnableBase):
             The dimensionality of the input space (e.g., 3 for [x, y, z], 2 for [x,y]). If None (default) then `curlew.default_dim` is used.
         output_dim : int, optional
             Dimensionality of the output (usually 1 for a scalar potential).
-        C : CSet
+        C : curlew.core.CSet
             Constraint sent used for learned or interpolated fields. Default is None.
-        H : HSet
+        H : curlew.core.HSet
             Hyperparameters used to tune the loss function for this NF. Default is None.
         drift : int | float | BaseSF
             A constant integer or float (to use a constant value as the drift), or another BaseSF instance (e.g., an AnalyticalField) that
@@ -62,7 +62,7 @@ class BaseSF(LearnableBase):
             field during the forward call, meaning learnable fields (interpolators) learn a residual relative to this drift. Default is 0 (no drift).
         transform : callable
             A function that transforms input coordinates prior to evaulation. Must take exactly one argument as input (a tensor of positions) and return the transformed positions. 
-        local : `curlew.core.Transform`, optional
+        local : `curlew.geometry.Transform`, optional
             A Transform object defining the transform from (possibly undeformed) field coordinates to the local coordinates passed into the neural or analytical field
             representing this scalar field. This will be applied during the forward call, and can be used to e.g., implement global anisotropy, or tweak the 
             represented structures by adding a constant offset or rotation. Defaults to an identity matrix (no transform).
@@ -141,7 +141,7 @@ class BaseSF(LearnableBase):
         transform : bool
             If True (default), any defined transform function is applied before encoding and evaluating the field for `x`.
             `x` should thus be expressed in model coordinates that will first be reconstructed into field coordinates using
-            the defined transform function. Note that this should not be confused with the `curlew.core.Transform` object (`self.T`)
+            the defined transform function. Note that this should not be confused with the `curlew.geometry.Transform` object (`self.T`)
             used to then convert field coordinates to local coordinates.
             
         Returns
@@ -460,7 +460,7 @@ class BaseSF(LearnableBase):
         return pebble
     
     def fit(self, epochs, 
-                 C : CSet = None, 
+                 C : curlew.core.CSet = None, 
                  early_stop : tuple = (100,1e-4), 
                  transform : bool = True, 
                  best : bool = True, 
@@ -474,7 +474,7 @@ class BaseSF(LearnableBase):
         ----------
         epochs : int
             The number of epochs to train for.
-        C : CSet, optional
+        C : curlew.core.CSet, optional
             The set of constraints to fit this field to. If None, the previously
             bound constraint set will be used.
         early_stop : tuple,
@@ -500,7 +500,7 @@ class BaseSF(LearnableBase):
         -------
         loss : float
             The loss of the final (best if best=True) model state.
-        pebble : Pebble
+        pebble : curlew.core.Pebble
             A detailed breakdown of the final loss. 
         """
         # bind the constraints
@@ -595,7 +595,7 @@ class BaseNF(BaseSF):
             self,
             name : str,
             H: HSet,
-            C : CSet = None,
+            C : curlew.core.CSet = None,
             input_dim: int = None,
             output_dim: int = 1,
             transform = None,
@@ -609,9 +609,9 @@ class BaseNF(BaseSF):
             ----------
             name : str
                 A (ideally unique) name for this neural field. Should typically match the name of the GeoEvent instance that uses this field.
-            H : HSet
+            H : curlew.core.HSet
                 Hyperparameters used to tune the loss function for this NF.
-            C : CSet, optinoal
+            C : curlew.core.CSet, optinoal
                 Constraint sent used when learning this implicit field. Default is None (can be set using `field.bind(...)`).
             input_dim : int, optional
                 The dimensionality of the input space (e.g., 3 for (x, y, z)). If None (default), then `curlew.default_dim` will be used.

@@ -121,11 +121,11 @@ def _csets_in_order(constraints):
 
 def extract_constraints(M, events=None, include_property=False):
     """
-    Return bound constraint sets from a synthetic ``GeoModel`` for use when fitting neural fields.
+    Return bound constraint sets from a synthetic ``curlew.geology.geomodel.GeoModel`` for use when fitting neural fields.
 
     Parameters
     ----------
-    M : GeoModel
+    M : curlew.geology.geomodel.GeoModel
         A synthetic model returned by one of the builders in this module (after ``sample`` has run).
     events : list of str, optional
         Event names to include. Defaults to all events in ``M.events``.
@@ -192,7 +192,7 @@ def sample( G, M, pv=None, breaks=19, init=100, xstep=300, pval=0.6, cmap='tab20
     ----------
     G : curlew.core.Geode
         A Geode object containing the results from a GeoEvent or GeoModel.
-    M : curlew.core.GeoModel
+    M : curlew.geology.geomodel.GeoModel
         The geomodel used to construct the geode G. 
     pv : np.ndarray or str
         A (N, d) array of n-dimensional property vectors (e.g., color). Can also be 'rgb' to create synthetic colors.
@@ -293,11 +293,11 @@ def steno( shape=None, **kwargs ):
     
     Keywords
     ---------
-        All keywords are passed to `curlew.data.sample(...)`
+        All keywords are passed to `curlew.synthetic.sample(...)`
     
     Returns
     --------
-    M : GeoModel
+    M : curlew.geology.geomodel.GeoModel
         Geomodel of the synthetic model with sampled constraints bound to events.
     """
     G = _make_grid(shape)
@@ -331,11 +331,11 @@ def lehmann( shape=None, **kwargs ):
     
     Keywords
     ---------
-        All keywords are passed to `curlew.data.sample(...)`
+        All keywords are passed to `curlew.synthetic.sample(...)`
 
     Returns
     --------
-    M : GeoModel
+    M : curlew.geology.geomodel.GeoModel
         Geomodel of the synthetic model with sampled constraints bound to events.
     """
     G = _make_grid(shape)
@@ -368,11 +368,11 @@ def hutton( shape=None, **kwargs ):
     
     Keywords
     ---------
-        All keywords are passed to `curlew.data.sample(...)`
+        All keywords are passed to `curlew.synthetic.sample(...)`
 
     Returns
     --------
-    M : GeoModel
+    M : curlew.geology.geomodel.GeoModel
         Geomodel of the synthetic model with sampled constraints bound to events.
     """
     G = _make_grid(shape)
@@ -422,11 +422,11 @@ def playfair( shape=None, width=50, addFault=False, **kwargs ):
 
     Keywords
     ---------
-        All keywords are passed to `curlew.data.sample(...)`
+        All keywords are passed to `curlew.synthetic.sample(...)`
     
     Returns
     --------
-    M : GeoModel
+    M : curlew.geology.geomodel.GeoModel
         Geomodel of the synthetic model with sampled constraints bound to events.
     """
     G = _make_grid(shape)
@@ -479,11 +479,11 @@ def walker( shape=None, width=[60,50,40,50,40], pos=[0,100,200,400,600], addFaul
         If True, add a fault crosscutting the dykes and stratigraphy. Default is False.
     Keywords
     ---------
-        All keywords are passed to `curlew.data.sample(...)`
+        All keywords are passed to `curlew.synthetic.sample(...)`
     
     Returns
     --------
-    M : GeoModel
+    M : curlew.geology.geomodel.GeoModel
         Geomodel of the synthetic model with sampled constraints bound to events.
     """
     G = _make_grid(shape)
@@ -533,11 +533,11 @@ def michell( shape=None, offset=100, **kwargs ):
 
     Keywords
     ---------
-        All keywords are passed to `curlew.data.sample(...)`
+        All keywords are passed to `curlew.synthetic.sample(...)`
     
     Returns
     --------
-    M : GeoModel
+    M : curlew.geology.geomodel.GeoModel
         Geomodel of the synthetic model with sampled constraints bound to events.
     """
     G = _make_grid(shape)
@@ -601,11 +601,11 @@ def anderson( shape=None, offset1=225, offset2=250, **kwargs ):
     
     Keywords
     ---------
-        All keywords are passed to `curlew.data.sample(...)`
+        All keywords are passed to `curlew.synthetic.sample(...)`
     
     Returns
     --------
-    M : GeoModel
+    M : curlew.geology.geomodel.GeoModel
         Geomodel of the synthetic model with sampled constraints bound to events.
     """
     G = _make_grid(shape)
@@ -682,7 +682,7 @@ def seuss(shape=None, nlayers=6, **kwargs):
 
     Returns
     --------
-    M : GeoModel
+    M : curlew.geology.geomodel.GeoModel
         Geomodel with listric faults and domain boundaries (name='Seuss').
     """
     shape = shape or EXTENT_2D

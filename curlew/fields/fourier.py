@@ -12,7 +12,7 @@ class NFF(BaseNF):
     NeuralFourierField
     
     A neural field that uses random Fourier feature encoding for representing scalar potentials.
-    This class inherits from BaseNF and implements the necessary methods for training and evaluation.
+    This class inherits from `curlew.fields.BaseNF` and implements the necessary methods for training and evaluation.
 
     Attributes
     ----------

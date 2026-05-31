@@ -72,10 +72,10 @@ class GeoEvent( object ):
             A name for this event.
         type : child class of `curlew.fields.BaseNF` (e.g., `curlew.fields.fourier.NFF`). This determines the type of neural or 
                 analytical field used to paramaterise this scalar field.
-        deformation : curlew.interactions.Deformation, list, None
+        deformation : curlew.geology.interactions.OffsetBase, list, None
             A function that translates the values of this scalar field into vector displacements, such that f(X1, self) 
             returns an array X0 of shape (N,ndim) that represents the pre-deformation coordinates of X1.
-        overprint : curlew.interactions.Overprint, None
+        overprint : curlew.geology.interactions.Overprint, None
             A function that combines the results of this GeologicalField with previous ones.
         propertyField : curlew.geology.property.PropertyModelBase, None
             A custom forward function that translates the implicit scalar field values into estimates of some measured
@@ -153,7 +153,7 @@ class GeoEvent( object ):
             Type of field to construct if `field` is not passed in kwargs.
         Parameters
         ----------
-        field : BaseNF | float | int
+        field : curlew.fields.BaseNF | float | int
             If provided, uses this pre-constructed field (or constant).
         anchors : list
             Optional list of dicts defining anchors to add to the added field. Anchors will be added by calling: `self.addAnchor(**argsD)` for each args in this list. 
@@ -254,7 +254,7 @@ class GeoEvent( object ):
         batch_size : int
             The size of the batches used when retro-deforming the passed grid (to save RAM). Default is 50000.
         
-        All other keywords are passed to `curlew.fields.NF.fit(...)`. These include:
+        All other keywords are passed to `curlew.fields.BaseSF.fit(...)`. These include:
         best : bool, optional
             After training set neural field weights to the best loss.
         vb : bool, optional
@@ -264,7 +264,7 @@ class GeoEvent( object ):
         -------
         loss : float
             The loss of the final (best if best=True) model state.
-        pebble : Pebble
+        pebble : curlew.core.Pebble
             A detailed breakdown of the final loss.
 
         If this GeoEvent has multiple fittable underlying fields, a list of ``(loss, pebble)`` tuples is returned.
@@ -1098,7 +1098,7 @@ class GeoEvent( object ):
         Parameters
         ----------
         isosurface : str
-            Name registered with :py:meth:`addIsosurface` on this ``GeoEvent``.
+            Name registered with :py:meth:`addIsosurface` on this ``curlew.geology.geoevent.GeoEvent``.
         pts : array-like, shape ``(N, ndim)`` or ``(ndim,)``
             Model coordinates to project.
         nsteps : int

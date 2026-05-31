@@ -23,8 +23,8 @@ from curlew.fields.analytical import LinearField
 # --------------------------------------------------------------------------------------------------------------------------------------------------
 def _initF( name, C, **kwargs):
     """
-    Initialise a GeoEvent and handle case where C is a constraint set (`CSet`) or 
-    `curlew.fields.NF` or `curlew.fields.analytical.AF` instance.
+    Initialise a GeoEvent and handle case where C is a constraint set (`curlew.core.CSet`) or 
+    `curlew.fields.BaseNF` or `curlew.fields.BaseAF` instance.
     """
     if isinstance( C, CSet ): # build a GeoEvent
         f = GeoEvent( name, **kwargs ) # create our GeoEvent
@@ -49,7 +49,7 @@ def strati( name, *, C, base = -np.inf, mode="above", onlap=False,
     ------------
     name : str
         A name for the created stratigraphic series (and GeoEvent that represents it).
-    C : CSet | curlew.fields.analytical.AF | curlew.fields.NF
+    C : curlew.core.CSet | curlew.fields.BaseAF | curlew.fields.BaseNF
         Either a pre-constructed neural field, explicit field or a set of 
         constraints to use to construct a new GeoEvent representing this stratigraphic series.
     base : float | str
@@ -73,12 +73,12 @@ def strati( name, *, C, base = -np.inf, mode="above", onlap=False,
         
     Keywords
     ----------
-    All keywords are passed to `curlew.GeoEvent.__init__(...)`, many of which are then used to initialise the 
-    underlying analytical or neural field. See `curlew.GeoEvent.__init__(...)` for further details.
+    All keywords are passed to `curlew.geology.geoevent.GeoEvent.__init__(...)`, many of which are then used to initialise the 
+    underlying analytical or neural field. See `curlew.geology.geoevent.GeoEvent.__init__(...)` for further details.
 
     Returns
     ---------
-    A `curlew.geology.GeoEvent` instance for the created structure.
+    A `curlew.geology.geoevent.GeoEvent` instance for the created structure.
     """
     o = Overprint(
         threshold=base, mode=mode,
@@ -97,7 +97,7 @@ def sheet(name, *, C, contact=(-1,1), aperture=2, n_steps=1, dt=-1.0,
     -----------
     name : str
         A name for the created stratigraphic series (and GeoEvent that represents it).
-    C : CSet | curlew.fields.analytical.AF | curlew.fields.NF
+    C : curlew.core.CSet | curlew.fields.BaseAF | curlew.fields.BaseNF
         The constraints or predefined field used to constrain this geological structure.
     contact : tuple | list [ tuple ]
         A tuple of floats specifying the scalar values for the (upper, lower) sides of 
@@ -116,12 +116,12 @@ def sheet(name, *, C, contact=(-1,1), aperture=2, n_steps=1, dt=-1.0,
 
     Keywords
     ----------
-    All keywords are passed to `curlew.GeoEvent.__init__(...)`, many of which are then used to initialise the 
-    underlying analytical or neural field. See `curlew.GeoEvent.__init__(...)` for further details.
+    All keywords are passed to `curlew.geology.geoevent.GeoEvent.__init__(...)`, many of which are then used to initialise the 
+    underlying analytical or neural field. See `curlew.geology.geoevent.GeoEvent.__init__(...)` for further details.
 
     Returns
     ---------
-    A `curlew.geology.GeoEvent` instance for the created structure.
+    A `curlew.geology.geoevent.GeoEvent` instance for the created structure.
     """
     if isinstance(contact, float) or isinstance(contact, int):
         contact = (-contact, contact) # define as upper and lower surface (assuming symmetry)
@@ -157,7 +157,7 @@ def fault(name, *, C, shortening, learn_sigma=False, contact=0, offset=0, width=
     -----------
     name : str
         A name for the created stratigraphic series (and GeoEvent that represents it).
-    C : CSet | curlew.fields.analytical.AF | curlew.fields.NF
+    C : curlew.core.CSet | curlew.fields.BaseAF | curlew.fields.BaseNF
         The constraints or predefined field used to constrain this geological structure.
     shortening : np.ndarray
         A numpy array of shape (n,) defining the principal compressive stress vector. This
@@ -194,12 +194,12 @@ def fault(name, *, C, shortening, learn_sigma=False, contact=0, offset=0, width=
 
     Keywords
     ----------
-    All keywords are passed to `curlew.GeoEvent.__init__(...)`, many of which are then used to initialise the 
-    underlying analytical or neural field. See `curlew.GeoEvent.__init__(...)` for further details.
+    All keywords are passed to `curlew.geology.geoevent.GeoEvent.__init__(...)`, many of which are then used to initialise the 
+    underlying analytical or neural field. See `curlew.geology.geoevent.GeoEvent.__init__(...)` for further details.
 
     Returns
     ---------
-    A `curlew.geology.GeoEvent` instance for the created structure.
+    A `curlew.geology.geoevent.GeoEvent` instance for the created structure.
     """
     # shortening
     if shortening is None: 
@@ -307,12 +307,12 @@ def fold( name, *, origin, compression, extension, wavelength, amplitude=1.0, sh
 
     Keywords
     ----------
-    All keywords are passed to `curlew.GeoEvent.__init__(...)`, many of which are then used to initialise the 
-    underlying analytical or neural field. See `curlew.GeoEvent.__init__(...)` for further details.
+    All keywords are passed to `curlew.geology.geoevent.GeoEvent.__init__(...)`, many of which are then used to initialise the 
+    underlying analytical or neural field. See `curlew.geology.geoevent.GeoEvent.__init__(...)` for further details.
 
     Returns
     ---------
-    A `curlew.geology.GeoEvent` instance representing the fold structure, with an
+    A `curlew.geology.geoevent.GeoEvent` instance representing the fold structure, with an
     associated analytical scalar field and deformation function.
     """
     # create a fold field and associated deformation function
@@ -355,16 +355,16 @@ def domainBoundary( name, *, C, bound = 0, gt = 0, lt = 1, mode="below",
     ------------
     name : str
         A name for the created domain boundary.
-    C : CSet | curlew.fields.analytical.AF | curlew.fields.NF
+    C : curlew.core.CSet | curlew.fields.BaseAF | curlew.fields.BaseNF
         Either a pre-constructed neural field, explicit field or a set of 
         constraints to use to construct a new GeoEvent representing this domain boundary.
     bound : float, str
         A float specifying the value (isosurface value or name) of the interpolated scalar field that represents the domain boundary.
-    gt : float | GeoEvent | list
-        A float or a list of floats or GeoEvents that define the scalar field(s) used to populate the hangingwall (val > bound) of this domain boundary. In essence these
+    gt : float | curlew.geology.geoevent.GeoEvent | list
+        A float or a list of floats or `curlew.geology.geoevent.GeoEvent` instances that define the scalar field(s) used to populate the hangingwall (val > bound) of this domain boundary. In essence these
         define the geological sub-model used on the hangingwall side of the domain boundary. If a float is provided, it will be populated with a constant value.
-    lt : float | GeoEvent | list
-        A float or a list of floats or GeoEvents that define the scalar field(s) used to populate the footwall (val < bound) of this domain boundary. In essence these
+    lt : float | curlew.geology.geoevent.GeoEvent | list
+        A float or a list of floats or `curlew.geology.geoevent.GeoEvent` instances that define the scalar field(s) used to populate the footwall (val < bound) of this domain boundary. In essence these
         define the geological sub-model used on the footwall side of the domain boundary. If a float is provided, it will be populated with a constant value.
     mode : str
         The overprinting mode. Options are:
@@ -378,13 +378,13 @@ def domainBoundary( name, *, C, bound = 0, gt = 0, lt = 1, mode="below",
     
     Keywords
     ----------
-    All keywords are passed to `curlew.GeoEvent.__init__(...)`, many of which are then used to initialise the 
-    underlying analytical or neural field. See `curlew.GeoEvent.__init__(...)` for further details.
+    All keywords are passed to `curlew.geology.geoevent.GeoEvent.__init__(...)`, many of which are then used to initialise the 
+    underlying analytical or neural field. See `curlew.geology.geoevent.GeoEvent.__init__(...)` for further details.
 
     Returns
     ---------
-    A `curlew.geology.GeoEvent` instance for the created domain boundary. This can then be included in a GeoModel class. Note that the submodels (i.e. `gt` and `lt`) are now
-    associated with this GeoEvent instance, so do not need to be (directly) passed to the GeoModel constructor.
+    A `curlew.geology.geoevent.GeoEvent` instance for the created domain boundary. This can then be included in a `curlew.geology.geomodel.GeoModel` class. Note that the submodels (i.e. `gt` and `lt`) are now
+    associated with this `curlew.geology.geoevent.GeoEvent` instance, so do not need to be (directly) passed to the `curlew.geology.geomodel.GeoModel` constructor.
     """
 
     # create field representing domain boundary

@@ -175,14 +175,14 @@ class SoftConstantProperty(ConstantProperty):
 
         Parameters
         ----------
-        geode : Geode
+        geode : curlew.core.Geode
             Must expose ``.scalar`` (continuous NFF output, shape ``(N,)``),
             ``.lithoID`` (integer domain labels, shape ``(N,)``), and
             ``.lithoLookup`` (``{int: str}``).
 
         Returns
         -------
-        geode : Geode
+        geode : curlew.core.Geode
             Updated in-place with ``.properties`` (``(N, P)``) and
             ``.propertyNames``.
         """
@@ -330,7 +330,7 @@ class MLPProperty(PropertyModelBase, nn.Module):
 
         Parameters
         ----------
-        geode : Geode
+        geode : curlew.core.Geode
             Must carry ``geode.scalar`` of shape (N,).
 
         Returns

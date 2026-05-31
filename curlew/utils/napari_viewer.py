@@ -1,6 +1,5 @@
 """
-2D and 3D visualisation using Napari, with an add-layer API similar in spirit to
-`curlew.utils.datascreen.DataScreen` (real-world coordinates).
+2D and 3D visualisation using Napari, with an add-layer API using real-world (Curlew) coordinates.
 
 Requires `napari` (and a Qt backend) to be installed separately.
 

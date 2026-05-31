@@ -81,7 +81,7 @@ class GeoModel( LearnableBase ):
             A list of GeoEvent instances representing geological events, from oldest to youngest. This list 
             can include domain boundaries if needed, but non-domain events (e.g., faults, stratigraphy, etc.)
             should not be older than these.
-        transform : `curlew.core.Transform`
+        transform : `curlew.geometry.Transform`
             A Transform object defining the transform from global coordinates to model coordinates. This will be applied
             to all `x` when `self.predict(x)` is called, and can handle e.g., converting UTM to some model coordinate system.
             Defaults to an identity matrix (no transform).
@@ -173,7 +173,7 @@ class GeoModel( LearnableBase ):
         Returns
         -------
         dict
-            Maps each ``GeoEvent`` name to the final ``Pebble`` from isolated training.
+            Maps each ``curlew.geology.geoevent.GeoEvent`` name to the final ``curlew.core.Pebble`` from isolated training.
         """
         out = {}
         for F in self.events[::-1]:
@@ -195,8 +195,8 @@ class GeoModel( LearnableBase ):
             None to disable. Only used when ``best=True``.
         custom_loss : list of callable, optional
             Functions ``f(pebble, model, C) -> Pebble`` called each epoch after event losses are
-            accumulated. ``pebble`` holds per-event terms; ``model`` is this ``GeoModel``; ``C`` is
-            the bound ``CSet`` (or None). Each function should return a ``Pebble`` to merge.
+            accumulated. ``pebble`` holds per-event terms; ``model`` is this ``curlew.geology.geomodel.GeoModel``; ``C`` is
+            the bound ``curlew.core.CSet`` (or None). Each function should return a ``curlew.core.Pebble`` to merge.
         best : bool, optional
             After training set the neural field weights to the best loss.
         vb : bool, optional
@@ -208,7 +208,7 @@ class GeoModel( LearnableBase ):
         -------
         loss : float
             The loss of the final (best if best=True) model state.
-        pebble : Pebble
+        pebble : curlew.core.Pebble
             A detailed breakdown of the final loss. 
         """
         bar = range(epochs)
@@ -346,10 +346,10 @@ class GeoModel( LearnableBase ):
 
         Returns
         ---------
-        drillholes : Geode
-            A Geode instance containing the results given by evaluating the model along the drillhole.
-        contacts : Geode
-            A Geode instance containing the positions and orientations of contacts intersected along the drillhole.
+        drillholes : curlew.core.Geode
+            A `curlew.core.Geode` instance containing the results given by evaluating the model along the drillhole.
+        contacts : curlew.core.Geode
+            A `curlew.core.Geode` instance containing the positions and orientations of contacts intersected along the drillhole.
         """
         dir = np.array(end) - np.array(start)
         length = np.linalg.norm(dir)

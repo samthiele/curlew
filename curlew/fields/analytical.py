@@ -319,7 +319,7 @@ class EllipsoidalField(BaseAF):
 
     def evaluate(self, x: torch.Tensor):
         """
-        Evaluate in canonical coordinates (``BaseSF.forward`` applies ``self.T`` first).
+        Evaluate in canonical coordinates (`curlew.fields.BaseSF.forward` applies `self.T` first).
         """
         r = torch.linalg.norm(x, dim=-1)
         if self.decay:

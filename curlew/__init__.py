@@ -2,7 +2,7 @@
 
 A toolkit for building 2- and 3- dimensional geological models using neural fields.
 
-<img src="https://github.com/samthiele/curlew/blob/main/banner.png?raw=true" height="300">
+<img src="https://github.com/samthiele/curlew/blob/main/banner.png?raw=true" style="width:100%; height:auto; display:block;">
 
 ## Getting started
 
@@ -17,14 +17,14 @@ This should run on most systems: `numpy`, `pytorch` and `tqdm` are the only requ
 To help get up to speed with `curlew`, we maintain a set of CoLab tutorial notebooks [here](https://drive.google.com/drive/folders/14OPpL2-zKuJSd2Hh7jobnIYPnxzl0wCI?usp=sharing). 
 Note that these are written for the `main` branch of `curlew` so will likely not work out-of-the-box with the `dev` branch. And, if anyone knows a better (free) platform for these then do let us know!
 
-### Support and feedback
+## Support and feedback
 
 If you are using `curlew`, or even just think it's cool, then please give us a star. It makes a difference!
 
 Any questions, ideas, feedback or issues can be raised via [GitHub issues](https://github.com/samthiele/curlew/issues) or
 on the [discussions](https://github.com/samthiele/curlew/discussions) page. Don't be afraid to drop us a line.
 
-### Overview
+## Overview
 
 `curlew` is a toolkit for building 2- and 3-dimensional geological models using neural fields and/or other learnable functions. The key idea is to use neural fields 
 to learn the implicit representation of geological structures, which can then be used to generate synthetic models, 
@@ -39,53 +39,53 @@ Currently, curlew supports a variety of learnable (complex/fitted) and analytica
 
 *Neural fields (for interpolation tasks):*
 
-- `curlew.fields.NFF` for fourier-feature based neural fields
-- `curlew.fields.ALF` for Fourier-series based neural fields (a simplified/faster version of NFF)
+- `curlew.fields.fourier.NFF` for fourier-feature based neural fields
+- `curlew.fields.series.FSF` for Fourier-series based neural fields (a simplified/faster version of NFF)
 
 *Analytical fields (generally for building synthetic models, but can be useful in real models too)*:
 
-- `curlew.fields.LinearField` for planar (linear) geometries
-- `curlew.fields.QuadraticField` for quadratic geometries
-- `curlew.fields.PeriodicField` for sine/cosine waves (e.g., folded geometries)
-- `curlew.fields.ListricField` for listric faults.
-- `curlew.fields.EllipsoidalField` for ellipsoidal geometries (e.g., intrusion bodies, finite faults, etc.)
+- `curlew.fields.analytical.LinearField` for planar (linear) geometries
+- `curlew.fields.analytical.QuadraticField` for quadratic geometries
+- `curlew.fields.analytical.PeriodicField` for sine/cosine waves (e.g., folded geometries)
+- `curlew.fields.analytical.ListricField` for listric faults.
+- `curlew.fields.analytical.EllipsoidalField` for ellipsoidal geometries (e.g., intrusion bodies, finite faults, etc.)
 
 **`curlew.geology.geoevent.GeoEvent` (Geological events)**
 
-Geological meaning is given to scalar fields through the `GeoEvent` class. This encapsulates one or more `BaseSF` instances and defines 
+Geological meaning is given to scalar fields through the `curlew.geology.geoevent.GeoEvent` class. This encapsulates one or more `curlew.fields.BaseSF` instances and defines 
 how they interact with older and younger fields in the model. Currently, two different relationships are supported:
 
 - `curlew.geology.interactions.Overprint` defines overprinting relations (unconformities, onlaps, intrusions and domain boundaries) and determines how an event overprints (truncates) older geology.
-- `curlew.geology.interactions.Deformation` defines deformations that transform (retro-deform) the points a model is being evaluated at prior to the evaluation of older events. This can be used to represent offset from folds, faults, and sheet-intrusions (each of which has a specific deformation formulation that inherits from the base `curlew.geology.interactions.Deformation` class).
+- `curlew.geology.interactions.OffsetBase` defines deformations that transform (retro-deform) the points a model is being evaluated at prior to the evaluation of older events. This can be used to represent offset from folds, faults, and sheet-intrusions (each of which has a specific deformation formulation that inherits from the base `curlew.geology.interactions.OffsetBase` class, e.g. `curlew.geology.interactions.FaultOffset`).
 
-`GeoEvent` instances are typically constructed using the factory functions in `curlew.geology`, including `curlew.geology.strati`, `curlew.geology.sheet`, `curlew.geology.fault`, `curlew.geology.fold`, etc.
+`curlew.geology.geoevent.GeoEvent` instances are typically constructed using the factory functions in `curlew.geology`, including `curlew.geology.strati`, `curlew.geology.sheet`, `curlew.geology.fault`, `curlew.geology.fold`, etc.
 
-Geologically meaningful isosurfaces (lithological contacts, fault surfaces, etc.) and volumes (regions between faults, reservoirs, finite faults, etc.) are also defined by the `GeoEvent` class, 
+Geologically meaningful isosurfaces (lithological contacts, fault surfaces, etc.) and volumes (regions between faults, reservoirs, finite faults, etc.) are also defined by the `curlew.geology.geoevent.GeoEvent` class, 
 using the `addIsosurface` and `addVolume` methods. Importantly, and unlike most geological modelling tools, isosurfaces can be defined either as fixed values (e.g., `1.0`) or by whichever value the model evaluates
 at a given seed point (or the average of multiple seed points). Crucially, the latter form allows isosurfaces to be defined independent of the underlying field values.  
 
 **`curlew.geology.geomodel.GeoModel` (models)**
 
-The `GeoModel` class is used to construct the graph of `GeoEvent` instances that ultimately define model evaluation flow and topology. 
+The `curlew.geology.geomodel.GeoModel` class is used to construct the graph of `curlew.geology.geoevent.GeoEvent` instances that ultimately define model evaluation flow and topology. 
 It also provides a high-level interface for evaluating model predictions at arbitrary points in space and defining global to local 
 coordinate system transforms (i.e. local grids). Models can be saved and loaded using the `curlew.io.saveModel` and `curlew.io.loadModel` functions.
 
 **`curlew.core.Geode` (model outputs)**
 
-The `Geode` class is used to store the diverse outputs of a model. These include the scalar field values, lithology and structure IDs, 
-predicted properties (e.g., density), and applied deformations (e.g., fault offset). The `Geode` class can also be used to store the model's grid, coordinate system transforms, 
+The `curlew.core.Geode` class is used to store the diverse outputs of a model. These include the scalar field values, lithology and structure IDs, 
+predicted properties (e.g., density), and applied deformations (e.g., fault offset). The `curlew.core.Geode` class can also be used to store the model's grid, coordinate system transforms, 
 and other metadata.
 
 **`curlew.core.Pebble` (losses and optimisers)**
 
-The `Pebble` class is used to store losses and optimisers. This includes the loss values, the weights (hyperparameters) used to balance each loss, 
-and the optimisers used to update the model's parameters. Generally it is only necessary to create a new `Pebble` object if you want to 
+The `curlew.core.Pebble` class is used to store losses and optimisers. This includes the loss values, the weights (hyperparameters) used to balance each loss, 
+and the optimisers used to update the model's parameters. Generally it is only necessary to create a new `curlew.core.Pebble` object if you want to 
 create a custom loss function or new type of learnable object.
 
 **`curlew.core.CSet` (model constraints)**
 
-Geological information used to fit learnable fields (or offset/overprint objects) are stored in a `CSet` object. When constructing a new model
-it is typical to construct a `CSet` for each `GeoEvent` instance based on the available data. These data include (but are not limited to):
+Geological information used to fit learnable fields (or offset/overprint objects) are stored in a `curlew.core.CSet` object. When constructing a new model
+it is typical to construct a `curlew.core.CSet` for each `curlew.geology.geoevent.GeoEvent` instance based on the available data. These data include (but are not limited to):
 
 - value constraints (target scalar values at specific points. Generally these should be avoided as neural fields are much better at fitting gradient and (in)equality constraints.)
 - gradient constraints (strike and dip measurements of bedding or other structural surfaces)
@@ -99,7 +99,7 @@ it is typical to construct a `CSet` for each `GeoEvent` instance based on the av
 
 The dark-side of neural field interpolation. This class contains the various hyperparameters that can be used to 
 balance/tune complex (multi-objective) loss functions. Most fields should use ~1-3 individual loss terms (with the remaining hyperparameters set to 0),
-as otherwise hyperparameter optimisation becomes very difficult. It is typical to create a new `HSet` object for each `GeoEvent` instance based on the available data
+as otherwise hyperparameter optimisation becomes very difficult. It is typical to create a new `curlew.core.HSet` object for each `curlew.geology.geoevent.GeoEvent` instance based on the available data
 and properties of the interpolated field.
 
 ## Contributing and appreciation

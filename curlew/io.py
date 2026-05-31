@@ -18,7 +18,7 @@ def saveModel(path, model):
     ----------
     path : str | os.PathLike
         Output file path (e.g. ``"my_model.pt"``).
-    model : GeoModel | GeoEvent
+    model : curlew.geology.geomodel.GeoModel | curlew.geology.geoevent.GeoEvent
         The geological model or event to save.
     """
     from curlew.geology.geoevent import GeoEvent
@@ -48,7 +48,7 @@ def loadModel(path, map_location=None):
 
     Returns
     -------
-    GeoModel | GeoEvent
+    curlew.geology.geomodel.GeoModel | curlew.geology.geoevent.GeoEvent
         The restored model or event.
     """
     import curlew
