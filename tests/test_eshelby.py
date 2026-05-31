@@ -442,7 +442,7 @@ def test_visualisation():
         pytest.skip(f"napari unavailable ({type(e).__name__}: {e})")
 
     try:
-        from curlew.utils.napari_viewer import NapariViewer
+        from curlew.visualise.napari_viewer import NapariViewer
     except Exception as e:  # pragma: no cover
         pytest.skip(f"NapariViewer import failed ({type(e).__name__}: {e})")
 

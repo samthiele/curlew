@@ -7,8 +7,9 @@ from curlew.core import CSet
 from curlew.geology.geomodel import GeoModel
 from curlew.geometry import Grid 
 from curlew.visualise import colour
-from curlew.fields.analytical import LinearField, ListricField, PeriodicField, QuadraticField
-from curlew.geology import strati, fold, fault, domainBoundary, sheet
+from curlew.fields.analytical import LinearField, ListricField, PeriodicField, QuadraticField, EllipsoidalField
+from curlew.geology import strati, fold, fault, domainBoundary, sheet, FaultOffset
+from curlew import _tensor
 from curlew.geology.geoevent import GeoEvent
 
 EXTENT_2D = (1500, 1000)
@@ -774,7 +775,7 @@ def seuss(shape=None, nlayers=6, **kwargs):
         gt=[s2],
     )
     
-    f2 = fault('f2', type=ListricField, C=None,
+    f2 = fault('f2', type=ListricField,
            contact=0.0, 
            offset=100, # The displacement magnitude
            n_steps=3, # apply displacement in several steps, due to high curvature

@@ -177,7 +177,7 @@ class NapariViewer:
     **2D images:** Curlew rasters from :meth:`~curlew.geometry.Grid.reshape` are indexed
     ``(i₀, i₁)`` like **(x-axis, y-axis)**. Napari ``Image`` arrays are **row-major**
     ``(row, col)`` with ``row = i₁``, ``col = i₀``; pass ``volume.T`` and use
-    :func:`~curlew.utils.grid_napari_affine.image_affine_napari_row_column_image_2d` — this
+    :func:`~curlew.visualise.napari_viewer.image_affine_napari_row_column_image_2d` — this
     is applied automatically when you call :meth:`addVolume` with a 2D ``grid``.
 
     Parameters
@@ -1562,4 +1562,7 @@ class NapariViewer:
 
 __all__ = [
     "NapariViewer",
+    "image_affine_from_grid",
+    "image_affine_napari_row_column_image_2d",
+    "resolve_cmap",
 ]

@@ -40,7 +40,7 @@ def _initF( name, C, **kwargs):
         
     return f
 
-def strati( name, *, C, base = -np.inf, mode="above", onlap=False,
+def strati( name, *, C=None, base = -np.inf, mode="above", onlap=False,
             lithoSharpness=1.0, structureSharpness=1.0, **kwargs):
     """
     Create a GeoEvent representing a stratigraphic series (base stratigraphy or unconformity).
@@ -88,7 +88,7 @@ def strati( name, *, C, base = -np.inf, mode="above", onlap=False,
         o.defaultDomain = 'parent' # older unit defines unconformity geometry
     return _initF( name, C=C, overprint=o, **kwargs)
 
-def sheet(name, *, C, contact=(-1,1), aperture=2, n_steps=1, dt=-1.0,
+def sheet(name, *, C=None, contact=(-1,1), aperture=2, n_steps=1, dt=-1.0,
           lithoSharpness=1.0, structureSharpness=1.0, **kwargs):
     """
     Create a GeoEvent representing a sheet intrusion (dyke, sill or vein).
@@ -149,7 +149,7 @@ def sheet(name, *, C, contact=(-1,1), aperture=2, n_steps=1, dt=-1.0,
 
     return _initF( name, C=C, deformation=offset, overprint=overprint, **kwargs)
 
-def fault(name, *, C, shortening, learn_sigma=False, contact=0, offset=0, width=0, n_steps=2, dt=-1.0, **kwargs):
+def fault(name, *, C=None, shortening=None, learn_sigma=False, contact=0, offset=0, width=0, modifier=None, n_steps=2, dt=-1.0, **kwargs):
     """
     Create a GeoEvent representing a fault, shear zone or (optionally) dilatant shear vein.
 
@@ -187,6 +187,10 @@ def fault(name, *, C, shortening, learn_sigma=False, contact=0, offset=0, width=
         fault core, `width_ductile` defines the (larger) width of surrounding ductile deformation,
         and `proportion` defines the partioning of the total offset between these two deformation
         types.
+    modifier : str | list, optional
+        Name of a field on the fault GeoEvent (e.g. from ``addField``) evaluated at each
+        point and used to scale fault slip (e.g. an ellipsoidal patch field). For
+        multi-faults, pass a list with one modifier name per contact (or ``None`` entries where no scaling is needed).
     n_steps : int
         Number of explicit Euler substeps for integrating fault slip (see :class:`~curlew.geology.interactions.FaultOffset`). Default is 2.
     dt : float
@@ -212,21 +216,33 @@ def fault(name, *, C, shortening, learn_sigma=False, contact=0, offset=0, width=
             offset = [offset for i in contact] # listify
         if not (isinstance(width, list) or isinstance(width, tuple) or isinstance(width, np.ndarray)):
             width = [width for i in contact] # listify
+        if modifier is not None and not (
+            isinstance(modifier, list) or isinstance(modifier, tuple) or isinstance(modifier, np.ndarray)
+        ):
+            modifier = [modifier for i in contact]
         assert len(offset) == len(contact)
         assert len(width) == len(contact)
+        if modifier is not None:
+            assert len(modifier) == len(contact)
     else:
         contact = [contact] # listify
         offset = [offset]
         width = [width]
+        if modifier is not None:
+            modifier = [modifier]
+
+    if modifier is None:
+        modifier = [None] * len(contact)
 
     # build offset object(s)
     O = []
-    for _c,_o, _w in zip(contact, offset, width):
+    for _c, _o, _w, _m in zip(contact, offset, width, modifier):
         offs = FaultOffset(
             shortening=shortening,
             offset=_o,
             contact=_c,
             width=_w,
+            modifier=_m,
             n_steps=n_steps,
             dt=dt,
         )
@@ -255,12 +271,6 @@ def fault(name, *, C, shortening, learn_sigma=False, contact=0, offset=0, width=
     f = _initF( name, C=C, deformation=O, **kwargs)
 
     return f
-
-def finiteFault(name, *, C, H, **kwargs):
-    """
-    Create a GeoEvent representing a finite fault.
-    """
-    pass
 
 def stock(name, *, C, H, contact=0, **kwargs):
     """

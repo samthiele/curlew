@@ -126,6 +126,10 @@ class GeoModel( LearnableBase ):
         self.grid = grid
         self.name = name
 
+    def __str__(self):
+        from curlew.text import geomodel_str
+        return geomodel_str(self)
+
     def freeze( self, name=None, geometry=True, params=False ):
         """
         Freeze the specified field or parameter. Used to e.g., optimise

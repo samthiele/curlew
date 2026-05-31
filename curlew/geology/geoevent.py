@@ -140,6 +140,10 @@ class GeoEvent( object ):
         for iso in isosurfaces:
             iso['field'] = self.field.name # associate to the constructed field
             self.addIsosurface(**iso)
+
+    def __str__(self):
+        from curlew.text import geoevent_str
+        return geoevent_str(self)
         
     def addField(self, fieldName: str, type: BaseNF = None, anchors=[], isosurfaces=[], **kwargs):
         """
@@ -468,7 +472,7 @@ class GeoEvent( object ):
                 else:
                     out = parent # easy! :-)
                     out.x = {**parent.x, **child.x}
-                    out.fields[_field_key(self.getField(0), self.name)] = child.scalar
+                    out.fields = {**out.fields, **child.fields}
           
         else: # evaluate field results and put into a Geode object
 

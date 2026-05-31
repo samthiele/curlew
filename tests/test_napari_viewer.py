@@ -8,7 +8,7 @@ import pytest
 
 from curlew.geometry import Grid
 from curlew.core import CSet, Geode
-from curlew.utils.napari_viewer import (
+from curlew.visualise.napari_viewer import (
     NapariViewer,
     image_affine_from_grid,
     image_affine_napari_row_column_image_2d,

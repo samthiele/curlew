@@ -234,6 +234,7 @@ from curlew import synthetic
 from curlew import geology
 from curlew import geometry
 from curlew import visualise
+from curlew import text
 
 from curlew.core import CSet, HSet
 from curlew.geology import fault, strati, sheet

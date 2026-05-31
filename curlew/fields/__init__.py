@@ -577,6 +577,10 @@ class BaseSF(LearnableBase):
 
         return best_loss, best_pebble # return summed and detailed loss
 
+    def __str__(self):
+        from curlew.text import field_str
+        return field_str(self)
+
 class BaseAF(BaseSF):
     """
     Base class for all analytical fields (those implementing specific geometric implicit functions).

@@ -327,3 +327,78 @@ def test_softOverprint():
     assert domain.grad is not None
     assert domain.grad.abs().sum() > 0
 
+
+def test_geode_topology():
+    """Grid lithology/structure topology adjacency and differentiability."""
+    import torch
+    import torch.nn.functional as F
+    from curlew.core import Geode
+    from curlew.geometry import Grid, compute_topology_adjacency
+
+    G = Grid((4, 4), step=(1.0, 1.0), center=(0.0, 0.0))
+    litho = np.zeros(16, dtype=int)
+    litho[8:] = 1  # right half class 1
+    g = Geode(
+        grid=G,
+        lithoID=litho,
+        lithoLookup={0: "A", 1: "B"},
+        structureID=np.zeros(16, dtype=int),
+        structureLookup={0: "S0"},
+    )
+    A = g.topology(mode="lithology")
+    assert isinstance(A, np.ndarray)
+    assert A.shape == (2, 2)
+    assert A[0, 1] > 0
+    assert A[1, 0] == A[0, 1]
+    assert A[0, 0] == 0 and A[1, 1] == 0
+
+    Ad = g.topology(mode="lithology", output="dict")
+    assert Ad["A"]["B"] == A[0, 1]
+    assert Ad["B"]["A"] == A[1, 0]
+    assert "A" not in Ad["A"]
+    assert "B" not in Ad["B"]
+
+    As = g.topology(mode="structure")
+    assert As.shape == (1, 1)
+    assert As[0, 0] == 0
+
+    logits = torch.randn(1, 2, 4, 4, requires_grad=True)
+    soft = F.softmax(logits, dim=1)
+    At = compute_topology_adjacency(soft)[0]
+    At[0, 1].backward()
+    assert logits.grad is not None
+
+    litho_t = torch.tensor(litho, dtype=torch.int)
+    soft_litho = torch.tensor(litho, dtype=curlew.dtype, requires_grad=True)
+    gt = Geode(
+        grid=G,
+        lithoID=litho_t,
+        softLithoID=soft_litho,
+        lithoLookup={0: "A", 1: "B"},
+    )
+    Att = gt.topology(mode="lithology")
+    assert isinstance(Att, torch.Tensor)
+    Att.sum().backward()
+    assert soft_litho.grad is not None
+
+    soft_litho2 = torch.tensor(litho, dtype=curlew.dtype, requires_grad=True)
+    gt2 = Geode(
+        grid=G,
+        lithoID=litho_t,
+        softLithoID=soft_litho2,
+        lithoLookup={0: "A", 1: "B"},
+    )
+    Adt = gt2.topology(mode="lithology", output="dict")
+    Adt["A"]["B"].backward()
+    assert soft_litho2.grad is not None
+
+    # Checkerboard: inclusive counts diagonal contacts; conservative does not.
+    G2 = Grid((2, 2), step=(1.0, 1.0), center=(0.0, 0.0))
+    litho_cb = np.array([0, 1, 0, 1], dtype=int)
+    g_cb = Geode(grid=G2, lithoID=litho_cb, lithoLookup={0: "A", 1: "B"})
+    A_cons = g_cb.topology(connection="conservative")
+    A_incl = g_cb.topology(connection="inclusive")
+    assert A_incl[0, 1] > A_cons[0, 1]
+
+    with pytest.raises(ValueError, match="connection"):
+        g.topology(connection="diagonal")

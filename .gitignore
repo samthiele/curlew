@@ -28,6 +28,7 @@ sandbox
 
 # cursor
 .cursor/
+.literature/
 
 # MACOSX
 .DS_STORE

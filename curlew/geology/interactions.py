@@ -207,11 +207,11 @@ class OffsetBase(LearnableBase):
     """
     Class from which all offset classess should inherit. 
     """
-    def eval( self, x, G ):
+    def eval(self, x, G):
         """
         Get displacement vectors for points `X` based on GeoEvent `G`. This will be called by the GeoEvent and return the results of self.disp(...).
         """
-        o = self.disp( x, G )
+        o = self.disp(x, G)
         return o
     
     def learnable(self):
@@ -233,7 +233,7 @@ class OffsetBase(LearnableBase):
         # return gradient
         return ds, s
 
-    def disp( self, X, G ):
+    def disp(self, X, G):
         """
         Compute displacement vectors for points `X` based on GeoEvent `G`. Child classess implementing specific types of offset should implement this function.
         """
@@ -397,9 +397,10 @@ class FaultOffset(VFieldOffset):
             deformation (e.g., drag folds) and another for an inner more-brittle deformation. 
             This tuple should contain the following: `(outer_sharpness, inner_sharpness, proportion)`,
             where proportion (0 to 1) defines the strain partioning between the ductile and the brittle parts.
-        modifier : curlew.fields.BaseSF
-            An implicit field that is evaluated at all `x` and then used to scale the applied offset. Used to 
-            e.g., implement finite faults where offset decays according to some ellipsoidal function.
+        modifier : str | None
+            Name of an implicit field on the parent :class:`~curlew.geology.geoevent.GeoEvent` (e.g. from
+            ``addField``) that is evaluated at all ``x`` and used to scale the applied offset. Used to
+            e.g. implement finite faults where slip decays inside an ellipsoidal patch.
         polarity : int, optional
             The polarity of the fault offset. If 1 (default), the hangingwall is moved and the footwall is fixed.
             If -1, the footwall is moved and the hangingwall is fixed.
@@ -417,28 +418,39 @@ class FaultOffset(VFieldOffset):
         self.polarity = polarity
         self.modifier = modifier
 
-    def _fault_kinematics(self, x, G):
+    def _resolve_modifier(self, G):
+        m = self.modifier
+        if m is None:
+            return None
+        if isinstance(m, str):
+            return G.getField(m)
+        raise TypeError(
+            f"FaultOffset modifier must be a field name (str) or None, got {type(m).__name__}."
+        )
+
+    def _velocity(self, x, G):
+        # get field values and gradient at evaluation points
         ds, s = self.dss(x, G, normalize=True)
+        
+        # get contact surface values
         contact = self.contact
         if isinstance(contact, str):
             contact = G.getIsovalue(contact)
         s_adj = s - contact
-
+        
+        # calculate slip direction vector
         slip = self.shortening[None, :] - (
             torch.sum(self.shortening * ds, dim=-1, keepdim=True)
         ) * ds
         slip = slip / (torch.norm(slip, dim=1) + 1e-6)[:, None]
 
+        # scale by offset magnitude
         off = self.offset
         if self.offsetRange is not None:
             off = torch.clamp(off, min(self.offsetRange), max(self.offsetRange))
-
-        if self.modifier is not None:
-            m = self.modifier.forward(x, transform=False)
-            off = (m * off).squeeze()
-
         off = off * slip
-
+        
+        # apply sign flip and sigmoid scaling (for ductile faults)
         s_scale = s_adj.clone()
         if self.polarity < 0:
             s_scale = -s_scale
@@ -451,11 +463,18 @@ class FaultOffset(VFieldOffset):
             scale = torch.sigmoid(
                 s_scale * 4 / np.clip(self.width, 1e-6, np.inf)
             )
-
-        return off * scale[:, None].detach()
-
-    def _velocity(self, x, G):
-        return self._fault_kinematics(x, G)
+        off = off * scale[:, None]
+        
+        # apply modifiers for finite faults (if any)
+        mod = self._resolve_modifier(G)
+        if mod is not None:
+            m = mod.forward(x, transform=False)
+            if m.ndim == 1:
+                m = m[:, None]
+            off = off * m
+        
+        # return displacement vectors
+        return off
 
     def __repr__(self):
         return (
@@ -490,7 +509,7 @@ class FoldOffset( OffsetBase ):
         self.shortening = shortening
         self.periodic = periodic
     
-    def disp( self, X, G ):
+    def disp(self, X, G):
         """
         Compute displacement vectors for points `X` based on GeoEvent `G`.
         """

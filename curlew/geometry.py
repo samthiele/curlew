@@ -6,6 +6,7 @@ performing other simple geometric tasks.
 from dataclasses import dataclass
 import numpy as np
 import torch
+import torch.nn.functional as F
 import curlew
 from curlew import _numpy, _tensor
 
@@ -262,6 +263,10 @@ class Grid(object):
         self.center = self.matrix[:self.ndim, self.ndim] # store for convenience
         self._clearCache()
 
+    def __str__(self):
+        from curlew.text import grid_str
+        return grid_str(self)
+
     def coords(self, transform=True):
         """
         Get an (N,2) or (N,3) array of coordinates representing the position of each cell in this grid. 
@@ -479,7 +484,98 @@ class Grid(object):
         if self._cache is not None:
             new_grid._setCache(self._cache)
         return new_grid
+
+
+def compute_topology_adjacency(soft_masks, symmetrize=True, connection="conservative"):
+    """
+    Differentiable adjacency matrix from class soft-assignment volumes. This is
+    used by the `curlew.core.Geode.topology` method to compute the adjacency matrix from
+    gridded lithology and structure IDs.
+
+    Uses depthwise convolution with a neighbourhood kernel, then batch matrix
+    multiplication to accumulate voxel contact area between classes.
+
+    Parameters
+    ----------
+    soft_masks : torch.Tensor
+        Shape ``(B, C, *spatial)`` with ``spatial`` either ``(H, W)`` or ``(D, H, W)``.
+        Values are non-negative class weights (e.g. softmax probabilities) per voxel.
+    symmetrize : bool, optional
+        If True (default), return ``(A + A.T) / 2`` so contact area is mutual.
+    connection : str, optional
+        ``'conservative'`` (default): only face-shared neighbours count (4-connected in 2D,
+        6-connected in 3D). ``'inclusive'``: face, edge, and vertex neighbours count
+        (8-connected in 2D, 26-connected in 3D).
+
+    Returns
+    -------
+    torch.Tensor
+        Shape ``(B, C, C)``; diagonal entries are zero (no self-contact).
+    """
+    # Require batched multi-channel image/volume layout: (B, C, H, W) or (B, C, D, H, W).
+    if soft_masks.ndim not in (4, 5):
+        raise ValueError(
+            "soft_masks must have shape (B, C, H, W) or (B, C, D, H, W); "
+            f"got {tuple(soft_masks.shape)}"
+        )
+    # Unpack batch size, class count, and voxel count for the matrix multiply below.
+    B, C = soft_masks.shape[:2]
+    spatial = soft_masks.shape[2:]
+    n_vox = int(np.prod(spatial))
+    device, dtype = soft_masks.device, soft_masks.dtype
+
+    # Conservative = shared faces only; inclusive = shared faces, edges, or vertices.
+    connection = connection.lower()
+    if connection not in ("conservative", "inclusive"):
+        raise ValueError(
+            f"connection must be 'conservative' or 'inclusive', not {connection!r}"
+        )
+
+    # Build a depthwise stencil: centre 0, ones where two cells are considered adjacent.
+    if len(spatial) == 2:
+        if connection == "conservative":
+            # Face neighbours only (4-connected).
+            kernel = torch.tensor(
+                [[0.0, 1.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, 0.0]],
+                device=device,
+                dtype=dtype,
+            )
+        else:
+            # Face, edge, and vertex neighbours (8-connected).
+            kernel = torch.ones((3, 3), device=device, dtype=dtype)
+            kernel[1, 1] = 0.0
+        kernel = kernel.view(1, 1, 3, 3).expand(C, 1, 3, 3)
+        dilated = F.conv2d(soft_masks, kernel, padding=1, groups=C)
+    elif len(spatial) == 3:
+        kernel = torch.zeros((3, 3, 3), device=device, dtype=dtype)
+        if connection == "conservative":
+            # Face neighbours only (6-connected).
+            kernel[1, 1, 0] = kernel[1, 1, 2] = 1.0
+            kernel[1, 0, 1] = kernel[1, 2, 1] = 1.0
+            kernel[0, 1, 1] = kernel[2, 1, 1] = 1.0
+        else:
+            # Face, edge, and vertex neighbours (26-connected).
+            kernel[:] = 1.0
+            kernel[1, 1, 1] = 0.0
+        kernel = kernel.view(1, 1, 3, 3, 3).expand(C, 1, 3, 3, 3)
+        dilated = F.conv3d(soft_masks, kernel, padding=1, groups=C)
+    else:
+        raise ValueError(f"topology supports 2D and 3D grids only; spatial shape {spatial}")
+
+    # Collapse spatial dims so bmm accumulates contact area: A[i,j] = sum_v X_i(v) * Neigh(X_j)(v).
+    flat_masks = soft_masks.reshape(B, C, n_vox)
+    flat_dilated = dilated.reshape(B, C, n_vox).transpose(1, 2)
+    adjacency = torch.bmm(flat_masks, flat_dilated)
     
+    # Remove self-contact (every voxel neighbours its own class).
+    adjacency = adjacency * (1.0 - torch.eye(C, device=device, dtype=dtype).unsqueeze(0))
+    
+    # Average with transpose so edge voxels do not bias i->j vs j->i.
+    if symmetrize:
+        adjacency = 0.5 * (adjacency + adjacency.transpose(1, 2))
+    return adjacency
+
+
 # TODO - make this return a Grid object?
 def section(dims : tuple, origin : np.ndarray, normal : np.ndarray, width : float = None, height : float = None, step=None):
     """

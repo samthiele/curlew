@@ -7,11 +7,12 @@ from dataclasses import dataclass, field
 import copy
 import curlew
 from curlew import _numpy, _tensor
-from curlew.geometry import Grid, Transform
+from curlew.geometry import Grid, Transform, compute_topology_adjacency
 from typing import Union
 
 import torch.optim as optim
 import torch.nn as nn
+import torch.nn.functional as F
 
 # used in the loss functions
 ninf = float("-inf")
@@ -102,7 +103,7 @@ class LearnableBase(nn.Module):
                 for i in range(self.input_dim):
                     o = [0]*self.input_dim
                     o[i] = C.delta
-                    C._offset.append( _tensor( o, dev=curlew.device, dt=curlew.dtype) )
+                    C._offset.append( _tensor( o ) )
 
         # pre-allocate inequality clamp tensors
         # (layout matches loss: one block of ns per inequality)
@@ -209,11 +210,11 @@ class CSet:
                             o[1].append( (attr[1][i][0], attr[1][i][1], attr[1][i][2] )) # already tensors
                     attr = o
                 elif k == 'eq': # equalities are also special (keep as a list of tensors as shape will differ)
-                    attr = [ _tensor( t, dev=curlew.device, dt=curlew.dtype ) for t in attr ]            
+                    attr = [ _tensor( t ) for t in attr ]            
                 else:
                     if attr is not None:
                         if isinstance( attr, (np.ndarray, list, tuple) ): # convert array-like types to tensor
-                            attr = _tensor( attr, dev=curlew.device, dt=curlew.dtype )
+                            attr = _tensor( attr )
                 args[k] = attr
         return CSet(**args)
     
@@ -245,6 +246,10 @@ class CSet:
                             attr = _numpy(attr)
                 args[k] = attr
         return CSet(**args)
+
+    def __str__(self):
+        from curlew.text import cset_str
+        return cset_str(self)
 
     # TODO - remove these IO functions; not really needed? (or move to IO)
     def toPLY( self, path ):
@@ -522,7 +527,10 @@ class HSet:
                 if not callable(getattr(self, k)):
                     setattr(self, k, kwargs.get(k, 0 ) )
         return self
-    
+
+
+
+
 @dataclass
 class Geode( object ):
     """
@@ -837,6 +845,191 @@ class Geode( object ):
                 args[k] = attr
         return Geode(**args)
 
+    def topology(
+        self,
+        grid=None,
+        mode="lithology",
+        symmetrize=True,
+        soft_sharpness=10.0,
+        output="matrix",
+        connection="conservative",
+    ):
+        """
+        Contact-area adjacency between lithology or structure classes on a regular grid.
+
+        Voxel contact area is estimated with differentiable depthwise convolution over
+        soft class assignments, then summed into an ``N x N`` matrix (optionally
+        symmetrized). Row/column order follows ``sorted(lithoLookup.keys())`` or
+        ``sorted(structureLookup.keys())`` when lookups are defined.
+
+        Parameters
+        ----------
+        grid : curlew.geometry.Grid, optional
+            Grid used to reshape per-voxel IDs into a volume. Defaults to ``self.grid``.
+        mode : str, optional
+            ``'lithology'`` (or ``'litho'``) uses ``lithoID`` / ``softLithoID``;
+            ``'structure'`` uses ``structureID`` / ``softStructureID``.
+        symmetrize : bool, optional
+            If True (default), symmetrize contact counts as ``(A + A.T) / 2``.
+        soft_sharpness : float, optional
+            Temperature for converting scalar ``softLithoID`` / ``softStructureID`` values
+            into per-class probabilities when soft IDs are available.
+        output : str, optional
+            ``'matrix'`` (default) returns an ``(N, N)`` array or tensor.
+            ``'dict'`` returns nested dicts ``{label_i: {label_j: contact_area}}`` using
+            lookup names when available, otherwise integer class IDs. Diagonal entries
+            are omitted.
+        connection : str, optional
+            ``'conservative'`` (default): adjacency requires shared cell faces (4-/6-connected).
+            ``'inclusive'``: also counts edge- and vertex-only contacts (8-/26-connected).
+
+        Returns
+        -------
+        numpy.ndarray, torch.Tensor, or dict
+            For ``output='matrix'``, shape ``(N, N)``; type matches the hard ID array.
+            For ``output='dict'``, values are floats (numpy path) or scalar tensors (torch path).
+        """
+        # Resolve evaluation grid (argument or stored on this Geode).
+        grid = grid or self.grid
+        if grid is None:
+            raise ValueError("A Grid must be provided or stored on this Geode (self.grid)")
+
+        # Select hard/soft ID arrays and name lookup for lithology vs structure.
+        mode = mode.lower()
+        if mode in ("lithology", "litho"):
+            ids = self.lithoID
+            soft_ids = self.softLithoID
+            lookup = self.lithoLookup
+        elif mode == "structure":
+            ids = self.structureID
+            soft_ids = self.softStructureID
+            lookup = self.structureLookup
+        else:
+            raise ValueError(
+                f"mode must be 'lithology' or 'structure', not {mode!r}"
+            )
+
+        if ids is None:
+            raise ValueError(f"{mode} IDs are not defined on this Geode")
+
+        output = output.lower()
+        if output not in ("matrix", "dict"):
+            raise ValueError(f"output must be 'matrix' or 'dict', not {output!r}")
+
+        # IDs must be one value per grid cell (same length as ravelled grid).
+        n_pts = int(np.prod(grid.shape))
+        if len(ids) != n_pts:
+            raise ValueError(f"ID array length ({len(ids)}) does not match grid size ({n_pts})")
+
+        # Fixed class order for matrix rows/columns: lookup keys, else sorted uniques in the data.
+        if lookup:
+            class_ids = sorted(lookup.keys())
+        elif isinstance(ids, torch.Tensor):
+            class_ids = sorted(torch.unique(ids).detach().cpu().tolist())
+        else:
+            class_ids = sorted(np.unique(ids).tolist())
+        C = len(class_ids)
+        if C == 0:
+            raise ValueError("No classes found for topology adjacency")
+
+        # Convert class IDs to a tensor
+        class_t = _tensor(class_ids)
+
+        # Differentiable path: scalar soft ID per voxel -> softmax over class channels.
+        if isinstance(ids, torch.Tensor) and soft_ids is not None:
+            # Restore (H, W) or (D, H, W) layout from the ravelled soft ID vector.
+            vol = (_tensor(grid.reshape(soft_ids)) if isinstance(soft_ids, np.ndarray) else grid.reshape(soft_ids) )
+            
+            # Squared distance to each class index, then softmax -> (C, H, W) or (C, D, H, W).
+            if grid.ndim == 2:
+                diff = vol.unsqueeze(0) - class_t.view(C, 1, 1)
+            else:
+                diff = vol.unsqueeze(0) - class_t.view(C, 1, 1, 1)
+            masks = F.softmax(-soft_sharpness * diff ** 2, dim=0)
+        else:
+            # Hard IDs: map grid cells to channel index, then one-hot per class.
+            vol = (_tensor(grid.reshape(ids)) if isinstance(ids, np.ndarray) else grid.reshape(ids))
+            
+            # Channel index 0..C-1 at each voxel (order matches class_ids).
+            idx = (vol.unsqueeze(-1) == class_t).long().argmax(dim=-1)
+            
+            # Permute to (C, spatial): channel-first layout expected by compute_topology_adjacency.
+            if grid.ndim == 2:
+                masks = F.one_hot(idx, C).permute(2, 0, 1).to(dtype=curlew.dtype)
+            else:
+                masks = F.one_hot(idx, C).permute(3, 0, 1, 2).to(dtype=curlew.dtype)
+
+        # Single batch item; squeeze to (C, C) below.
+        adj = compute_topology_adjacency(
+            masks.unsqueeze(0), 
+            symmetrize=symmetrize, 
+            connection=connection
+        )[0]
+        if isinstance(ids, np.ndarray): adj = _numpy(adj) # cast back to numpy if needed
+
+        if output == "dict": # return in dictionary format
+            # Human-readable keys from lookup; skip diagonal (always zero after adjacency step).
+            labels = ([lookup.get(cid, cid) for cid in class_ids] if lookup else list(class_ids))
+            
+            # Keep torch scalars in the dict when adj was computed on GPU / with autograd.
+            as_tensor = isinstance(adj, torch.Tensor)
+            return {
+                li: {
+                    lj: adj[i, j] if as_tensor else float(adj[i, j])
+                    for j, lj in enumerate(labels)
+                    if i != j
+                }
+                for i, li in enumerate(labels)
+            }
+        return adj # return in adjacency matrix format
+
+    def summary(
+        self,
+        volume_fraction_warn=1e-3,
+        min_voxels=1,
+        connection="conservative",
+        topology_kwargs=None,
+    ):
+        """
+        Text summary of gridded model results for logging and agent-side validation.
+
+        Implemented in :func:`curlew.text.geode_summary`. Includes voxel volumes per
+        structure and nested lithology, topology contact areas, displacements,
+        scalar ranges, property statistics, and warnings for negligible units.
+
+        Parameters
+        ----------
+        volume_fraction_warn : float, optional
+            Flag lithologies or structures below this fraction of total cell volume.
+        min_voxels : int, optional
+            Also flag units with fewer than this many voxels.
+        connection : str, optional
+            Passed to :meth:`topology` (``'conservative'`` or ``'inclusive'``).
+        topology_kwargs : dict, optional
+            Extra keywords forwarded to :meth:`topology` (e.g. ``symmetrize``).
+
+        Returns
+        -------
+        str
+        """
+        from curlew.text import geode_summary
+
+        return geode_summary(
+            self,
+            volume_fraction_warn=volume_fraction_warn,
+            min_voxels=min_voxels,
+            connection=connection,
+            topology_kwargs=topology_kwargs,
+        )
+
+    def __str__(self):
+        return self.summary()
+
+    def __repr__(self):
+        from curlew.text import geode_repr
+
+        return geode_repr(self)
+
     # TODO - remove these / move to curlew.IO.save
     def toPLY( self, path ):
         """
@@ -910,35 +1103,8 @@ class Pebble( object ):
         )
     def __str__(self):
         """Single-line summary suitable for progress-bar descriptions."""
-        if not self.losses:
-            return "L=0"
-
-        parts = []
-        total = 0.0
-        multi_group = len(self.losses) > 1
-
-        for group, terms in self.losses.items():
-            for name, loss in terms.items():
-                weight = self.weights.get(group, {}).get(name, 1.0)
-                if hasattr(loss, "detach"):
-                    val = loss.detach()
-                    val = float(val.item()) if val.numel() == 1 else None
-                elif isinstance(loss, np.ndarray):
-                    val = float(loss.item()) if loss.size == 1 else None
-                else:
-                    val = float(loss) if isinstance(loss, (int, float)) else None
-
-                if val is None:
-                    label = f"{group}/{name}" if multi_group else name
-                    parts.append(f"{label}=…")
-                    continue
-
-                weighted = weight * val
-                total += weighted
-                label = f"{group}/{name}" if multi_group else name
-                parts.append(f"{label}={weighted:.3f}")
-
-        return f"L={total:.3f} " + " ".join(parts)
+        from curlew.text import pebble_str
+        return pebble_str(self)
 
     def total(self):
         """Return the weighted sum of all loss terms (tensor if active, float if detached)."""

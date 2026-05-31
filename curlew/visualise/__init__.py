@@ -1,9 +1,14 @@
 """
 Functions for performing crude 2D plotting using matplotlib. Useful for demonstrations, but will
-need to be extended at some point to be more usable during model development. 
+need to be extended at some point to be more usable during model development.
+
+For 3D Napari-based visualisation see :mod:`curlew.visualise.napari_viewer`.
 """
 
+# TODO - move these matplotlib related functions to a separate file (matplotlib.py)
+
 import numpy as np
+import curlew
 from curlew.geology.geoevent import GeoEvent
 
 def plot2D( sxy, grid, C=None, ticksize=50, lw=1, cmap='rainbow', levels=None, ax=None, alpha=0.3 ):
@@ -402,3 +407,95 @@ def colour( sf, cmap='tab20', breaks=19 ):
     c = cm( norm( sf ) )[..., :3]
     c = (c*255).astype(np.uint8)
     return c
+
+def plotAdjacency(
+    geode,
+    grid=None,
+    mode="lithology",
+    ax=None,
+    cmap=curlew.ccramp.reversed(),
+    colorbar=True,
+    title=None,
+    cbar_label="Contact area",
+    **topology_kwargs,
+):
+    """
+    Plot a heatmap of lithology or structure topology adjacency for a gridded Geode.
+
+    Parameters
+    ----------
+    geode : curlew.core.Geode
+        Model result evaluated on a regular grid (``geode.grid`` or ``grid`` argument).
+    grid : curlew.geometry.Grid, optional
+        Grid passed through to :meth:`curlew.core.Geode.topology`.
+    mode : str, optional
+        ``'lithology'`` / ``'litho'`` or ``'structure'``; same as ``Geode.topology``.
+    ax : matplotlib.axes.Axes, optional
+        Axes to draw on; creates a new figure if ``None``.
+    cmap : str, optional
+        Matplotlib colormap name for the heatmap.
+    colorbar : bool, optional
+        If True (default), add a colorbar for contact area.
+    title : str, optional
+        Axes title; a default is built from ``mode`` when ``None``.
+    cbar_label : str, optional
+        Colorbar label text.
+    **topology_kwargs
+        Forwarded to :meth:`curlew.core.Geode.topology` (e.g. ``connection``,
+        ``symmetrize``, ``soft_sharpness``). ``output`` is always ``'matrix'``.
+
+    Returns
+    -------
+    matplotlib.figure.Figure, matplotlib.axes.Axes
+    """
+    import matplotlib.pyplot as plt
+    import torch
+    from curlew.core import Geode
+
+    if not isinstance(geode, Geode):
+        raise TypeError(f"geode must be a curlew.core.Geode, not {type(geode)!r}")
+
+    topology_kwargs.pop("output", None)
+    A = geode.topology(grid=grid, mode=mode, output="matrix", **topology_kwargs)
+    if isinstance(A, torch.Tensor):
+        A = A.detach().cpu().numpy()
+
+    mode_l = mode.lower()
+    if mode_l in ("lithology", "litho"):
+        lookup = geode.lithoLookup
+        ids = geode.lithoID
+    elif mode == "structure":
+        lookup = geode.structureLookup
+        ids = geode.structureID
+    else:
+        raise ValueError(f"mode must be 'lithology' or 'structure', not {mode!r}")
+
+    if lookup:
+        class_ids = sorted(lookup.keys())
+        labels = [str(lookup[cid]) for cid in class_ids]
+    elif isinstance(ids, torch.Tensor):
+        labels = [str(i) for i in sorted(torch.unique(ids).detach().cpu().tolist())]
+    else:
+        labels = [str(i) for i in sorted(np.unique(ids))]
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(max(4, len(labels)), max(4, len(labels))))
+    else:
+        fig = ax.figure
+
+    im = ax.imshow(A, cmap=cmap, aspect="equal")
+    n = len(labels)
+    ax.set_xticks(np.arange(n))
+    ax.set_yticks(np.arange(n))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_yticklabels(labels)
+    ax.set_xlabel("Class")
+    ax.set_ylabel("Class")
+    if title is None:
+        kind = "Lithology" if mode_l in ("lithology", "litho") else "Structure"
+        title = f"{kind} topology adjacency"
+    ax.set_title(title)
+    if colorbar:
+        fig.colorbar(im, ax=ax, label=cbar_label)
+    fig.tight_layout()
+    return fig, ax
