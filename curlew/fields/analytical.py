@@ -7,9 +7,29 @@ import numpy as np
 import curlew
 import torch
 import torch.nn as nn
+from collections.abc import Callable
 from curlew import _tensor
 from curlew.geometry import blended_wave, Transform
 from curlew.fields import BaseAF
+
+
+class _FastAffineTransform:
+    """Cached row-vector affine map used by ``EllipsoidalField`` (no homogeneous divide)."""
+
+    __slots__ = ("_field",)
+
+    def __init__(self, field: "EllipsoidalField"):
+        self._field = field
+
+    def __call__(self, points: torch.Tensor) -> torch.Tensor:
+        f = self._field
+        M_inv = f._M_inv.to(dtype=points.dtype, device=points.device)
+        origin = f.origin.to(dtype=points.dtype, device=points.device)
+        return (points - origin) @ M_inv.T
+
+    def isIdentity(self) -> bool:
+        return self._field._affine_is_identity
+
 
 class LinearField( BaseAF ):
     """
@@ -261,19 +281,41 @@ class EllipsoidalField(BaseAF):
     The zero isosurface exists at a distance of 1 in the pre-transformed coordinates; hence
     it exists at the ellipsoid described by the axes and directions.
 
-    Modes
+    decay
     -----
-    decay=True:
-        Returns a decaying field with value 1 at the center and 0 at/after the boundary.
-    decay=False (default):
-        Returns an ellipsoidal distance-like field with value 0 at the center and
-        increasing outward (boundary is at value 1 in canonical coordinates).
+    False (default):
+        Elliptical distance in canonical coordinates: 0 at the center, 1 on the
+        unit ellipsoid boundary, increasing outside.
+    ``'ellipse'`` (or ``True`` for backward compatibility):
+        Linear taper ``max(0, 1 - r)``: 1 at the center, 0 at and beyond the boundary.
+    ``'normal'``:
+        Gaussian ``exp(-r²/2)``: 1 at the center, smooth infinite tail (≈0.61 at ``r=1``).
+    ``'cosine'``:
+        ``0.5 * (1 + cos(π min(r, 1)))``: compact support, C¹ at the boundary.
+    ``'wendland'``:
+        Wendland C² ``(1 - r)⁴ (4r + 1)`` for ``r ≤ 1``, else 0.
+    ``'sigmoid'``:
+        Logistic taper ``σ(s(1 - r)) / σ(s)``; ``s`` is ``sigmoid_scale`` (default 10).
+    ``'inverse_quadratic'``:
+        ``1 / (1 + r²)``: 1 at the center, heavy-tailed falloff (0.5 at ``r=1``).
+    Callable:
+        Custom decay ``f(u, r)`` where ``u`` is ``(N, dim)`` position in the ellipse-aligned
+        frame (principal axes, not scaled by semi-axis lengths; world units) and ``r`` is
+        ``(N,)`` elliptical distance (canonical radius, 1 on the ellipsoid surface). Must
+        return ``(N,)`` values.
+    sigmoid_scale : float, optional
+        Steepness ``s`` for ``decay='sigmoid'``. Larger values sharpen the transition near ``r=1``.
     """
+    _DECAY_MODES = frozenset({
+        False, "ellipse", "normal", "cosine", "wendland", "sigmoid", "inverse_quadratic",
+    })
+
     def initField(self,
                   origin: np.ndarray = None,
                   axes: np.ndarray = None,
                   directions: np.ndarray = None,
-                  decay: bool = False):
+                  decay=False,
+                  sigmoid_scale: float = 10.0):
         
         # 1. Determine dimensionality from input parameters or default
         if origin is not None:
@@ -306,27 +348,85 @@ class EllipsoidalField(BaseAF):
             # Ensure the basis vectors are unit length (normalization)
             R = R / torch.linalg.norm(R, dim=-1, keepdim=True)
 
-        # The Shape Matrix M = R @ D @ R.T
-        M = R @ D @ R.T # This is the top left section of the affine transform
-        # The translation is concatenated based on the origin
-        T_matrix = torch.cat([M, self.origin.unsqueeze(1)], dim=1)
-        T_matrix = torch.cat([T_matrix, torch.cat(
-                                                 [torch.zeros(self.dim, dtype=curlew.dtype, device=curlew.device),
-                                                 torch.ones(1, device=curlew.device, dtype=curlew.dtype)]).unsqueeze(0)], dim=0)
-        # We need to invert the transform matrix (as we move from world to field coordinates)
-        self.T = Transform(matrix=T_matrix).inverse()
-        self.decay = bool(decay)
+        self.R = R
+        self.axes = axes_t
+        self._axis_aligned = directions is None
+
+        # The Shape Matrix M = R @ D @ R.T; canonical coords are M^{-1}(p - origin)
+        M = R @ D @ R.T
+        M_inv = R @ torch.diag(1.0 / axes_t) @ R.T
+        self.register_buffer("_M_inv", M_inv.contiguous())
+        self._affine_is_identity = bool(
+            torch.allclose(M, torch.eye(dim, dtype=curlew.dtype, device=curlew.device))
+            and torch.allclose(self.origin, torch.zeros(dim, dtype=curlew.dtype, device=curlew.device))
+        )
+        self.T = _FastAffineTransform(self)
+        if callable(decay):
+            if not isinstance(decay, Callable):
+                raise TypeError("custom decay must be a callable f(u, r)")
+            self.decay = decay
+        elif decay is True:
+            self.decay = "ellipse"
+        elif decay is False:
+            self.decay = False
+        elif decay not in self._DECAY_MODES:
+            raise ValueError(
+                f"decay must be False, True, a callable f(u, r), or one of "
+                f"{sorted(m for m in self._DECAY_MODES if m)}; got {decay!r}"
+            )
+        else:
+            self.decay = decay
+        self.sigmoid_scale = float(sigmoid_scale)
+
+    def _ellipse_coords(self, x: torch.Tensor):
+        """
+        Ellipse-aligned unscaled position ``u`` and elliptical distance ``r``.
+
+        ``x`` is canonical coordinates (unit ellipsoid at ``r=1``).
+        """
+        axes = self.axes.to(dtype=x.dtype, device=x.device)
+        if self._axis_aligned:
+            w = x
+        else:
+            w = x @ self.R.to(dtype=x.dtype, device=x.device)
+        u = w * axes.unsqueeze(0)
+        r = torch.linalg.norm(w, dim=-1)
+        return u, r
+
+    def _decay(self, r: torch.Tensor) -> torch.Tensor:
+        """Decay kernels in canonical radius r (1 at center for decay modes)."""
+        mode = self.decay
+        if mode == "ellipse":
+            return torch.clamp(1 - r, min=0)
+        if mode == "normal":
+            return torch.exp(-0.5 * r**2)
+        if mode == "cosine":
+            return 0.5 * (1 + torch.cos(torch.pi * torch.clamp(r, max=1)))
+        if mode == "wendland":
+            t = torch.clamp(1 - r, min=0)
+            return t**4 * (4 * r + 1)
+        if mode == "sigmoid":
+            s = r.new_tensor(self.sigmoid_scale)
+            return torch.sigmoid(s * (1 - r)) / torch.sigmoid(s)
+        if mode == "inverse_quadratic":
+            return 1 / (1 + r**2)
+        raise ValueError(f"unknown decay mode {mode!r}")
 
     def evaluate(self, x: torch.Tensor):
         """
-        Evaluate in canonical coordinates (`curlew.fields.BaseSF.forward` applies `self.T` first).
+        Evaluate in canonical coordinates (`BaseSF.forward` applies ``self.T`` first).
         """
+        if callable(self.decay):
+            u, r = self._ellipse_coords(x)
+            out = self.decay(u, r)
+            if not isinstance(out, torch.Tensor):
+                out = torch.as_tensor(out, dtype=x.dtype, device=x.device)
+            return out.reshape(r.shape)
+
         r = torch.linalg.norm(x, dim=-1)
-        if self.decay:
-            # 1 at the center, 0 at/after the boundary (r >= 1)
-            return torch.clamp(1 - r, min=0)
-        # 0 at the center, increasing outward (boundary at r == 1)
-        return r
+        if self.decay is False:
+            return r
+        return self._decay(r)
 
 class RectangularPrismField(BaseAF):
     """

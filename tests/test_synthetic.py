@@ -32,12 +32,14 @@ def _checkGeodeCRS(g, M):
         assert len(g.x[key]) == n
 
 def test_synthetic():
-    from curlew.synthetic import steno, hutton, michell, playfair, anderson, lehmann, walker
+    from curlew.synthetic import steno, hutton, michell, playfair, anderson, lehmann, walker, goguel
 
-    models = [steno, hutton, michell, walker, playfair, anderson, lehmann]
+    models = [steno, hutton, michell, walker, playfair, anderson, lehmann, goguel]
     for ndim in (2, 3):
         curlew.default_dim = ndim
         for f in models:
+            if f is goguel and ndim == 3:
+                continue  # sandbox example is 2D; 3D build is supported but not regression-tested here
             M = f()
             xy = M.grid.coords()
             g = M.predict(xy)
@@ -55,11 +57,13 @@ def test_synthetic():
             assert c.gradient is not None
 
             for ev in M.events:
-                if ev.field.C is not None:
-                    _checkCSet(ev.field.C, dims=ndim, prop=False)
-                    if f in (steno, hutton, playfair, lehmann):
-                        assert ev.field.C.eq is not None
-                        assert all(len(t) >= 2 for t in ev.field.C.eq)
+                fields = ev.field if isinstance(ev.field, list) else [ev.field]
+                for field in fields:
+                    if getattr(field, "C", None) is not None:
+                        _checkCSet(field.C, dims=ndim, prop=False)
+                        if f in (steno, hutton, playfair, lehmann):
+                            assert field.C.eq is not None
+                            assert all(len(t) >= 2 for t in field.C.eq)
             if M.C is not None:
                 _checkCSet(M.C, dims=ndim, val=False, grad=False, ori=False)
             assert len(xy) == np.prod(M.grid.shape)

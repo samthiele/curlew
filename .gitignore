@@ -29,6 +29,7 @@ sandbox
 # cursor
 .cursor/
 .literature/
+.agents/
 
 # MACOSX
 .DS_STORE

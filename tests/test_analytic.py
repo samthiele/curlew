@@ -39,8 +39,66 @@ def test_EllipsoidalField():
         far_val_d = decay_field.forward(torch.tensor(far, dtype=torch.float32)).squeeze().item()
         assert far_val_d == 0.0, f"far value {far_val_d} not 0"
 
-    # 2D with custom origin and axes (ellipse)
+        # String alias matches bool decay=True
+        ellipse_field = EllipsoidalField(name="ell_ellipse", input_dim=dim, decay="ellipse")
+        assert torch.allclose(
+            ellipse_field.forward(torch.tensor(x, dtype=torch.float32)).squeeze(),
+            out_d,
+        )
+
+        # Gaussian decay: 1 at center, smooth tail (not exactly 0 at r=1)
+        normal_field = EllipsoidalField(name="ell_normal", input_dim=dim, decay="normal")
+        center_val_n = normal_field.forward(torch.tensor(center_pt, dtype=torch.float32)).squeeze().item()
+        assert abs(center_val_n - 1.0) < 1e-5
+        boundary_val_n = normal_field.forward(torch.tensor(boundary, dtype=torch.float32)).squeeze().item()
+        assert abs(boundary_val_n - np.exp(-0.5)) < 1e-5
+        far_val_n = normal_field.forward(torch.tensor(far, dtype=torch.float32)).squeeze().item()
+        assert far_val_n < 1e-10
+
+        for decay_name, boundary_expected, far_max in [
+            ("cosine", 0.0, 0.0),
+            ("wendland", 0.0, 0.0),
+            ("inverse_quadratic", 0.5, None),
+        ]:
+            f = EllipsoidalField(name=f"ell_{decay_name}", input_dim=dim, decay=decay_name)
+            assert abs(
+                f.forward(torch.tensor(center_pt, dtype=torch.float32)).squeeze().item() - 1.0
+            ) < 1e-5
+            assert abs(
+                f.forward(torch.tensor(boundary, dtype=torch.float32)).squeeze().item()
+                - boundary_expected
+            ) < 1e-5
+            if far_max is not None:
+                assert (
+                    f.forward(torch.tensor(far, dtype=torch.float32)).squeeze().item() <= far_max
+                )
+
+        sig = EllipsoidalField(name="ell_sig", input_dim=dim, decay="sigmoid", sigmoid_scale=20.0)
+        assert abs(sig.forward(torch.tensor(center_pt, dtype=torch.float32)).squeeze().item() - 1.0) < 1e-5
+        mid = np.zeros((1, dim))
+        mid[0, 0] = 0.5
+        assert sig.forward(torch.tensor(mid, dtype=torch.float32)).squeeze().item() > 0.9
+
+    # Custom decay callable: matches built-in normal; u is zero at centre
+    captured = {}
+
+    def custom_normal(u, r):
+        captured["u"] = u.detach().cpu().numpy()
+        return torch.exp(-0.5 * r**2)
+
     origin = np.array([10.0, 20.0])
+    axes = np.array([5.0, 2.0])
+    custom = EllipsoidalField(
+        name="ell_custom", input_dim=2, origin=origin, axes=axes, decay=custom_normal
+    )
+    ref = EllipsoidalField(name="ell_ref", input_dim=2, origin=origin, axes=axes, decay="normal")
+    pts = torch.tensor([[10.0, 20.0], [15.0, 20.0], [10.0, 22.0]], dtype=torch.float32)
+    assert torch.allclose(custom.forward(pts).squeeze(), ref.forward(pts).squeeze(), atol=1e-5)
+    assert np.abs(captured["u"][0]).max() < 1e-5
+    assert np.allclose(captured["u"][1], [5.0, 0.0], atol=1e-5)
+    assert np.allclose(captured["u"][2], [0.0, 2.0], atol=1e-5)
+
+    # 2D with custom origin and axes (ellipse)
     axes = np.array([5.0, 2.0])  # semi-axes
     E = EllipsoidalField(name="e2", input_dim=2, origin=origin, axes=axes, decay=True)
     G2 = Grid([20, 20], step=[1.0, 1.0], center=origin)

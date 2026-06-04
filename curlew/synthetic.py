@@ -793,3 +793,152 @@ def seuss(shape=None, nlayers=6, **kwargs):
     s = M.predict(G)
     sample(s, M, pv="rgb", **kwargs)
     return M
+
+def goguel(shape=None, zstep=300, dip=60.0, offset=0.2, n_faults=3, **kwargs):
+    """
+    Return a synthetic model with horizontal stratigraphy and several finite faults.
+
+    Each fault has planar geometry (shared implicit field), constant slip scaled by a
+    cosine-tapered ellipsoidal patch (finite fault extent).
+
+    Parameters
+    ----------
+    shape : tuple, optional
+        The width and height of the generated data. 
+    zstep : float
+        Vertical spacing between fault seed positions.
+    dip : float
+        Fault dip in degrees (from horizontal).
+    offset : float
+        Slip magnitude. Values in ``(0, 1)`` are interpreted as a fraction of the
+        ellipsoid major-axis radius; values ``>= 1`` are absolute slip (same units as extent).
+    n_faults : int
+        Number of finite faults (default 3).
+
+    Keywords
+    --------
+        Passed to :func:`curlew.synthetic.sample`.
+
+    Returns
+    -------
+    M : curlew.geology.geomodel.GeoModel.
+    """
+    # Grid, extent, and model centre (fault/strat seeds are placed relative to these).
+    G = _make_grid(shape)
+    extent = _physical_extent(shape)
+    ndim = _model_ndim(shape)
+    vert = 1 if ndim == 2 else 2
+    origin = np.asarray(G.center, dtype=float)
+
+    # Ellipsoid major axis and fault spacing scale with model height; slip from offset arg.
+    patch_radius = 2.5 * extent[vert] / (n_faults + 1)
+    xstep = 1.5 * extent[0] / (n_faults + 1)
+    if isinstance(offset, (int, np.integer)) or (isinstance(offset, float) and offset >= 1):
+        slip_mag = float(offset)
+    else:
+        slip_mag = offset * patch_radius
+    slip = [slip_mag] * n_faults
+
+    # Stagger fault centres in x and z, then re-centre the cluster on the grid midpoint.
+    cx = np.array([xstep * (i + 1) for i in range(n_faults)])
+    cz = np.array([extent[vert] - zstep * (i + 1) for i in range(n_faults)])
+    cx = cx - np.mean(cx) + origin[0]
+    cz = cz - np.mean(cz) + origin[vert]
+
+    # Layer-cake basement: horizontal scalar field and regularly spaced isosurface seeds.
+    s0 = strati(
+        "s0",
+        type=LinearField,
+        origin=_g2(origin, ndim),
+        gradient=_g2(np.array([0.0, 1.0]), ndim),
+    )
+    for seed, name in _isosurface_seeds(extent, ndim, 8):
+        s0.addIsosurface(name, seed=seed)
+
+    # One fault GeoEvent: shared plane dipping toward +x; vertical shortening gives normal (top-down) slip.
+    fault_grad = np.array([np.sin(np.deg2rad(dip)), np.cos(np.deg2rad(dip))])
+    contacts = [f"ff{i}" for i in range(n_faults)]
+    modifiers = [f"fe{i}" for i in range(n_faults)]
+    s1 = fault(
+        "s1",
+        type=LinearField,
+        origin=_g2(origin, ndim),
+        gradient=_g2(fault_grad, ndim),
+        shortening=_g2((0, -1), ndim),
+        offset=slip,
+        contact=contacts,
+        width=0,
+        modifier=modifiers,
+        n_steps=1,
+    )
+
+    # Ellipse frame: tangent along strike, normal across the fault plane; axes set patch size.
+    fn = _g2(s1["s1"].grad.detach().cpu().numpy(), ndim)
+    ft = _g2(np.array([-fn[1], fn[0]]), ndim)
+    axes = _g2(np.array([patch_radius, 0.75 * patch_radius]), ndim)
+
+    # Per fault: isosurface seed on the shared plane + cosine ellipsoid that tapers slip to zero.
+    for i, (_x, _z) in enumerate(zip(cx, cz)):
+        seed = _g2(np.array([_x, _z]), ndim)
+        s1.addIsosurface(
+            f"ff{i}",
+            seed=seed.copy(),
+            field="s1",
+        )
+        if ndim == 2:
+            directions = np.array([ft, fn])
+        else:
+            directions = np.stack([ft, np.cross(ft, fn), fn])
+        s1.addField(
+            f"fe{i}",
+            field=EllipsoidalField(
+                f"fe{i}",
+                input_dim=ndim,
+                origin=seed.copy(),
+                axes=axes,
+                directions=directions,
+                decay="cosine",
+            ),
+        )
+
+    # Assemble model and sample constraints (bedding on s0, fault plane on s1, global property).
+    M = GeoModel([s0, s1], grid=G, name="goguel")
+    s = M.predict(G)
+
+    Cs = sample(s, M, pv="rgb", bind=False, **kwargs)
+    kw_fault = dict(kwargs)
+    kw_fault.pop("breaks", None)
+    kw_fault["pval"] = kw_fault.get("pval", 1.0)
+    fault_breaks = [s1.getIsovalue(f"ff{i}") for i in range(n_faults)]
+    Cf = sample(
+        s1.predict(G),
+        M,
+        pv="rgb",
+        breaks=fault_breaks,
+        bind=False,
+        **kw_fault,
+    )
+
+    ordered = _csets_in_order(Cs)
+    strat = ordered[0]
+    prop = ordered[-1] if "property" in Cs else None
+    fault_c = _csets_in_order(Cf)[0]
+
+    # Keep near-horizontal bedding orientations only (s0 gradient is vertical).
+    gv = strat.gv
+    if gv is not None:
+        mask = (gv[:, vert] > 0.9) & (gv[:, vert] < 1.1)
+        strat.gp = strat.gp[mask]
+        strat.gv = strat.gv[mask]
+        strat.gop = strat.gop[mask]
+        strat.gov = strat.gov[mask]
+
+    if fault_c.vv is not None:
+        fault_c.vv = fault_c.vv * 0
+
+    M["s0"].field.bind(strat)
+    M["s1"]["s1"].bind(fault_c)
+    if prop is not None:
+        M.bind(prop)
+
+    return M
