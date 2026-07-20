@@ -700,7 +700,7 @@ class GeoEvent( object ):
                     pts = np.array(pts, copy=True)
                 x.set_coords(self.name, pts)
 
-        # handle our own displacement
+        # handle our own displacement (kinematic offset), if defined
         if self.deformation is not None:
                 offset = self.displacement(x) # get deformation vectors
                 if isinstance(x, Geode):
@@ -739,7 +739,11 @@ class GeoEvent( object ):
             tonp = True
 
         if self.deformation is None:
-            offset = torch.zeros_like(x) # no deformation
+            if isinstance(x, Geode):
+                pts = x.coords("model") if "model" in x.x else x.coords()
+                offset = torch.zeros_like(pts)
+            else:
+                offset = torch.zeros_like(x)
         else:
             if isinstance(x, Geode): # We are evaluating a full Geode object
                 pts = x.coords("model") if "model" in x.x else x.coords()

@@ -185,7 +185,7 @@ class GeoModel( LearnableBase ):
             out[F.name] = pebble
         return out
 
-    def fit(self, epochs, early_stop=(100, 1e-4), custom_loss=None, best=True, vb=True, prefix='Training'):
+    def fit(self, epochs, early_stop=(100, 1e-4), custom_loss=None, best=True, vb=True, prefix='Training', seed=42):
         """
         Train all GeoEvents in this model to fit the specified constraints
         simultaneously.
@@ -207,20 +207,52 @@ class GeoModel( LearnableBase ):
             Display a tqdm progress bar to monitor training.
         prefix : str, optional
             The prefix used for the tqdm progress bar.
+        seed : int, optional
+            Seed for the Bayes-by-Backprop weight-sampling generator (see Notes).
 
         Returns
         -------
         loss : float
             The loss of the final (best if best=True) model state.
         pebble : curlew.core.Pebble
-            A detailed breakdown of the final loss. 
+            A detailed breakdown of the final loss.
+
+        Notes
+        -----
+        ``self.events`` is a plain list, not an ``nn.ModuleList`` (each ``GeoEvent`` is not
+        itself an ``nn.Module``), so nested :class:`~curlew.fields.series.FSF` potentials
+        — and indeed every learnable parameter in the model — are not reachable via
+        ``self.modules()``/``self.state_dict()`` (both come back empty on a bare
+        ``GeoModel``). Two things that ``BaseSF.fit`` gets "for free" from being a single
+        ``nn.Module`` are therefore done explicitly here, per ``field``/``deformation``/
+        ``overprint``/``propertyField`` across every event:
+
+        1. Every nested ``FSF`` gets a fresh held weight sample each epoch, so joint
+           ``fit`` trains through the same reparameterised Bayes-by-Backprop draws as
+           isolated per-event ``fit``/``prefit`` — without this, ``A_rho`` never sees a
+           data-fit gradient and every forward pass silently uses the posterior mean
+           instead of a weight sample.
+        2. Each owner's ``state_dict()`` is snapshotted on improvement and reloaded at the
+           end when ``best=True``, so joint ``fit`` actually returns the best-loss weights
+           instead of whatever the last (or early-stopped) epoch happened to leave behind.
         """
+        from curlew.fields.series import FSF
+
+        owners = []
+        for F in self.events:
+            for o in (F.field, F.deformation, F.overprint, F.propertyField):
+                if o is not None:
+                    owners.append(o)
+        fsf_modules = [m for o in owners for m in FSF.iter_in(o)]
+        bbb_gen = torch.Generator(device=curlew.device).manual_seed(seed) if fsf_modules else None
+
         bar = range(epochs)
         if vb:
             bar = tqdm(range(epochs), desc=prefix, bar_format="{desc}: {n_fmt}/{total_fmt}|{postfix}")
 
         best_loss = np.inf
         best_pebble = None
+        best_state = None
         best_count = 0
         eps = early_stop[1] if early_stop is not None else 0
 
@@ -228,6 +260,9 @@ class GeoModel( LearnableBase ):
             custom_loss = []
 
         for epoch in bar:
+            if fsf_modules:
+                for m in fsf_modules:
+                    m.resample_weights(generator=bbb_gen)
             pebble = Pebble() # initialise loss
             for F in self.events[::-1]:
                 pebble = pebble + F.loss() # add loss incurred by each GeoEvent (and associated learnables like deformations, overprints, etc.)
@@ -237,6 +272,9 @@ class GeoModel( LearnableBase ):
             if total.item() < (best_loss + eps):
                 best_loss = total.item()
                 best_pebble = pebble.detach()
+                best_state = [
+                    {k: v.detach().clone() for k, v in o.state_dict().items()} for o in owners
+                ]
                 best_count = 0
             else:
                 if best_pebble is None:
@@ -265,6 +303,14 @@ class GeoModel( LearnableBase ):
             pebble.zero()
             pebble.total().backward()
             pebble.step(exclude=exclude)
+
+        if best and best_state is not None:
+            for o, sd in zip(owners, best_state):
+                o.load_state_dict(sd)
+
+        if fsf_modules:
+            for m in fsf_modules:
+                m.clear_weight_sample()
 
         return best_loss, best_pebble
 

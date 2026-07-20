@@ -1,40 +1,22 @@
 """
 Tests for kinematic interaction classes in ``curlew.geology.interactions``:
-velocity-field integration (``VFieldOffset``), sheet intrusions (``SheetOffset``),
-and faults (``FaultOffset``).
+RK2 flow integration (``FlowOffset``), sheet intrusions (``SheetOffset``),
+and faults (``FaultOffset``) — ``SheetOffset``/``FaultOffset`` are ``FlowOffset``
+subclasses that derive velocity from the owning ``GeoEvent`` on each sub-step.
 """
 import numpy as np
 import torch
+from torch import nn
 
 import curlew
 from curlew import GeoEvent, _tensor
-from curlew.fields import BaseAF
 from curlew.fields.analytical import LinearField
-from curlew.geology.interactions import FaultOffset, SheetOffset, VFieldOffset
+from curlew.geology.interactions import FaultOffset, FlowOffset, SheetOffset
 
 # run these tests on CPU with stable float64 arithmetic
 curlew.device = "cpu"
 curlew.dtype = torch.float64
 curlew.default_dim = 2
-
-class _ConstVecField(BaseAF):
-    """Analytical velocity field returning the same vector at every position."""
-
-    def initField(self, vec, **kwargs):
-        v = np.asarray(vec, dtype=np.float64).ravel()
-        self._vec = _tensor(v, dev=curlew.device, dt=curlew.dtype)
-
-    def evaluate(self, x: torch.Tensor):
-        return self._vec.unsqueeze(0).expand(x.shape[0], -1)
-
-class _QuadPosField(BaseAF):
-    """Nonlinear velocity v(x) = scale * x**2 (path length affects integrated displacement)."""
-
-    def initField(self, scale=1.0, **kwargs):
-        self.s = float(scale)
-
-    def evaluate(self, x: torch.Tensor):
-        return self.s * x * x
 
 def _LinearField(name, origin, gradient, *, normalise=False, input_dim=None):
     """Build a minimal GeoEvent with an attached linear scalar field."""
@@ -50,48 +32,6 @@ def _LinearField(name, origin, gradient, *, normalise=False, input_dim=None):
     )
     return GeoEvent(name, type=LinearField, field=lf)
 
-def test_vfieldoffset():
-    """
-    Test the ``VFieldOffset`` class and check integration (approximation) is working.
-    """
-    
-    #  ``VFieldOffset`` with an attached latent field should integrate that field's
-    # forward pass. With default ``dt=-1`` and ``n_steps=1``, displacement is ``-v(x)``.
-    latent = _ConstVecField("uv", input_dim=2, output_dim=2, vec=[0.25, -0.5])
-    off = VFieldOffset(latent, n_steps=1)
-    X = torch.tensor([[0.0, 0.0], [1.0, 2.0], [-1.0, 3.0]], dtype=curlew.dtype)
-
-    d = off.disp(X, None)
-    direct = latent.forward(X, transform=False)
-
-    assert torch.allclose(d, -direct)
-    assert d.shape == X.shape
-
-    # For a spatially constant velocity field, total displacement should not depend
-    # on the number of Euler substeps (only on ``dt`` and the velocity magnitude).
-    c = np.array([0.7, -0.2], dtype=np.float64)
-    latent = _ConstVecField("uv", input_dim=2, output_dim=2, vec=c)
-    X = torch.randn(4, 2, dtype=curlew.dtype)
-
-    disp_once = VFieldOffset(latent, n_steps=1, dt=-0.1).disp(X, None)
-    disp_many = VFieldOffset(latent, n_steps=10, dt=-0.1).disp(X, None)
-
-    assert torch.allclose(disp_once, disp_many)
-    
-    # When velocity varies with position, multi-step Euler integration should differ
-    # from a single evaluation at the start point.
-    latent = _QuadPosField("qx", input_dim=2, output_dim=2, scale=0.25)
-    X = torch.tensor([[0.25, -0.1], [1.0, 0.5]], dtype=curlew.dtype)
-
-    d_one = VFieldOffset(latent, n_steps=1, dt=-0.02).disp(X, None)
-    d_path = VFieldOffset(latent, n_steps=50, dt=-0.02).disp(X, None)
-
-    assert (d_one - d_path).abs().max().item() > 1e-5
-    assert d_path.shape == X.shape
-    
-    # Along a straight, uniformly graded dyke wall, sheet opening is locally uniform so
-    # extra Euler steps should not change the total displacement.
-    
 def test_SheetOffset():
     """
     Along a straight, uniformly graded dyke wall, sheet opening is locally uniform so
@@ -155,3 +95,130 @@ def test_FaultOffset():
     u2 = fault2.disp(X, gfield)
     assert u2.shape == u.shape
     assert torch.isfinite(u2).all()
+
+
+class _ConstVelocity(nn.Module):
+    """Constant velocity for FlowOffset integration checks."""
+
+    def __init__(self, vec, dim=2):
+        super().__init__()
+        self.dim = dim
+        self.register_buffer("v", _tensor(vec, dev=curlew.device, dt=curlew.dtype).reshape(dim))
+
+    def forward(self, x, w=None, t=None):
+        return self.v.unsqueeze(0).expand(x.shape[0], -1)
+
+    def forward_and_jacobian(self, x, w=None, t=None):
+        n = x.shape[0]
+        v = self.forward(x, w, t)
+        jv = torch.zeros(n, self.dim, self.dim, dtype=x.dtype, device=x.device)
+        return v, jv
+
+
+def test_flow_offset_constant_velocity():
+    """FlowOffset restoration displacement matches RK2 integration of a uniform field."""
+    vel = _ConstVelocity([0.25, -0.5])
+    off = FlowOffset(vel, n_steps=4, direction=-1.0)
+    X = torch.tensor([[0.0, 0.0], [1.0, 2.0]], dtype=curlew.dtype)
+
+    d = off.disp(X, None)
+    expected = off.inverse_map(X) - X
+    assert torch.allclose(d, expected)
+    assert torch.allclose(d, -vel.v.unsqueeze(0).expand_as(X), atol=1e-10)
+
+    x_ref, J = off.inverse_map_with_jacobian(X)
+    assert torch.allclose(x_ref, X + d)
+    det = torch.linalg.det(J)
+    assert torch.allclose(det, torch.ones_like(det), atol=1e-8)
+
+
+def test_flow_offset_geoevent_undeform():
+    """FlowOffset plugs into GeoEvent.undeform like other OffsetBase subclasses."""
+    vel = _ConstVelocity([0.1, 0.2])
+    event = _LinearField("host", origin=[0.0, 0.0], gradient=[1.0, 0.0])
+    event.deformation = FlowOffset(vel, n_steps=2)
+    X = torch.tensor([[0.0, 0.0], [2.0, -1.0]], dtype=curlew.dtype)
+    x_paleo = event.undeform(X.clone())
+    disp = -vel.v.unsqueeze(0).expand_as(X)
+    assert torch.allclose(x_paleo, X + disp, atol=1e-10)
+
+
+class _QuadVelocity(nn.Module):
+    """Nonlinear velocity v(x) = scale * x**2 (path shape affects integrated displacement)."""
+
+    def __init__(self, scale=1.0, dim=2):
+        super().__init__()
+        self.dim = dim
+        self.scale = float(scale)
+
+    def forward(self, x, w=None, t=None):
+        return self.scale * x * x
+
+
+def test_flow_offset_duration_scales_constant_velocity():
+    """
+    For a spatially constant velocity, total displacement should not depend on the
+    number of RK2 substeps (only on ``direction``'s magnitude and the velocity) —
+    the RK2 analogue of the old ``VFieldOffset`` Euler-substep invariance.
+    """
+    vel = _ConstVelocity([0.7, -0.2])
+    X = torch.randn(4, 2, dtype=curlew.dtype)
+
+    disp_once = FlowOffset(vel, n_steps=1, direction=-0.1).disp(X, None)
+    disp_many = FlowOffset(vel, n_steps=10, direction=-0.1).disp(X, None)
+
+    assert torch.allclose(disp_once, disp_many)
+
+
+def test_flow_offset_position_dependent_velocity_needs_substeps():
+    """
+    When velocity varies with position, multi-step RK2 integration should differ
+    from a single (coarse) step, since the path shape now matters.
+    """
+    vel = _QuadVelocity(scale=0.25)
+    X = torch.tensor([[1.0, 0.8], [1.2, -1.0]], dtype=curlew.dtype)
+
+    d_one = FlowOffset(vel, n_steps=1, direction=-0.3).disp(X, None)
+    d_path = FlowOffset(vel, n_steps=50, direction=-0.3).disp(X, None)
+
+    assert (d_one - d_path).abs().max().item() > 1e-5
+    assert d_path.shape == X.shape
+
+
+def test_sheet_and_fault_offset_are_flow_offsets():
+    """SheetOffset/FaultOffset are FlowOffset subclasses; VFieldOffset has been removed."""
+    assert issubclass(SheetOffset, FlowOffset)
+    assert issubclass(FaultOffset, FlowOffset)
+    import curlew.geology.interactions as interactions
+    assert not hasattr(interactions, "VFieldOffset")
+
+
+def test_flow_offset_compile_only_for_spatial_velocity():
+    """
+    ``curlew.compile`` wraps ``FlowOffset._integrate`` with ``torch.compile`` only
+    for the spatial-velocity-module path (used by restoration): its ``_velocity_at``
+    is closed-form tensor math with no ``G``-dependence, so it's safe to compile.
+    ``SheetOffset``/``FaultOffset`` (``velocity=None``) derive velocity from ``G``
+    via a nested ``autograd.grad`` call on every sub-step, so they must stay eager
+    regardless of the flag.
+    """
+    prev = curlew.compile
+    try:
+        vel = _ConstVelocity([0.3, -0.1])
+        X = torch.tensor([[0.0, 0.0], [1.5, -2.0]], dtype=curlew.dtype)
+
+        curlew.compile = True
+        off_compiled = FlowOffset(vel, n_steps=3, direction=-1.0)
+        assert "_integrate" in vars(off_compiled)  # instance-level compiled override
+
+        curlew.compile = False
+        off_eager = FlowOffset(vel, n_steps=3, direction=-1.0)
+        assert "_integrate" not in vars(off_eager)  # plain class method, uncompiled
+
+        assert torch.allclose(off_compiled.disp(X, None), off_eager.disp(X, None), atol=1e-8)
+
+        curlew.compile = True
+        sheet = SheetOffset(contact=(-1.0, 1.0), aperture=1.0, n_steps=1)
+        assert "_integrate" not in vars(sheet)  # G-dependent path stays eager
+    finally:
+        curlew.compile = prev

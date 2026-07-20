@@ -13,7 +13,7 @@ from curlew.geology.interactions import (
     SheetOffset,
     FaultOffset,
     FoldOffset,
-    VFieldOffset,
+    FlowOffset,
 )
 from curlew.geology.geomodel import _linkE, GeoModel
 from curlew.geometry import blended_wave
@@ -87,6 +87,105 @@ def strati( name, *, C=None, base = -np.inf, mode="above", onlap=False,
     if onlap:
         o.defaultDomain = 'parent' # older unit defines unconformity geometry
     return _initF( name, C=C, overprint=o, **kwargs)
+
+
+def restore(name, *, velocity, C=None, H=None, base=-np.inf, mode="above", onlap=False,
+            lithoSharpness=1.0, structureSharpness=1.0, constraints=None,
+            fault_lift=None, **kwargs):
+    """
+    Create a GeoEvent for diffeomorphic restoration (fold / structure inversion).
+
+    This is a :func:`strati`-style **generative** event — it gets the same
+    :class:`~curlew.geology.interactions.Overprint` (``base``/``mode``/``onlap``)
+    and thus the same isosurface/lithology behaviour as any other stratigraphic
+    package — just parameterised by a different kind of interpolator: a
+    :class:`~curlew.fields.restoration.RestorationField`, whose two (2-D: one,
+    3-D: two) Clebsch potentials produce a divergence-free *velocity* field.
+    That velocity is integrated into a diffeomorphism Φ; the event's scalar
+    value is the restored depth ``φ(x) = (Φ⁻¹x)[depth_axis]``, and losses
+    compare bedding orientation/values *after* integrating through Φ (Nanson's
+    relation) to observed orientations/values, rather than fitting the scalar
+    field directly (see :meth:`~curlew.fields.restoration.RestorationField.loss`).
+
+    The event's ``deformation`` is set to the field's own
+    :class:`~curlew.geology.interactions.FlowOffset` integrator
+    (``field.integrator``) rather than a separately constructed one, so younger
+    events are undeformed through the *same* Φ (and parameters) used for scalar
+    evaluation and lithology.
+
+    Parameters
+    ----------
+    name : str
+        Event name (also used for the :class:`RestorationField`).
+    velocity : :class:`~curlew.fields.clebsch.ClebschVelocity` or compatible module
+        Pre-built divergence-free velocity field (e.g. from
+        :func:`~curlew.fields.clebsch.clebsch_velocity` or
+        :func:`~curlew.fields.clebsch.temporal_clebsch_velocity`).  Must expose
+        ``dim``, ``forward``, and ``forward_and_jacobian``.  When using fault
+        lifts, build with ``lift_dim`` matching :attr:`~curlew.fields.lift.FaultLift.lift_dim`.
+    C : :class:`~curlew.core.CSet`, optional
+        Constraints in **modern** coordinates.  Interpreted as:
+
+        - ``gp``/``gv`` → bedding normals (Nanson; weight ``H.grad_loss``)
+        - ``vp``/``vv`` → restored depth values (weight ``H.value_loss``)
+        - ``eq`` → horizon traces, flatness in restored depth (weight ``H.eq_loss``)
+        - ``iq`` → stratigraphic ordering on **restored depth** ``(Φ⁻¹ x)[depth_axis]``
+          (weight ``H.iq_loss``; same ``CSet.iq`` format as scalar fields)
+        - ``gop``/``gov`` → sign-invariant normals (weight ``H.ori_loss``)
+    constraints : sequence of :class:`~curlew.fields.restoration_constraints.RestorationConstraint`, optional
+        Pluggable priors (e.g. layer thickness, orthogonal thickness) attached
+        to the :class:`RestorationField` — not stored on ``CSet``.
+    fault_lift : :class:`~curlew.fields.lift.FaultLift`, optional
+        Pre-built GWN sheet lift for fault-aware restoration.
+    H : :class:`~curlew.core.HSet`, optional
+        Loss weights.  Defaults enable gradient, value, and equality terms;
+        ``iq_loss`` and scalar-field terms (monotonicity / thickness) are off
+        by default.
+    base, mode, onlap, lithoSharpness, structureSharpness
+        Same as :func:`strati` — control the basal :class:`Overprint` for this
+        (folded) stratigraphic package, and isosurface/lithology sharpness.
+
+    Keywords
+    --------
+    Passed to :class:`~curlew.fields.restoration.RestorationField` via
+    :class:`~curlew.geology.geoevent.GeoEvent` (e.g. ``n_steps``,
+    ``depth_axis``, ``signed_normals``, ``sigma_floor``).  ``constraints`` may
+    also be passed here instead of as a keyword to :func:`restore`.
+
+    Returns
+    -------
+    :class:`~curlew.geology.geoevent.GeoEvent`
+    """
+    from curlew.core import HSet
+    from curlew.fields.restoration import RestorationField
+
+    if fault_lift is not None:
+        kwargs["fault_lift"] = fault_lift
+    kwargs["velocity"] = velocity
+
+    if H is None:
+        H = HSet(
+            value_loss="1.0",
+            grad_loss="1.0",
+            eq_loss="1.0",
+            mono_loss=0,
+            thick_loss=0,
+            flat_loss=0,
+            ori_loss=0,
+            iq_loss=0,
+        )
+    if constraints is not None:
+        kwargs["constraints"] = list(constraints)
+    kwargs.setdefault("type", RestorationField)
+    kwargs["H"] = H
+    event = strati(
+        name, C=C, base=base, mode=mode, onlap=onlap,
+        lithoSharpness=lithoSharpness, structureSharpness=structureSharpness,
+        **kwargs,
+    )
+    event.deformation = event.field.integrator  # reuse the field's own Phi; no duplicate integrator
+    return event
+
 
 def sheet(name, *, C=None, contact=(-1,1), aperture=2, n_steps=1, dt=-1.0,
           lithoSharpness=1.0, structureSharpness=1.0, **kwargs):

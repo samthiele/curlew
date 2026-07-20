@@ -3,7 +3,17 @@ Import core neural field types from other python files, and define the "base" NF
 """
 
 import curlew
-from curlew.core import CSet, HSet, LearnableBase, Geode, Pebble, _tensor
+from curlew.core import (
+    CSet,
+    HSet,
+    LearnableBase,
+    Geode,
+    Pebble,
+    _tensor,
+    cache_iq_worst_pairs,
+    iq_pair_loss,
+    sample_iq_pairs,
+)
 import numpy as np
 import torch
 import torch.nn as nn
@@ -279,7 +289,7 @@ class BaseSF(LearnableBase):
 
         # inititialize different loss parts
         L = {}
-        for k in ['value_loss', 'grad_loss', 'ori_loss', 'thick_loss', 'mono_loss', 'flat_loss', 'iq_loss', 'eq_loss']:
+        for k in ['value_loss', 'grad_loss', 'ori_loss', 'thick_loss', 'mono_loss', 'flat_loss', 'iq_loss', 'eq_loss', 'kl_loss']:
             L[k] = 0
 
         # LOCAL LOSS FUNCTIONS
@@ -379,60 +389,32 @@ class BaseSF(LearnableBase):
             if eq_terms:
                 L['eq_loss'] = torch.stack(eq_terms).mean()
 
+        # Bayes-by-Backprop complexity cost — summed over any nested FSF potentials
+        # (e.g. this field itself, if it is an FSF; Clebsch beta/alpha if composite).
+        if isinstance(H.kl_loss, str) or (H.kl_loss > 0):
+            from curlew.fields.series import FSF
+            l_kl = FSF.kl_loss_on(self)
+            if l_kl is not None:
+                L['kl_loss'] = l_kl
+
         # inequality losses (single batched forward; start/end interleaved so reshape separates)
         if (C.iq is not None) and (isinstance(H.iq_loss, str) or (H.iq_loss > 0)):
             ns = C.iq[0]
-            pts_list = []  # [s0_block, e0_block, s1_block, e1_block, ...]
-            # compile inequality pairs to compute (half from cached "worst half" and half randomly drawn)
-            six_list, eix_list = [], []
-            for c, (start, end, iq) in enumerate(C.iq[1]):
-                rel = iq if isinstance(iq, str) else str(iq)
-                if rel.strip() == '=' or '=' in rel:
-                    raise ValueError(
-                        "Equality constraints must be stored in CSet.eq, not iq with relation '='."
-                    )
-                if reuse_frac > 0 and self._last_iq_worst_indices is not None and c < len(self._last_iq_worst_indices):
-                    six_keep, eix_keep = self._last_iq_worst_indices[c]
-                    n_keep = six_keep.shape[0]
-                    n_new = ns - n_keep
-                    six_new = torch.randint(0, start.shape[0], (n_new,), dtype=torch.int, device=curlew.device)
-                    eix_new = torch.randint(0, end.shape[0], (n_new,), dtype=torch.int, device=curlew.device)
-                    six = torch.cat([six_keep, six_new])
-                    eix = torch.cat([eix_keep, eix_new])
-                else:
-                    six = torch.randint(0, start.shape[0], (ns,), dtype=torch.int, device=curlew.device)
-                    eix = torch.randint(0, end.shape[0], (ns,), dtype=torch.int, device=curlew.device)
-                six_list.append(six)
-                eix_list.append(eix)
-                pts_list.append(start[six, :])
-                pts_list.append(end[eix, :])
-                
-            # evaluate model and compute differences between sampled pairs
+            six_list, eix_list, pts_list = sample_iq_pairs(
+                C.iq, reuse_frac, self._last_iq_worst_indices
+            )
             all_pts = torch.cat(pts_list, dim=0)
             n_iq = len(pts_list) // 2
             all_vals = self(all_pts, transform=transform).flatten()
             all_vals = all_vals.view(n_iq, 2, ns)
             start_vals = all_vals[:, 0, :].reshape(-1)
             end_vals = all_vals[:, 1, :].reshape(-1)
-
-            # Apply clamp to differences to only keep differences that violate each inequality.
-            # N.B. C._iq_low_clamp / C._iq_high_clamp are pre-allocated in bind()
-            delta_all = torch.clamp(start_vals - end_vals, C._iq_low_clamp, C._iq_high_clamp)**2
-            L['iq_loss'] = torch.mean(delta_all)
-
-            # update cache of inequality pairs with loss above threshold for next epoch (reuse_worst_half)
-            if reuse_frac > 0 and ns > 0:
-                self._last_iq_worst_indices = []
-                for c in range(n_iq):
-                    chunk = delta_all[c * ns : (c + 1) * ns]
-                    threshold = reuse_frac * chunk.mean()
-                    keep_ix = (chunk >= threshold).nonzero(as_tuple=True)[0]
-                    if keep_ix.numel() == 0:
-                        keep_ix = chunk.argmax().unsqueeze(0)
-                    self._last_iq_worst_indices.append((
-                        six_list[c][keep_ix].detach(),
-                        eix_list[c][keep_ix].detach(),
-                    ))
+            delta_all, L["iq_loss"] = iq_pair_loss(
+                start_vals, end_vals, C._iq_low_clamp, C._iq_high_clamp
+            )
+            self._last_iq_worst_indices = cache_iq_worst_pairs(
+                delta_all, ns, n_iq, six_list, eix_list, reuse_frac
+            )
 
         # Dynamically adjust task weights based on the inverse of real-time loss values.
         # (this ignores the magnitude of each loss term, but preserves it's gradient direction,
@@ -459,12 +441,12 @@ class BaseSF(LearnableBase):
 
         return pebble
     
-    def fit(self, epochs, 
-                 C : curlew.core.CSet = None, 
-                 early_stop : tuple = (100,1e-4), 
-                 transform : bool = True, 
-                 best : bool = True, 
-                 vb : bool = True, 
+    def fit(self, epochs,
+                 C : curlew.core.CSet = None,
+                 early_stop : tuple = (100,1e-4),
+                 transform : bool = True,
+                 best : bool = True,
+                 vb : bool = True,
                  prefix : str = 'Training',
                  opt : list = []):
         """
@@ -479,10 +461,10 @@ class BaseSF(LearnableBase):
             bound constraint set will be used.
         early_stop : tuple,
             Tuple containing early stopping criterion. This should be (n,t) such that optimisation
-            stops after n iterations with <= t improvement in the loss. Set to None to disable. Note 
-            that early stopping is only applied if `best = True`. 
+            stops after n iterations with <= t improvement in the loss. Set to None to disable. Note
+            that early stopping is only applied if `best = True`.
         transform : bool, optional
-            True (default) if constraints (C) is in modern coordinates that need to be transformed during fitting. If False, 
+            True (default) if constraints (C) is in modern coordinates that need to be transformed during fitting. If False,
             C is considered to have already been transformed to paleo-coordinates. Note that this can be problematic if rotations
             occur (e.g. of gradient constraints!).
         best : bool, optional
@@ -501,11 +483,30 @@ class BaseSF(LearnableBase):
         loss : float
             The loss of the final (best if best=True) model state.
         pebble : curlew.core.Pebble
-            A detailed breakdown of the final loss. 
+            A detailed breakdown of the final loss.
+
+        Notes
+        -----
+        Every nested :class:`~curlew.fields.series.FSF` (Bayes-by-Backprop
+        weight posterior) gets a fresh held weight sample each epoch, so the
+        forward/loss computation trains through the reparameterised sample
+        rather than the posterior mean. Set ``H.kl_loss`` to weight the
+        complexity cost in :meth:`loss` (0 by default). Once training
+        finishes, every such field reverts to its posterior mean for
+        deterministic downstream use (see :meth:`~curlew.fields.series.FSF.clear_weight_sample`).
         """
         # bind the constraints
         if C is not None:
             self.bind(C)
+
+        from curlew.fields.series import FSF
+
+        fsf_modules = list(FSF.iter_in(self))
+        bbb_gen = (
+            torch.Generator(device=curlew.device).manual_seed(self.seed)
+            if fsf_modules
+            else None
+        )
 
         # Compile loss for faster repeated evaluation (PyTorch 2+)
         #if compile_loss and hasattr(torch, "compile"):
@@ -529,6 +530,8 @@ class BaseSF(LearnableBase):
         if vb:
             bar = tqdm(range(epochs), desc=prefix, bar_format="{desc}: {n_fmt}/{total_fmt}|{postfix}")
         for epoch in bar:
+            if fsf_modules:
+                FSF.resample_weights_on(self, generator=bbb_gen)
             pebble = _loss_fn(transform=transform)
             for o in opt:
                 if o is None:
@@ -574,6 +577,9 @@ class BaseSF(LearnableBase):
 
         if best:
             self.load_state_dict(best_state)
+
+        if fsf_modules:
+            FSF.clear_weight_samples_on(self)
 
         return best_loss, best_pebble # return summed and detailed loss
 
@@ -654,4 +660,23 @@ class BaseNF(BaseSF):
 # import other child classes for easy access
 from curlew.fields.analytical import LinearField, QuadraticField, PeriodicField, ListricField, EllipsoidalField
 from curlew.fields.fourier import NFF
-from curlew.fields.series import FSF
+from curlew.fields.series import FSF, TemporalFSF
+from curlew.fields.clebsch import (
+    ClebschVelocity,
+    clebsch_velocity,
+    temporal_clebsch_velocity,
+)
+from curlew.fields.restoration import RestorationField
+from curlew.fields.restoration_constraints import (
+    LayerThickness,
+    OrthogonalThickness,
+    RestorationCache,
+    RestorationConstraint,
+    layer_thickness_loss,
+    orthogonal_thickness_loss,
+)
+from curlew.utils.gwn import gwn_mesh, gwn_polyline, gwn_ribbon_mesh
+from curlew.fields.lift import (
+    FaultLift,
+    SheetState,
+)

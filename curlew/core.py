@@ -130,6 +130,76 @@ class LearnableBase(nn.Module):
                     raise ValueError(f"Unsupported inequality relation {rel!r}; expected '<' or '>'")
                 offset += ns
 
+
+def sample_iq_pairs(iq, reuse_frac, last_worst_indices=None):
+    """
+    Sample inequality pair indices for each group in ``CSet.iq``.
+
+    Returns ``(six_list, eix_list, pts_list)`` where ``pts_list`` interleaves
+    ``[start_block, end_block, ...]`` for batched evaluation.
+    """
+    ns = iq[0]
+    six_list, eix_list, pts_list = [], [], []
+    for c, (start, end, iq_rel) in enumerate(iq[1]):
+        rel = iq_rel if isinstance(iq_rel, str) else str(iq_rel)
+        if rel.strip() == "=" or "=" in rel:
+            raise ValueError(
+                "Equality constraints must be stored in CSet.eq, not iq with relation '='."
+            )
+        if (
+            reuse_frac > 0
+            and last_worst_indices is not None
+            and c < len(last_worst_indices)
+        ):
+            six_keep, eix_keep = last_worst_indices[c]
+            n_keep = six_keep.shape[0]
+            n_new = ns - n_keep
+            six_new = torch.randint(
+                0, start.shape[0], (n_new,), dtype=torch.int, device=curlew.device
+            )
+            eix_new = torch.randint(
+                0, end.shape[0], (n_new,), dtype=torch.int, device=curlew.device
+            )
+            six = torch.cat([six_keep, six_new])
+            eix = torch.cat([eix_keep, eix_new])
+        else:
+            six = torch.randint(
+                0, start.shape[0], (ns,), dtype=torch.int, device=curlew.device
+            )
+            eix = torch.randint(
+                0, end.shape[0], (ns,), dtype=torch.int, device=curlew.device
+            )
+        six_list.append(six)
+        eix_list.append(eix)
+        pts_list.append(start[six, :])
+        pts_list.append(end[eix, :])
+    return six_list, eix_list, pts_list
+
+
+def iq_pair_loss(start_vals, end_vals, low_clamp, high_clamp):
+    """Squared hinge on ``start_vals - end_vals`` using pre-allocated clamps."""
+    delta_all = torch.clamp(start_vals - end_vals, low_clamp, high_clamp) ** 2
+    return delta_all, delta_all.mean()
+
+
+def cache_iq_worst_pairs(delta_all, ns, n_iq, six_list, eix_list, reuse_frac):
+    """Retain high-loss inequality pairs for the next epoch (``reuse_worst_half``)."""
+    if not (reuse_frac > 0 and ns > 0):
+        return None
+    out = []
+    for c in range(n_iq):
+        chunk = delta_all[c * ns : (c + 1) * ns]
+        threshold = reuse_frac * chunk.mean()
+        keep_ix = (chunk >= threshold).nonzero(as_tuple=True)[0]
+        if keep_ix.numel() == 0:
+            keep_ix = chunk.argmax().unsqueeze(0)
+        out.append((
+            six_list[c][keep_ix].detach(),
+            eix_list[c][keep_ix].detach(),
+        ))
+    return out
+
+
 @dataclass
 class CSet:
     """
@@ -194,7 +264,7 @@ class CSet:
         """
         args = {}
         for k in dir(self):
-            if '_' not in k and not callable(getattr(self, k)):
+            if not k.startswith('_') and not callable(getattr(self, k)):
                 attr = getattr(self, k)
                 if attr is None: continue # easy
                 if isinstance(attr, str): args[k] = attr # also easy - e.g., CRS for attribute
@@ -224,7 +294,7 @@ class CSet:
         """
         args = {}
         for k in dir(self):
-            if '_' not in k and not callable(getattr(self, k)):
+            if not k.startswith('_') and not callable(getattr(self, k)):
                 attr = getattr(self, k)
                 if attr is None: continue # easy
                 if isinstance(attr, str): args[k] = attr # also easy - e.g., CRS for attribute
@@ -474,10 +544,19 @@ class HSet:
             Factor applied to scale the loss resulting from any provided inequality constraints.
         eq_loss : float | str
             Factor applied to scale the loss resulting from equality (trace) constraints in ``CSet.eq``.
+        kl_loss : float | str
+            Factor applied to the Bayes-by-Backprop complexity cost (``curlew.fields.series.FSF.kl_loss``,
+            summed over any nested ``FSF`` potentials). Default is 0 (disabled); enabling this is what
+            actually regularises the learned weight uncertainty toward the prior — without it, the
+            posterior std can drift toward 0 (collapsing to a point estimate) under the data-fit loss alone.
+        energy_loss : float | str
+            Factor applied to the analytic path (kinetic) energy of any nested ``FSF``
+            velocity potentials (``curlew.fields.series.FSF.kinetic_energy``).
+            Default is 0 (disabled).
         use_dynamic_loss_weighting : bool
             Enables dynamic task loss weighting based on real-time loss values. Default is False.
             This approach ensures that each task contributes equally in magnitude (≈1)
-            while still allowing non-zero gradients. It effectively adjusts the relative 
+            while still allowing non-zero gradients. It effectively adjusts the relative
             gradient scale of each task based on its current loss.
         one_hot : bool
             Enables one-hot encoding of the scalar field value according to the event-ID. Only works with property field HSet()s.
@@ -496,6 +575,8 @@ class HSet:
     prop_loss : float = 0 # "1.0"
     iq_loss : float = 0
     eq_loss : float = 0
+    kl_loss : float = 0
+    energy_loss : float = 0
     use_dynamic_loss_weighting : bool = False
     one_hot : bool = False
     reuse_worst_half : float = 0.5
