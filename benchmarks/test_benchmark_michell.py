@@ -13,7 +13,7 @@ from benchmark_memory import record_benchmark_memory, get_peak_memory_mb
 
 import numpy as np
 from curlew.geology.geomodel import GeoModel
-from curlew.geometry import grid
+from curlew.geometry import Grid
 from curlew.fields.fourier import NFF
 import curlew
 from curlew.synthetic import michell
@@ -29,15 +29,16 @@ _michell_C = None
 _michell_M = None
 
 # Shared constraint grid so later benchmarks reuse it (no recalculation)
-G = grid(dims, step=(10, 10), center=(dims[0] / 2, dims[1] / 2), sampleArgs=dict(N=1024))
+G = Grid(dims, step=(10, 10), center=(dims[0] / 2, dims[1] / 2), sampleArgs=dict(N=1024))
 
 
 def test_benchmark_01_forward_michell(benchmark, request):
     """Benchmark: generate synthetic Michell (C) and constraint grid. Result feeds inverse."""
     def forward_michell():
-        C, _ = michell(dims, offset=225)
-        C = C[:-1]  # drop value constraints as they're not needed
-        for _c in C:
+        from curlew.synthetic import extract_constraints
+        Ms = michell(dims, offset=225)
+        C = extract_constraints(Ms, ['s0', 's1'])
+        for _c in C.values():
             _c.grid = G
             _c.delta = 10
         return C
@@ -55,16 +56,18 @@ def test_benchmark_02_inverse_michell(benchmark, request):
 
     def inverse_michell():
         H = HSet(value_loss=1, grad_loss=1, mono_loss='0.1', thick_loss="1.0")
-        s0 = strati('basement', C=C[0], H=H, type=NFF, base=-np.inf,
+        s0 = strati('basement', C=C['s0'], H=H, type=NFF, base=-np.inf,
                     hidden_layers=[16], rff_features=32, length_scales=[2000])
         H = HSet(value_loss=1, grad_loss=1, mono_loss="0.01")
-        s1 = fault('fault', C=C[1], H=H, type=NFF, shortening=(-1, 0),
+        s1 = fault('fault', C=C['s1'], H=H, type=NFF, shortening=(-1, 0),
                    offset=(250, 0, 300), width=0,
                    hidden_layers=[16], rff_features=32, length_scales=[6000])
         M = GeoModel([s0, s1])
         M.prefit(epochs=nepoch, best=True, vb=False, early_stop=None)
         M.freeze(s1, geometry=True, params=False)
-        M.fit(epochs=nepoch, learning_rate=0.1, early_stop=None)
+        s0.field.set_rate(0.1)
+        s1.deformation.set_rate(0.1)
+        M.fit(epochs=nepoch, early_stop=None)
         return M
 
     _michell_M = benchmark(inverse_michell)
@@ -76,7 +79,7 @@ def test_benchmark_03_predict_michell(benchmark, request):
     global _michell_M
     assert _michell_M is not None, "Run test_benchmark_02_inverse_michell first"
     M = _michell_M
-    G2 = grid(dims, step=(2, 2), center=(dims[0] / 2, dims[1] / 2), sampleArgs=dict(N=1024))
+    G2 = Grid(dims, step=(2, 2), center=(dims[0] / 2, dims[1] / 2), sampleArgs=dict(N=1024))
     sxy = G2.coords()
     benchmark(lambda: M.predict(sxy))
     record_benchmark_memory(request.node.name, get_peak_memory_mb())

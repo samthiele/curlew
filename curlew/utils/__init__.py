@@ -1,7 +1,8 @@
-
 """
-A series of utility functions that can come in handy when using `curlew`. This includes some minimalist(ish) classess
-for data handling and visualisation.
+Utility functions for using `curlew`. For plotting and 3D visualisation see
+:mod:`curlew.visualise` and :mod:`curlew.visualise.napari_viewer`. For
+generalized winding numbers and fault proximity helpers see
+:mod:`curlew.geometry.gwn`.
 """
 import numpy as np
 import torch

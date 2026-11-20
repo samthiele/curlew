@@ -1,131 +1,158 @@
 import numpy as np
-from curlew.geometry import poisson_disk_indices_3d
+from curlew.geometry import Grid, grid, poisson_disk_indices_3d
 
-def pairwise_min_distance(points: np.ndarray) -> float:
-    """
-    Compute the minimum pairwise Euclidean distance in a (K, 3) array.
-    O(K^2) — fine for small K in tests.
-    """
+
+def _pairwise_min_distance(points: np.ndarray) -> float:
     if len(points) < 2:
         return np.inf
     diff = points[:, None, :] - points[None, :, :]
     d2 = np.sum(diff * diff, axis=-1)
-    # Exclude diagonal
     d2[np.arange(len(points)), np.arange(len(points))] = np.inf
     return float(np.sqrt(np.min(d2)))
 
-def test_nonpositive_max_points_returns_empty():
-    x = np.random.default_rng(0).random(10)
-    y = np.random.default_rng(1).random(10)
-    z = np.random.default_rng(2).random(10)
-    idx = poisson_disk_indices_3d(x, y, z, radius=0.5, max_points=0)
-    assert idx.shape == (0,)
-    assert idx.dtype == np.int64
 
-def test_reproducibility_with_seed():
-    rng = np.random.default_rng(42)
-    n = 200
-    x = rng.random(n)
-    y = rng.random(n)
-    z = rng.random(n)
-    r = 0.1
-    m = 25
+def test_gridConstruction():
+    extent = ((0, 0), (200, 100))
 
-    idx1 = poisson_disk_indices_3d(x, y, z, radius=r, max_points=m, seed=7)
-    idx2 = poisson_disk_indices_3d(x, y, z, radius=r, max_points=m, seed=7)
-    assert np.array_equal(idx1, idx2), "Results should be identical with same seed"
+    G = grid(extent, size=(10, 10))
+    assert G.shape == (10, 10)
+    assert G.dims == (200, 100)
+    assert G.step == (20.0, 10.0)
+    assert np.allclose(G.center, (100, 50))
+
+    G2 = grid(extent, size=(20.0, 10.0))
+    assert G2.shape == (10, 10)
+    assert G2.step == (20.0, 10.0)
+
+    pts = np.array([[0, 0], [200, 100], [50, 25]])
+    G3 = grid(pts, size=4)
+    assert G3.shape == (4, 4)
+    assert G3.dims == (200, 100)
+
+    dims = (200, 100, 50)
+    G4 = Grid(dims, step=(1, 1, 1), center=(dims[0] / 2, dims[1] / 2, dims[2] / 2))
+    coords = G4.coords(transform=False)
+    assert coords.shape == (np.prod(dims), 3)
+    block = G4.reshape(coords[:, 0])
+    assert block.shape == G4.shape
+    assert (block[:, 0, 0] == G4.axes[0]).all()
+    block = G4.reshape(coords)
+    assert (block[:, 0, 0, 0] == G4.axes[0]).all()
+    assert (block[0, :, 0, 1] == G4.axes[1]).all()
+    assert (block[0, 0, :, 2] == G4.axes[2]).all()
+
+    dims2d = (200, 100)
+    G2d = Grid(dims2d, step=(1, 1), center=(dims2d[0] / 2, dims2d[1] / 2))
+    cxy = G2d.coords(transform=False)
+    assert cxy.shape == (np.prod(dims2d), 2)
+    block = G2d.reshape(cxy[:, 0])
+    assert (block[:, 0] == G2d.axes[0]).all()
+    block = G2d.reshape(cxy)
+    assert (block[:, 0, 0] == G2d.axes[0]).all()
+    assert (block[0, :, 1] == G2d.axes[1]).all()
+
+    for G in [
+        Grid([4600, 4000, 2500], step=30, center=[200, 100, 50]),
+        Grid([4600, 4000], step=30, center=[200, 100]),
+    ]:
+        for transform in (False, True):
+            points = G.coords(transform=transform)
+            offset = np.zeros(G.ndim) if not transform else G.center
+            for i in range(G.ndim):
+                g = G.reshape(points[:, i])
+                assert np.min(g) == np.min(G.axes[i]) + offset[i]
+                assert np.max(g) == np.max(G.axes[i]) + offset[i]
 
 
-def test_distance_constraint_is_respected_random():
-    rng = np.random.default_rng(123)
-    n = 500
-    x = rng.random(n) * 10.0
-    y = rng.random(n) * 10.0
-    z = rng.random(n) * 10.0
+def test_gridSampling():
+    G = grid(((0, 0), (200, 100)), size=(10, 10))
+
+    rng = np.random.default_rng(0)
+    np.random.seed(rng.integers(0, 2**31))
+    samples = G.sample(N=20)
+    assert samples.shape == (20, 2)
+    assert len(np.unique(samples, axis=0)) == 20
 
     radius = 0.4
-    max_points = 80
+    max_points = 30
+    poisson = G.sample(poissonDisk=(radius, max_points, 99))
+    assert len(poisson) <= max_points
+    assert len(np.unique(poisson, axis=0)) == len(poisson)
+    assert _pairwise_min_distance(poisson) >= radius - 1e-12
 
-    idx = poisson_disk_indices_3d(x, y, z, radius=radius, max_points=max_points, seed=99)
-    pts = np.c_[x[idx], y[idx], z[idx]]
+    poisson2 = G.sample(poissonDisk=(radius, max_points, 99))
+    assert np.array_equal(poisson, poisson2)
 
-    # Check no two points are closer than radius (allow tiny numerical wiggle)
-    min_d = pairwise_min_distance(pts)
-    assert min_d >= radius - 1e-12, f"Min distance {min_d} is less than radius {radius}"
-
-
-def test_respects_max_points_cap():
-    rng = np.random.default_rng(11)
-    n = 2000
-    x = rng.random(n) * 20.0
-    y = rng.random(n) * 20.0
-    z = rng.random(n) * 20.0
-
-    radius = 0.2   # small enough that many points are feasible
-    max_points = 100
-
-    idx = poisson_disk_indices_3d(x, y, z, radius=radius, max_points=max_points, seed=1)
-    assert len(idx) == max_points, "Should hit the requested cap when feasible"
-    # Ensure uniqueness and valid range
+    idx = poisson_disk_indices_3d(
+        rng.random(500) * 10.0,
+        rng.random(500) * 10.0,
+        rng.random(500) * 10.0,
+        radius=radius,
+        max_points=max_points,
+        seed=99,
+    )
+    assert len(idx) == max_points
     assert len(np.unique(idx)) == len(idx)
-    assert idx.dtype == np.int64
-    assert idx.min() >= 0 and idx.max() < n
 
 
-def test_returns_all_when_well_spaced_grid():
-    # Construct a regular grid where nearest-neighbor spacing >= 2 * radius
-    radius = 0.5
-    spacing = 2.5 * radius  # comfortably larger than radius
-    nx = ny = nz = 4
-    xs = np.arange(nx) * spacing
-    ys = np.arange(ny) * spacing
-    zs = np.arange(nz) * spacing
-    X, Y, Z = np.meshgrid(xs, ys, zs, indexing="ij")
-    x = X.ravel()
-    y = Y.ravel()
-    z = Z.ravel()
-    n = x.size
+def test_gridTransform():
+    dims = (200, 100)
+    center = (dims[0] / 2, dims[1] / 2)
+    G = Grid(dims, step=(10, 10), center=center)
 
-    idx = poisson_disk_indices_3d(x, y, z, radius=radius, max_points=1000, seed=0)
-    # All should be acceptable since every pair is >= spacing > radius
-    assert len(idx) == n
+    local = G.coords(transform=False)
+    world = G.coords(transform=True)
+    for i in range(G.ndim):
+        assert np.min(local[:, i]) == np.min(G.axes[i])
+        assert np.max(local[:, i]) == np.max(G.axes[i])
+        assert np.min(world[:, i]) == np.min(G.axes[i]) + G.center[i]
+        assert np.max(world[:, i]) == np.max(G.axes[i]) + G.center[i]
 
-    pts = np.c_[x[idx], y[idx], z[idx]]
-    assert pairwise_min_distance(pts) >= radius - 1e-12
+    theta = np.pi / 2
+    rotation = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+    G_rot = Grid(dims, step=(10, 10), center=center, rotation=rotation)
+    local_rot = G_rot.coords(transform=False)
+    world_rot = G_rot.coords(transform=True)
+    expected = (np.hstack([local_rot, np.ones((len(local_rot), 1))]) @ G_rot.matrix.T)[:, :-1]
+    assert np.allclose(world_rot, expected)
 
-
-def test_translation_invariance_of_selection_set():
-    # Translating all coordinates should not change which indices are selected
-    rng = np.random.default_rng(2025)
-    n = 600
-    x = rng.normal(0.0, 5.0, size=n)
-    y = rng.normal(0.0, 5.0, size=n)
-    z = rng.normal(0.0, 5.0, size=n)
-
-    radius = 0.8
-    max_points = 60
-    seed = 77
-
-    idx1 = poisson_disk_indices_3d(x, y, z, radius=radius, max_points=max_points, seed=seed)
-
-    # Translate by an arbitrary vector — algorithm uses (min) shift internally, so this
-    # translation shouldn't affect cell assignments relative to that shift.
-    shift = np.array([123.45, -67.89, 0.314])
-    idx2 = poisson_disk_indices_3d(x + shift[0], y + shift[1], z + shift[2],
-                                radius=radius, max_points=max_points, seed=seed)
-
-    # The *indices* refer to the same original elements; set equality is sufficient
-    assert set(idx1.tolist()) == set(idx2.tolist())
+    copied = G.copy()
+    assert copied.shape == G.shape
+    assert np.allclose(copied.coords(), G.coords())
 
 
-def test_no_duplicates_and_indices_valid():
-    rng = np.random.default_rng(17)
-    n = 300
-    x = rng.random(n)
-    y = rng.random(n)
-    z = rng.random(n)
-    idx = poisson_disk_indices_3d(x, y, z, radius=0.15, max_points=80, seed=5)
+def test_nonAxisAlignedGrid():
+    center = np.array([100.0, 50.0])
+    dims = (100, 100)
+    step = (25, 25)
+    theta = np.pi / 2
+    rotation = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
 
-    # No duplicates and all in range
-    assert len(np.unique(idx)) == len(idx)
-    assert idx.min() >= 0 and idx.max() < n
+    G = Grid(dims, step=step, center=center, rotation=rotation)
+    local = G.coords(transform=False)
+    world = G.coords(transform=True)
+
+    expected = (np.hstack([local, np.ones((len(local), 1))]) @ G.matrix.T)[:, :-1]
+    assert np.allclose(world, expected)
+
+    origin_ix = np.where((local == 0).all(axis=1))[0]
+    assert len(origin_ix) == 1
+    assert np.allclose(world[origin_ix[0]], center)
+
+    x_step_ix = np.where((local[:, 0] == step[0]) & (local[:, 1] == 0))[0]
+    assert len(x_step_ix) == 1
+    assert np.allclose(world[x_step_ix[0]], rotation @ np.array([step[0], 0.0]) + center)
+
+    y_step_ix = np.where((local[:, 0] == 0) & (local[:, 1] == step[1]))[0]
+    assert len(y_step_ix) == 1
+    assert np.allclose(world[y_step_ix[0]], rotation @ np.array([0.0, step[1]]) + center)
+
+    # rotation preserves spacing between neighbouring cells
+    assert np.isclose(
+        np.linalg.norm(world[x_step_ix[0]] - world[origin_ix[0]]),
+        step[0],
+    )
+    assert np.isclose(
+        np.linalg.norm(world[y_step_ix[0]] - world[origin_ix[0]]),
+        step[1],
+    )

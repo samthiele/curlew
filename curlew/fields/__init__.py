@@ -3,7 +3,19 @@ Import core neural field types from other python files, and define the "base" NF
 """
 
 import curlew
-from curlew.core import CSet, HSet, LearnableBase, Geode, _tensor
+from curlew.core import (
+    CSet,
+    HSet,
+    LearnableBase,
+    Geode,
+    Pebble,
+    _tensor,
+    cache_iq_worst_pairs,
+    iq_pair_loss,
+    resolve_string_weights,
+    sample_iq_pairs,
+    take_weights_changed,
+)
 import numpy as np
 import torch
 import torch.nn as nn
@@ -46,15 +58,15 @@ class BaseSF(LearnableBase):
         Parameters
         ----------
         name : str
-            A (ideally unique) name for this neural field. Should typically match the name of the GeoField instance that uses this field. Defaults
+            A (ideally unique) name for this neural field. Should typically match the name of the GeoEvent instance that uses this field. Defaults
             to the name of this class.
         input_dim : int, optional
             The dimensionality of the input space (e.g., 3 for [x, y, z], 2 for [x,y]). If None (default) then `curlew.default_dim` is used.
         output_dim : int, optional
             Dimensionality of the output (usually 1 for a scalar potential).
-        C : CSet
+        C : curlew.core.CSet
             Constraint sent used for learned or interpolated fields. Default is None.
-        H : HSet
+        H : curlew.core.HSet
             Hyperparameters used to tune the loss function for this NF. Default is None.
         drift : int | float | BaseSF
             A constant integer or float (to use a constant value as the drift), or another BaseSF instance (e.g., an AnalyticalField) that
@@ -62,7 +74,7 @@ class BaseSF(LearnableBase):
             field during the forward call, meaning learnable fields (interpolators) learn a residual relative to this drift. Default is 0 (no drift).
         transform : callable
             A function that transforms input coordinates prior to evaulation. Must take exactly one argument as input (a tensor of positions) and return the transformed positions. 
-        local : `curlew.core.Transform`, optional
+        local : `curlew.geometry.Transform`, optional
             A Transform object defining the transform from (possibly undeformed) field coordinates to the local coordinates passed into the neural or analytical field
             representing this scalar field. This will be applied during the forward call, and can be used to e.g., implement global anisotropy, or tweak the 
             represented structures by adding a constant offset or rotation. Defaults to an identity matrix (no transform).
@@ -86,7 +98,6 @@ class BaseSF(LearnableBase):
         self.output_dim = output_dim
         self.transform = transform
         self.seed = seed # seed to use for any random operations
-        self.C = None # will contain constraints if bound
         self.H = None
         if H is not None:
             self.H = H.copy() # will contain hyperparameters if bound
@@ -142,7 +153,7 @@ class BaseSF(LearnableBase):
         transform : bool
             If True (default), any defined transform function is applied before encoding and evaluating the field for `x`.
             `x` should thus be expressed in model coordinates that will first be reconstructed into field coordinates using
-            the defined transform function. Note that this should not be confused with the `curlew.core.Transform` object (`self.T`)
+            the defined transform function. Note that this should not be confused with the `curlew.geometry.Transform` object (`self.T`)
             used to then convert field coordinates to local coordinates.
             
         Returns
@@ -158,10 +169,15 @@ class BaseSF(LearnableBase):
         geode = None
         if isinstance(x, Geode):
             geode = x # store geode
-            x = geode.x # extract coordinates [ these have been transformed during self.transform(x) ]
+            if self.name in geode.x:
+                x = geode.coords(self.name)
+            else:
+                x = geode.coords() # extract coordinates for the active CRS
 
         # apply local transform to achieve e.g., global anisotropy
-        x = self.T(x) 
+        x = self.T(x)
+        if geode is not None and not self.T.isIdentity():
+            geode.set_coords(f"{self.name}_local", x)
 
         # evaluate drift
         out = 0
@@ -185,47 +201,6 @@ class BaseSF(LearnableBase):
         else:
             return out # no need
     
-    def bind( self, C ):
-        """
-        Bind a CSet to this field ready for loss computation (neural fields) or interpolation (interpolators).
-        """
-        self.C = C.torch() # make a copy
-
-        # setup deltas for numerical differentiation if not yet defined
-        C=self.C # shortand for our copy
-        if C.grid is not None:
-            if C.delta is None:
-                # initialise differentiation step if needed
-                C.delta = np.linalg.norm( C.grid.coords()[0,:] - C.grid.coords()[1,:] ) # / 2
-
-            if C._offset is None:
-                C._offset = []
-                for i in range(self.input_dim):
-                    o = [0]*self.input_dim
-                    o[i] = C.delta
-                    C._offset.append( _tensor( o, dev=curlew.device, dt=curlew.dtype) )
-
-        # pre-allocate inequality clamp tensors
-        # (layout matches loss: one block of ns per inequality)
-        if C.iq is not None:
-            ns = C.iq[0]
-            n_iq = len(C.iq[1])
-            total_ns = ns * n_iq
-            C._iq_low_clamp = torch.empty(total_ns, dtype=curlew.dtype, device=curlew.device)
-            C._iq_high_clamp = torch.empty(total_ns, dtype=curlew.dtype, device=curlew.device)
-            offset = 0
-            for _start, _end, iq in C.iq[1]:
-                if '=' in iq:
-                    C._iq_low_clamp[offset : offset + ns] = ninf
-                    C._iq_high_clamp[offset : offset + ns] = inf
-                elif '<' in iq:
-                    C._iq_low_clamp[offset : offset + ns] = 0.0
-                    C._iq_high_clamp[offset : offset + ns] = inf
-                elif '>' in iq:
-                    C._iq_low_clamp[offset : offset + ns] = ninf
-                    C._iq_high_clamp[offset : offset + ns] = 0.0
-                offset += ns
-
     def reset_mnorm(self):
         """Reset accumulation of average gradient magnitude"""
         self.mnorm = 0
@@ -299,103 +274,16 @@ class BaseSF(LearnableBase):
         else:
             return grad_out
 
-    ## FITTING (STUBS)
-    def loss(self, transform=True) -> torch.Tensor:
+    ## FITTING 
+    def loss(self, transform=True):
         """
-        Optionally implemented by child classes to facilitate optimiation and learning. Defaults to 0.
+        Compute the loss associated with this neural field given its current state. Here this implements the
+        default / basic loss terms used by many `curlew` fields, but it can be overridden as needed.
         """
-        return _tensor(0, dt=curlew.dtype, dev=curlew.device).requires_grad_(True), {self.name:(0,{})}
-    
-    def fit(self, *args):
-        """
-        Optionally implemented by learnable child classes. If not, simply returns whatever is returned by "loss".
-
-        Returns
-        -------
-        loss : float
-            The loss of the final result.
-        details : dict
-            A more detailed breakdown of the final loss. 
-        """
-        loss = self.loss()
-        out = { self.name : [loss.item(),{}] }
-        return loss, out
-
-class BaseAF(BaseSF):
-    """
-    Base class for all analytical fields (those implementing specific geometric implicit functions).
-    """
-    pass # this does nothing special! But is included to easily distinguish analytical, neural and interpolated fields
-
-class BaseNF(BaseSF):
-    """
-    A generic base for neural field implementations that learn to translating input coordinates to implicit value (or values). See the other
-    child classes in this module (e.g., fourier, geoinr, etc.) for specific implementations.
-    """
-    def __init__(
-            self,
-            name : str,
-            H: HSet,
-            C : CSet = None,
-            input_dim: int = None,
-            output_dim: int = 1,
-            transform = None,
-            seed = 42,
-            vloss = nn.MSELoss(),
-            scale = 1e2,
-            **kwargs
-        ):
-            """
-            Parameters
-            ----------
-            name : str
-                A (ideally unique) name for this neural field. Should typically match the name of the GeoField instance that uses this field.
-            H : HSet
-                Hyperparameters used to tune the loss function for this NF.
-            C : CSet, optinoal
-                Constraint sent used when learning this implicit field. Default is None (can be set using `field.bind(...)`).
-            input_dim : int, optional
-                The dimensionality of the input space (e.g., 3 for (x, y, z)). If None (default), then `curlew.default_dim` will be used.
-            output_dim : int, optional
-                Dimensionality of the output (usually 1 for a scalar potential).
-            transform : callable
-                A function that transforms input coordinates prior to predictions. Must take exactly one argument as input (a tensor of positions) and return the transformed positions. 
-            seed : callable, optional
-                The random seed to use for any random operations.
-            vloss : callable, optional
-                The loss function to use for value fitting. Default is mean squared error (`nn.MSELoss()`).
-            scale : float, optional
-                A scaling factor to apply to outputs of the neural field, as often these struggle to learn functions with a large (>1) amplitude. Default is 1e2. 
-                
-                This value should be approximately equal to the expected range (max - min) of the scalar field that is being learned. It can be especially important when using a 
-                drift (trend), as it determines the extent to which the model initialisation is determined by the drift. Larger values should allow the model to deviate farther from the trend.
-                Also note that this term also tends to control the magnitude of residuals (to value or (in)equality constraints), so will also interact with the learning rate.
-                
-                N.B. The actual implementation of this scale depends on the neural field method being used.
-
-            Keywords
-            ---------
-            All keywords are passed to the initField(...) function of the child class, to build the relevant
-            neural architecture.
-            """
-            # initialise everything (including calling the initField class of the relevant child class)
-            super().__init__(name=name, input_dim=input_dim, output_dim=output_dim, H=H, C=C, transform=transform, seed=seed, **kwargs)
-
-            # store neural field specific properties
-            self.closs = torch.nn.CosineSimilarity() # needed by some loss functions
-            self.vloss = vloss # loss function to use for value fitting
-            self.scale = scale
-            # optional worst-pair retention for inequality losses across epochs (see reuse_worst_half in HSet)
-            self._last_iq_worst_indices = None
-
-    ## LEARNING
-    def loss(self, transform=True) -> torch.Tensor:
-        """
-        Compute the loss associated with this neural field given its current state. The `transform` argument
-        specifies if constraints need to be transformed from modern to paleo-coordinates before computing loss.
-        """
+        
+        # TODO - remove transform argument as it can be encapusulated by specifying CRS in CSet
         if self.C is None:
-            assert False, "Scalar field has no constraints"
+            return Pebble()
 
         # move these into local scope for clarity
         C = self.C 
@@ -403,7 +291,7 @@ class BaseNF(BaseSF):
 
         # inititialize different loss parts
         L = {}
-        for k in ['value_loss', 'grad_loss', 'ori_loss', 'thick_loss', 'mono_loss', 'flat_loss', 'iq_loss']:
+        for k in ['value_loss', 'grad_loss', 'ori_loss', 'thick_loss', 'mono_loss', 'flat_loss', 'iq_loss', 'eq_loss']:
             L[k] = 0
 
         # LOCAL LOSS FUNCTIONS
@@ -430,14 +318,14 @@ class BaseNF(BaseSF):
         # -------------------------------
         reuse_frac = getattr(H, 'reuse_worst_half', 0) or 0 # set as 0 or None to disable
         if C.grid is not None:
-            if transform:
-                gridL = C.grid.draw(self.transform)  # sample transformed grid points
-            else:
-                gridL = C.grid.draw() # sample non-transformed grid points
-            
             if  isinstance(H.thick_loss, str) or isinstance(H.mono_loss, str) or isinstance(H.flat_loss, str) or \
                 (H.thick_loss > 0) or (H.mono_loss > 0) or (H.flat_loss > 0):
 
+                if transform:
+                    gridL = C.grid.draw(self.transform)  # sample transformed grid points
+                else:
+                    gridL = C.grid.draw() # sample non-transformed grid points
+                    
                 # Numerically compute the Hessian for mono loss
                 # (single batched gradient call over all shifted grids)
                 d = self.input_dim
@@ -491,55 +379,37 @@ class BaseNF(BaseSF):
                     L['flat_loss'] = torch.mean((gv_at_grid_p - C.trend[None,:])**2) # "younging" direction
                     #flat_loss = (1 - self.closs( gv_at_grid_p, C.trend )).mean() # orientation only
 
+        # Equality (trace) loss — mean-normalised variance along each trace (positions in bound CSet coords)
+        if (C.eq is not None) and (isinstance(H.eq_loss, str) or (H.eq_loss > 0)):
+            eq_terms = []
+            for trace in C.eq:
+                if trace.shape[0] < 2:
+                    continue
+                vals = self(trace, transform=transform).flatten()
+                mu = vals.mean()
+                eq_terms.append(torch.var(vals, unbiased=False) / (mu * mu + 1e-8))
+            if eq_terms:
+                L['eq_loss'] = torch.stack(eq_terms).mean()
+
         # inequality losses (single batched forward; start/end interleaved so reshape separates)
         if (C.iq is not None) and (isinstance(H.iq_loss, str) or (H.iq_loss > 0)):
             ns = C.iq[0]
-            pts_list = []  # [s0_block, e0_block, s1_block, e1_block, ...]
-            # compile inequality pairs to compute (half from cached "worst half" and half randomly drawn)
-            six_list, eix_list = [], []
-            for c, (start, end, iq) in enumerate(C.iq[1]):
-                if reuse_frac > 0 and self._last_iq_worst_indices is not None and c < len(self._last_iq_worst_indices):
-                    six_keep, eix_keep = self._last_iq_worst_indices[c]
-                    n_keep = six_keep.shape[0]
-                    n_new = ns - n_keep
-                    six_new = torch.randint(0, start.shape[0], (n_new,), dtype=torch.int, device=curlew.device)
-                    eix_new = torch.randint(0, end.shape[0], (n_new,), dtype=torch.int, device=curlew.device)
-                    six = torch.cat([six_keep, six_new])
-                    eix = torch.cat([eix_keep, eix_new])
-                else:
-                    six = torch.randint(0, start.shape[0], (ns,), dtype=torch.int, device=curlew.device)
-                    eix = torch.randint(0, end.shape[0], (ns,), dtype=torch.int, device=curlew.device)
-                six_list.append(six)
-                eix_list.append(eix)
-                pts_list.append(start[six, :])
-                pts_list.append(end[eix, :])
-                
-            # evaluate model and compute differences between sampled pairs
+            six_list, eix_list, pts_list = sample_iq_pairs(
+                C.iq, reuse_frac, self._last_iq_worst_indices
+            )
             all_pts = torch.cat(pts_list, dim=0)
             n_iq = len(pts_list) // 2
             all_vals = self(all_pts, transform=transform).flatten()
             all_vals = all_vals.view(n_iq, 2, ns)
             start_vals = all_vals[:, 0, :].reshape(-1)
             end_vals = all_vals[:, 1, :].reshape(-1)
-
-            # Apply clamp to differences to only keep differences that violate each inequality.
-            # N.B. C._iq_low_clamp / C._iq_high_clamp are pre-allocated in bind()
-            delta_all = torch.clamp(start_vals - end_vals, C._iq_low_clamp, C._iq_high_clamp)**2
-            L['iq_loss'] = torch.mean(delta_all)
-
-            # update cache of inequality pairs with loss above threshold for next epoch (reuse_worst_half)
-            if reuse_frac > 0 and ns > 0:
-                self._last_iq_worst_indices = []
-                for c in range(n_iq):
-                    chunk = delta_all[c * ns : (c + 1) * ns]
-                    threshold = reuse_frac * chunk.mean()
-                    keep_ix = (chunk >= threshold).nonzero(as_tuple=True)[0]
-                    if keep_ix.numel() == 0:
-                        keep_ix = chunk.argmax().unsqueeze(0)
-                    self._last_iq_worst_indices.append((
-                        six_list[c][keep_ix].detach(),
-                        eix_list[c][keep_ix].detach(),
-                    ))
+            delta_all, L["iq_loss"] = iq_pair_loss(
+                start_vals, end_vals, C._iq_low_clamp, C._iq_high_clamp,
+                getattr(C, "_iq_shift", None),
+            )
+            self._last_iq_worst_indices = cache_iq_worst_pairs(
+                delta_all, ns, n_iq, six_list, eix_list, reuse_frac
+            )
 
         # Dynamically adjust task weights based on the inverse of real-time loss values.
         # (this ignores the magnitude of each loss term, but preserves it's gradient direction,
@@ -549,41 +419,40 @@ class BaseNF(BaseSF):
                 if v > 0:
                     L[k] = 1 / v.item()
         
-        # parse loss hyperparameters and aggregate to get combined loss
-        out = { self.name : [0,{}] }
-        total_loss = 0
-        for k,v in L.items():
+        # parse loss hyperparameters and build pebble
+        resolved = None
+        if getattr(H, "resolve_after", 0):  # deferred string weights (see HSet.resolve_after)
+            resolved = resolve_string_weights(self, H, {
+                k: float(v.detach()) if torch.is_tensor(v) else float(v) for k, v in L.items()
+                if isinstance(H.__getattribute__(k), str) or (H.__getattribute__(k) or 0) > 0
+            })
+        pebble = Pebble()
+        for k, v in L.items():
             h = H.__getattribute__(k) # hyperparmeter weight
-            if isinstance(h, str):
+            if resolved is not None:
+                h = resolved.get(k, h)
+            elif isinstance(h, str):
                 h = float(h) * (1/v).item() if v > 0 else 0.0
                 H.__setattr__(k, h )
             
             if (h is not None) and (h > 0) and (v > 0):
-                s = h*v # scaled loss term
-                # store loss for debugging / reporting
-                out[self.name][1][k] = (s.item(), v.item())
-                
-                # throw away loss magnitude (just use sign). Can be useful for multi-objective optimisation
-                if (H.use_dynamic_loss_weighting):
-                    s = 1 / s.item()
+                if H.use_dynamic_loss_weighting:
+                    s = h * v
+                    pebble.push(self.name, k, _tensor(1 / s.item()), weight=1.0, optim=self.optim)
+                else:
+                    pebble.push(self.name, k, v, weight=h, optim=self.optim)
 
-                total_loss = total_loss + s # aggregate loss!
-            
-        # store total loss too
-        out[self.name][0] = total_loss.item()
-
-        # done! 
-        return total_loss, out
-
-    def fit(self, epochs, 
-                 C : CSet = None, 
-                 learning_rate : float = None, 
-                 early_stop : tuple = (100,1e-4), 
-                 transform : bool = True, 
-                 best : bool = True, 
-                 vb : bool = True, 
+        return pebble
+    
+    def fit(self, epochs,
+                 C : curlew.core.CSet = None,
+                 early_stop : tuple = (100,1e-4),
+                 transform : bool = True,
+                 best : bool = True,
+                 vb : bool = True,
                  prefix : str = 'Training',
-                 opt : list = []):
+                 opt : list = [],
+                 schedule = None):
         """
         Train this neural field to fit the specified constraints.
 
@@ -591,17 +460,15 @@ class BaseNF(BaseSF):
         ----------
         epochs : int
             The number of epochs to train for.
-        C : CSet, optional
+        C : curlew.core.CSet, optional
             The set of constraints to fit this field to. If None, the previously
             bound constraint set will be used.
-        learning_rate : float, optional
-            Reset this NF's optimiser to the specified learning rate before training.
         early_stop : tuple,
             Tuple containing early stopping criterion. This should be (n,t) such that optimisation
-            stops after n iterations with <= t improvement in the loss. Set to None to disable. Note 
-            that early stopping is only applied if `best = True`. 
+            stops after n iterations with <= t improvement in the loss. Set to None to disable. Note
+            that early stopping is only applied if `best = True`.
         transform : bool, optional
-            True (default) if constraints (C) is in modern coordinates that need to be transformed during fitting. If False, 
+            True (default) if constraints (C) is in modern coordinates that need to be transformed during fitting. If False,
             C is considered to have already been transformed to paleo-coordinates. Note that this can be problematic if rotations
             occur (e.g. of gradient constraints!).
         best : bool, optional
@@ -611,23 +478,22 @@ class BaseNF(BaseSF):
         prefix : str, optional
             The prefix used for the tqdm progress bar.
         opt : list, optional
-            An optional list of additional optimisers to include in the training loop (zero() and step() will be called
-            on these at the same time as the optimiser used for this NF's internal learnable parameters). Used to allow
-            e.g., learnable fault offset.
+            Additional :class:`~curlew.core.LearnableBase` instances to optimise jointly (e.g. learnable
+            fault offsets). Their ``loss()`` pebbles are merged with the field loss; any optimisers not
+            already registered are attached so ``Pebble.zero``, ``total().backward``, and ``step`` handle
+            them together.
         Returns
         -------
         loss : float
             The loss of the final (best if best=True) model state.
-        details : dict
-            A more detailed breakdown of the final loss. 
-        """
-        # set learning rate if needed
-        if learning_rate is not None:
-            self.set_rate(learning_rate)
+        pebble : curlew.core.Pebble
+            A detailed breakdown of the final loss.
 
+        """
         # bind the constraints
         if C is not None:
             self.bind(C)
+
 
         # Compile loss for faster repeated evaluation (PyTorch 2+)
         #if compile_loss and hasattr(torch, "compile"):
@@ -637,7 +503,7 @@ class BaseNF(BaseSF):
 
         # store best state
         best_loss = np.inf
-        best_loss_ = None
+        best_pebble = None
         best_state = None
 
         # for early stopping
@@ -651,17 +517,35 @@ class BaseNF(BaseSF):
         if vb:
             bar = tqdm(range(epochs), desc=prefix, bar_format="{desc}: {n_fmt}/{total_fmt}|{postfix}")
         for epoch in bar:
-            loss, details = _loss_fn(transform=transform)
+            if schedule is not None:
+                schedule(epoch, epochs)
+            pebble = _loss_fn(transform=transform)
+            for o in opt:
+                if o is None:
+                    continue
+                o_pebble = o.loss()
+                pebble = pebble + o_pebble
+                if getattr(o, "optim", None) is not None and pebble.optim.get(
+                    getattr(o, "name", type(o).__name__)
+                ) is None:
+                    group = getattr(o, "name", type(o).__name__)
+                    pebble = pebble + Pebble(optim={group: o.optim})
 
-            if (loss.item() < (best_loss + eps)): # update best state
-                best_loss = loss.item()
-                best_loss_ = details
+            # a deferred string weight just switched on: earlier totals are not comparable
+            if take_weights_changed(self, *opt):
+                best_loss, best_count = np.inf, 0
+
+            total = pebble.total()
+
+            if (total.item() < (best_loss + eps)): # update best state
+                best_loss = total.item()
+                best_pebble = pebble.detach()
                 best_state = {k: v.detach().clone() for k, v in self.state_dict().items()}
                 best_count = 0
             else: # not necessarily the best; but keep for return
                 if best_state == None:
-                    best_loss = loss.item()
-                    best_loss_ = details
+                    best_loss = total.item()
+                    best_pebble = pebble.detach()
                 best_count += 1
 
             # early stopping?
@@ -669,23 +553,102 @@ class BaseNF(BaseSF):
                 break
 
             if vb: # update progress bar
-                bar.set_postfix({ k : v[0] for k,v in details[self.name][1].items() })
+                bar.set_description(str(pebble))
 
-            # backward pass and update
-            self.zero()
+            exclude = []
+            if getattr(self, "frozen", False):
+                exclude.append(self.name)
             for o in opt:
-                if o is not None: o.zero() # can often be None; ignore in that case.
-            loss.backward(retain_graph=False)
-            self.step()
-            for o in opt:
-                if o is not None: o.step()
+                if o is not None and getattr(o, "frozen", False):
+                    exclude.append(getattr(o, "name", type(o).__name__))
+
+            pebble.zero()
+            pebble.total().backward()
+            pebble.step(exclude=exclude)
 
         if best:
             self.load_state_dict(best_state)
 
-        return best_loss, best_loss_ # return summed and detailed loss
-    
+        return best_loss, best_pebble # return summed and detailed loss
+
+    def __str__(self):
+        from curlew.text import field_str
+        return field_str(self)
+
+class BaseAF(BaseSF):
+    """
+    Base class for all analytical fields (those implementing specific geometric implicit functions).
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.vloss = nn.MSELoss()
+        self.closs = nn.CosineSimilarity()
+
+class BaseNF(BaseSF):
+    """
+    A generic base for neural field implementations that learn to translating input coordinates to implicit value (or values). See the other
+    child classes in this module (e.g., fourier, geoinr, etc.) for specific implementations.
+    """
+    def __init__(
+            self,
+            name : str,
+            H: HSet,
+            C : curlew.core.CSet = None,
+            input_dim: int = None,
+            output_dim: int = 1,
+            transform = None,
+            seed = 42,
+            vloss = nn.MSELoss(),
+            nf_scale = 1e2,
+            **kwargs
+        ):
+            """
+            Parameters
+            ----------
+            name : str
+                A (ideally unique) name for this neural field. Should typically match the name of the GeoEvent instance that uses this field.
+            H : curlew.core.HSet
+                Hyperparameters used to tune the loss function for this NF.
+            C : curlew.core.CSet, optinoal
+                Constraint sent used when learning this implicit field. Default is None (can be set using `field.bind(...)`).
+            input_dim : int, optional
+                The dimensionality of the input space (e.g., 3 for (x, y, z)). If None (default), then `curlew.default_dim` will be used.
+            output_dim : int, optional
+                Dimensionality of the output (usually 1 for a scalar potential).
+            transform : callable
+                A function that transforms input coordinates prior to predictions. Must take exactly one argument as input (a tensor of positions) and return the transformed positions. 
+            seed : callable, optional
+                The random seed to use for any random operations.
+            vloss : callable, optional
+                The loss function to use for value fitting. Default is mean squared error (`nn.MSELoss()`).
+            nf_scale : float, optional
+                Output scale for MLP-style fields (``NFF``, ``GeoINR``), applied as
+                ``self.scale * mlp(x)``. Default is 1e2.
+
+                Do **not** use this for :class:`~curlew.fields.series.FSF`:
+                pass ``scale=`` in ``**kwargs`` instead (global series factor
+                ``s`` in ``out_scale = s / √F``). ``BaseNF`` no longer captures
+                ``scale`` before ``initField``, so that keyword reaches the
+                Fourier series.
+
+            Keywords
+            ---------
+            All keywords are passed to the initField(...) function of the child class, to build the relevant
+            neural architecture.  For ``FSF``, include ``scale`` here
+            (e.g. ``FSF(..., scale=2.0)``).
+            """
+            # initialise everything (including calling the initField class of the relevant child class)
+            super().__init__(name=name, input_dim=input_dim, output_dim=output_dim, H=H, C=C, transform=transform, seed=seed, **kwargs)
+
+            # store neural field specific properties
+            self.closs = torch.nn.CosineSimilarity() # needed by some loss functions
+            self.vloss = vloss # loss function to use for value fitting
+            # FSF stores series scale in ``out_scale``; ``nf_scale`` is unused there.
+            self.scale = nf_scale if hasattr(self, "out_scale") else kwargs.pop("scale", nf_scale)
+            # optional worst-pair retention for inequality losses across epochs (see reuse_worst_half in HSet)
+            self._last_iq_worst_indices = None
+
 # import other child classes for easy access
-from curlew.fields.analytical import LinearField, QuadraticField, PeriodicField, ListricField
+from curlew.fields.analytical import LinearField, QuadraticField, PeriodicField, ListricField, EllipsoidalField
 from curlew.fields.fourier import NFF
 from curlew.fields.series import FSF

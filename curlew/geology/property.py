@@ -74,14 +74,14 @@ class ConstantProperty(PropertyModelBase):
             for k, v in propDict.items():
                 self.propDict[k] = _tensor(v, dt=curlew.dtype, dev=curlew.device)
     
-    def predict(self, geode: curlew.geology.geofield.Geode) -> torch.Tensor:
+    def predict(self, geode: curlew.core.Geode):
         """
         Using the Geode, predict the property values based on the lithoID. Return an updated
         Geode with property values and names.
         
         Parameters
         ----------
-        geode : curlew.geology.geofield.Geode
+        geode : curlew.core.Geode
             A Geode object containing scalar field values and lithoIDs.
         
         Returns
@@ -160,7 +160,7 @@ class SoftConstantProperty(ConstantProperty):
         )
         self.soft_temp = soft_temp
 
-    def predict(self, geode: "curlew.geology.geofield.Geode"):
+    def predict(self, geode: curlew.core.Geode):
         """
         Predict property values using differentiable sigmoid domain blending.
 
@@ -175,14 +175,14 @@ class SoftConstantProperty(ConstantProperty):
 
         Parameters
         ----------
-        geode : Geode
+        geode : curlew.core.Geode
             Must expose ``.scalar`` (continuous NFF output, shape ``(N,)``),
             ``.lithoID`` (integer domain labels, shape ``(N,)``), and
             ``.lithoLookup`` (``{int: str}``).
 
         Returns
         -------
-        geode : Geode
+        geode : curlew.core.Geode
             Updated in-place with ``.properties`` (``(N, P)``) and
             ``.propertyNames``.
         """
@@ -321,7 +321,7 @@ class MLPProperty(PropertyModelBase, nn.Module):
     # Prediction
     # ──────────────────────────────────────────────────────────────────────
 
-    def predict(self, geode: "curlew.geology.geofield.Geode") -> "curlew.geology.geofield.Geode":
+    def predict(self, geode: curlew.core.Geode):
         """
         Predict property values from the scalar field stored in a Geode.
 
@@ -330,7 +330,7 @@ class MLPProperty(PropertyModelBase, nn.Module):
 
         Parameters
         ----------
-        geode : Geode
+        geode : curlew.core.Geode
             Must carry ``geode.scalar`` of shape (N,).
 
         Returns

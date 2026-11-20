@@ -18,13 +18,22 @@ share/python-wheels/
 *.egg
 MANIFEST
 sandbox
+.pytest_cache/
 
 # benchmarks
 .benchmarks/
 
-# VS Code
+# local editor and agent state
 .vscode/
+.cursor/
+.zed/
+.delta/
+.literature/
+.idea/
 .VSCodeCounter
 
+# local knowledge-graph dump
+graphify-out/
+
 # MACOSX
-.DS_STORE
+.DS_Store

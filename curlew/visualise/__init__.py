@@ -1,10 +1,15 @@
 """
 Functions for performing crude 2D plotting using matplotlib. Useful for demonstrations, but will
-need to be extended at some point to be more usable during model development. 
+need to be extended at some point to be more usable during model development.
+
+For 3D Napari-based visualisation see :mod:`curlew.visualise.napari_viewer`.
 """
 
+# TODO - move these matplotlib related functions to a separate file (matplotlib.py)
+
 import numpy as np
-from curlew.geology.geofield import GeoField
+import curlew
+from curlew.geology.geoevent import GeoEvent
 
 def plot2D( sxy, grid, C=None, ticksize=50, lw=1, cmap='rainbow', levels=None, ax=None, alpha=0.3 ):
     """
@@ -17,8 +22,8 @@ def plot2D( sxy, grid, C=None, ticksize=50, lw=1, cmap='rainbow', levels=None, a
         containing RGB values to plot instead.
     grid : curlew.geometry.Grid
         A grid defining the points at which the values of `sxy` are located.
-    C : np.ndarray, optional
-        A constraint set containing the (2D) points to overlay on the plot.
+    C : curlew.core.CSet, optional
+        Constraint set whose points are overlaid on the plot (converted to NumPy internally).
     ticksize : int, optional
         The size of the orientation ticks to add to the plot.
     lw : float, optional
@@ -41,16 +46,17 @@ def plot2D( sxy, grid, C=None, ticksize=50, lw=1, cmap='rainbow', levels=None, a
     vmn, vmx = None, None
     pxy = grid.coords()
     shape = grid.shape
+    pxy = np.array([pxy[:,i] for i in range(pxy.shape[-1]) if shape[i] > 1]).T # drop dimensions with only one point (treating 3D grids as 2D sections)
     if (pxy is not None) and (sxy is not None):
         xmn,xmx = np.percentile(pxy[:,0], (0,100)) # get bounds
         ymn,ymx = np.percentile(pxy[:,1], (0,100))
 
         if (sxy.shape[-1] == 3) or (sxy.shape[-1] == 4): # RGB or RGBA colours
             # plot colours directly
-            si = sxy.reshape( shape + (sxy.shape[-1],) )
+            si = sxy.reshape( shape + (sxy.shape[-1],) ).squeeze()
             ax.imshow( np.transpose( si, (1,0,2)), alpha=alpha, extent=(xmn,xmx,ymn,ymx), origin='lower', interpolation='nearest' )
         else:
-            si = sxy.reshape(shape) # reshape to image
+            si = sxy.reshape(shape).squeeze() # reshape to image
             vmn,vmx = np.percentile(sxy, (0,100))
             
             # plot scalar field and countours
@@ -62,6 +68,7 @@ def plot2D( sxy, grid, C=None, ticksize=50, lw=1, cmap='rainbow', levels=None, a
 
     # plot data
     if C is not None:
+        C = C.numpy() # no torch
         # plot value constraints
         if (C.vp is not None) and (C.pp is None): # don't plot value constraints if a property constraint is defined
             if vmn is None: vmn,vmx = np.percentile( C.vv.squeeze(), (0,100) )
@@ -255,8 +262,8 @@ def get_positions(M, G, node, first_x=0, first_y=0, step_x=10, step_y=5, pos=Non
         return pos
 
     # If the node is a domain boundary, handle its children differently
-    node_field = next((field for field in M.fields if field.name == node), None)
-    if node_field.parent2 is not None and isinstance(node_field, GeoField):
+    node_field = next((field for field in M.events if field.name == node), None)
+    if node_field.parent2 is not None and isinstance(node_field, GeoEvent):
         # Move to the right
         pos = get_positions(M, G, children[0], first_x + step_x, first_y, step_x, step_y, pos)
         # Move down
@@ -289,7 +296,7 @@ def showModel(M, axs=None, leg_loc=None, title="Model tree", node_size=3000, fon
     kinematic_event_color = "#A6340B"
     fixed_value_color = "#FAE8B6"
 
-    for field in M.fields[::-1]:
+    for field in M.events[::-1]:
         # Determine the color based on the event type
         color = None
         if field.parent2 is not None:
@@ -313,13 +320,13 @@ def showModel(M, axs=None, leg_loc=None, title="Model tree", node_size=3000, fon
         graph.add_node(field.name, label=format_latex_subscript(name), color=color)
 
         # Add edges
-        if isinstance(field.parent, GeoField):
+        if isinstance(field.parent, GeoEvent):
             graph.add_edge(field.name, field.parent.name)
-        if isinstance(field.parent2, GeoField):
+        if isinstance(field.parent2, GeoEvent):
             graph.add_edge(field.name, field.parent2.name)
-        if not isinstance(field.parent, GeoField) and field.parent is not None: # Handle fixed values
+        if not isinstance(field.parent, GeoEvent) and field.parent is not None: # Handle fixed values
             graph.add_edge(field.name, str(field.parent))
-        if not isinstance(field.parent2, GeoField) and field.parent2 is not None:
+        if not isinstance(field.parent2, GeoEvent) and field.parent2 is not None:
             graph.add_edge(field.name, str(field.parent2))
 
     # Plotting
@@ -400,3 +407,95 @@ def colour( sf, cmap='tab20', breaks=19 ):
     c = cm( norm( sf ) )[..., :3]
     c = (c*255).astype(np.uint8)
     return c
+
+def plotAdjacency(
+    geode,
+    grid=None,
+    mode="lithology",
+    ax=None,
+    cmap=curlew.ccramp.reversed(),
+    colorbar=True,
+    title=None,
+    cbar_label="Contact area",
+    **topology_kwargs,
+):
+    """
+    Plot a heatmap of lithology or structure topology adjacency for a gridded Geode.
+
+    Parameters
+    ----------
+    geode : curlew.core.Geode
+        Model result evaluated on a regular grid (``geode.grid`` or ``grid`` argument).
+    grid : curlew.geometry.Grid, optional
+        Grid passed through to :meth:`curlew.core.Geode.topology`.
+    mode : str, optional
+        ``'lithology'`` / ``'litho'`` or ``'structure'``; same as ``Geode.topology``.
+    ax : matplotlib.axes.Axes, optional
+        Axes to draw on; creates a new figure if ``None``.
+    cmap : str, optional
+        Matplotlib colormap name for the heatmap.
+    colorbar : bool, optional
+        If True (default), add a colorbar for contact area.
+    title : str, optional
+        Axes title; a default is built from ``mode`` when ``None``.
+    cbar_label : str, optional
+        Colorbar label text.
+    **topology_kwargs
+        Forwarded to :meth:`curlew.core.Geode.topology` (e.g. ``connection``,
+        ``symmetrize``, ``soft_sharpness``). ``output`` is always ``'matrix'``.
+
+    Returns
+    -------
+    matplotlib.figure.Figure, matplotlib.axes.Axes
+    """
+    import matplotlib.pyplot as plt
+    import torch
+    from curlew.core import Geode
+
+    if not isinstance(geode, Geode):
+        raise TypeError(f"geode must be a curlew.core.Geode, not {type(geode)!r}")
+
+    topology_kwargs.pop("output", None)
+    A = geode.topology(grid=grid, mode=mode, output="matrix", **topology_kwargs)
+    if isinstance(A, torch.Tensor):
+        A = A.detach().cpu().numpy()
+
+    mode_l = mode.lower()
+    if mode_l in ("lithology", "litho"):
+        lookup = geode.lithoLookup
+        ids = geode.lithoID
+    elif mode == "structure":
+        lookup = geode.structureLookup
+        ids = geode.structureID
+    else:
+        raise ValueError(f"mode must be 'lithology' or 'structure', not {mode!r}")
+
+    if lookup:
+        class_ids = sorted(lookup.keys())
+        labels = [str(lookup[cid]) for cid in class_ids]
+    elif isinstance(ids, torch.Tensor):
+        labels = [str(i) for i in sorted(torch.unique(ids).detach().cpu().tolist())]
+    else:
+        labels = [str(i) for i in sorted(np.unique(ids))]
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(max(4, len(labels)), max(4, len(labels))))
+    else:
+        fig = ax.figure
+
+    im = ax.imshow(A, cmap=cmap, aspect="equal")
+    n = len(labels)
+    ax.set_xticks(np.arange(n))
+    ax.set_yticks(np.arange(n))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_yticklabels(labels)
+    ax.set_xlabel("Class")
+    ax.set_ylabel("Class")
+    if title is None:
+        kind = "Lithology" if mode_l in ("lithology", "litho") else "Structure"
+        title = f"{kind} topology adjacency"
+    ax.set_title(title)
+    if colorbar:
+        fig.colorbar(im, ax=ax, label=cbar_label)
+    fig.tight_layout()
+    return fig, ax

@@ -30,7 +30,10 @@ Quickly get up to speed with `curlew` using these [CoLab tutorials](https://driv
 
 ### Documentation
 
-Documentation is automatically built and served through [GitHub pages](https://samthiele.github.io/curlew/). 
+Documentation is built and served through [GitHub Pages](https://samthiele.github.io/curlew/):
+- [Stable (`main`)](https://samthiele.github.io/curlew/) — more stable API version
+- [Development (`dev`)](https://samthiele.github.io/curlew/dev/) — latest changes on the dev branch
+
 
 ## Support and feedback
 
@@ -55,6 +58,27 @@ Kamath, A. V., Thiele, S. T., Moulard, M., Grose, L., Tolosana-Delgado, R., Hill
 2) Star this repository so that we get a rough idea of our user base :star:
 
 ## Versions and change log
+
+### v1.2 - another significant refactoring (sorry)
+
+- Renamed `GeoField` to `GeoEvent` to avoid confusion with scalar fields themselves (inheriting from `BaseSF`). Updated `GeoEvent` so that they can contain multiple 
+separate underlying fields and (using these) define `volumes` within the model. These
+volumes can be used to e.g., define finite faults. 
+
+- Updated the `Overprint` class to allow onlap relationships in which the
+unconformity geometry is determined by the older (rather than the younger)
+implicit field.
+
+- Simplified synthetic model creation so that extracted constraints are 
+added directly to the created `BaseSF` instances, and added 2D and 3D options
+so that 3D test data can be more easily generated.
+
+- Added the `Pebble` class (inspired by `Geode`) to help more easily create, track
+  and combine losses and their associated optimsers.
+
+- Added option for custom losses to be defined at the `GeoModel` level, to enable 
+  workflows that optimise all fields as a stack (e.g., fitting to large datasets that
+  cannot easily be broken down to the per-field level [ e.g., gravity inversion ]). 
 
 ### v1.1 - major restructure, introduced napari-based 3D viewer
 
