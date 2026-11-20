@@ -59,7 +59,7 @@ Kamath, A. V., Thiele, S. T., Moulard, M., Grose, L., Tolosana-Delgado, R., Hill
 
 ## Versions and change log
 
-### v1.2 - another significant refactoring (sorry)
+### v1.20 - another significant refactoring (sorry)
 
 - Renamed `GeoField` to `GeoEvent` to avoid confusion with scalar fields themselves (inheriting from `BaseSF`). Updated `GeoEvent` so that they can contain multiple 
 separate underlying fields and (using these) define `volumes` within the model. These
@@ -78,7 +78,15 @@ so that 3D test data can be more easily generated.
 
 - Added option for custom losses to be defined at the `GeoModel` level, to enable 
   workflows that optimise all fields as a stack (e.g., fitting to large datasets that
-  cannot easily be broken down to the per-field level [ e.g., gravity inversion ]). 
+  cannot easily be broken down to the per-field level [ e.g., gravity inversion ]).
+
+- Added Learnable Diffeomorphic Interpolation (`restore`). Folded stratigraphy is a reference layer-cake carried by a learned diffeomorphism, so its topology is preserved by construction rather than by a penalty. The velocity is an Euler field and so divergence-free. It can be stepped with RK4, or built by composing exact shears, which stays volume-preserving at any amplitude. Contacts, bedding normals, and finite-strain markers all constrain that one map. The Fourier wavelength band is read from the data (`spectral_band`): hinge spacing and limb spacing, widened to at least two octaves and the diameter of the observations.
+
+- Faulted folds can be restored with a sheet lift (`FaultLift`); a true discontinuity still needs its own event. A pin fixes the restored frame after fitting. Optional priors cover orthogonal thickness, layer-parallel stretch, and Hencky strain.
+
+- Moved geometry helpers out of `curlew/geometry.py` into `curlew/geometry/`. Documentation is published for both `main` and `dev`.
+
+- Added a `quadratic` decay to `EllipsoidalField` (`r²`: 0 at the centre, 1 on the unit ellipse). 
 
 ### v1.1 - major restructure, introduced napari-based 3D viewer
 
