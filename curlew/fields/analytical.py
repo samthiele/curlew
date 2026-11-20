@@ -298,6 +298,8 @@ class EllipsoidalField(BaseAF):
         Logistic taper ``σ(s(1 - r)) / σ(s)``; ``s`` is ``sigmoid_scale`` (default 10).
     ``'inverse_quadratic'``:
         ``1 / (1 + r²)``: 1 at the center, heavy-tailed falloff (0.5 at ``r=1``).
+    ``'quadratic'``:
+        ``r²``: 0 at the center, increases outwards as r².
     Callable:
         Custom decay ``f(u, r)`` where ``u`` is ``(N, dim)`` position in the ellipse-aligned
         frame (principal axes, not scaled by semi-axis lengths; world units) and ``r`` is
@@ -307,7 +309,7 @@ class EllipsoidalField(BaseAF):
         Steepness ``s`` for ``decay='sigmoid'``. Larger values sharpen the transition near ``r=1``.
     """
     _DECAY_MODES = frozenset({
-        False, "ellipse", "normal", "cosine", "wendland", "sigmoid", "inverse_quadratic",
+        False, "ellipse", "normal", "cosine", "wendland", "sigmoid", "inverse_quadratic", "quadratic"
     })
 
     def initField(self,
@@ -426,6 +428,8 @@ class EllipsoidalField(BaseAF):
         r = torch.linalg.norm(x, dim=-1)
         if self.decay is False:
             return r
+        if self.decay == "quadratic":
+            return r**2
         return self._decay(r)
 
 class RectangularPrismField(BaseAF):

@@ -55,6 +55,12 @@ def test_EllipsoidalField():
         far_val_n = normal_field.forward(torch.tensor(far, dtype=torch.float32)).squeeze().item()
         assert far_val_n < 1e-10
 
+        # r²: 0 at the centre, 1 on the unit ellipse, grows outside
+        quad = EllipsoidalField(name="ell_quad", input_dim=dim, decay="quadratic")
+        assert abs(quad.forward(torch.tensor(center_pt, dtype=torch.float32)).squeeze().item()) < 1e-5
+        assert abs(quad.forward(torch.tensor(boundary, dtype=torch.float32)).squeeze().item() - 1.0) < 1e-5
+        assert quad.forward(torch.tensor(far, dtype=torch.float32)).squeeze().item() > 1.0
+
         for decay_name, boundary_expected, far_max in [
             ("cosine", 0.0, 0.0),
             ("wendland", 0.0, 0.0),
