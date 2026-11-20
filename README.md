@@ -80,11 +80,9 @@ so that 3D test data can be more easily generated.
   workflows that optimise all fields as a stack (e.g., fitting to large datasets that
   cannot easily be broken down to the per-field level [ e.g., gravity inversion ]).
 
-- Added Learnable Diffeomorphic Interpolation (`restore`). Folded stratigraphy is a reference layer-cake carried by a learned diffeomorphism, so its topology is preserved by construction rather than by a penalty. The velocity is an Euler field and so divergence-free. It can be stepped with RK4, or built by composing exact shears, which stays volume-preserving at any amplitude. Contacts, bedding normals, and finite-strain markers all constrain that one map. The Fourier wavelength band is read from the data (`spectral_band`): hinge spacing and limb spacing, widened to at least two octaves and the diameter of the observations.
+- Added Learnable Diffeomorphic Interpolation (`restore`). Folded stratigraphy is a reference layer-cake carried by a learned diffeomorphism, so its topology is preserved by construction rather than by a penalty. Optional priors cover orthogonal thickness, layer-parallel stretch, and Hencky strain.
 
-- Faulted folds can be restored with a sheet lift (`FaultLift`); a true discontinuity still needs its own event. A pin fixes the restored frame after fitting. Optional priors cover orthogonal thickness, layer-parallel stretch, and Hencky strain.
-
-- Moved geometry helpers out of `curlew/geometry.py` into `curlew/geometry/`. Documentation is published for both `main` and `dev`.
+- Moved geometry helpers out of `curlew/geometry.py` into `curlew/geometry/`.
 
 - Added a `quadratic` decay to `EllipsoidalField` (`r²`: 0 at the centre, 1 on the unit ellipse). 
 
