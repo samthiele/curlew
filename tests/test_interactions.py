@@ -1,22 +1,25 @@
 """
 Tests for kinematic interaction classes in ``curlew.geology.interactions``:
 RK2 flow integration (``FlowOffset``), sheet intrusions (``SheetOffset``),
-and faults (``FaultOffset``) — ``SheetOffset``/``FaultOffset`` are ``FlowOffset``
-subclasses that derive velocity from the owning ``GeoEvent`` on each sub-step.
+and faults (``FaultOffset``) — ``SheetOffset``/``FaultOffset`` inherit
+``RK2Offset`` and derive velocity from the owning ``GeoEvent`` on each sub-step.
 """
 import numpy as np
+import pytest
 import torch
 from torch import nn
 
 import curlew
 from curlew import GeoEvent, _tensor
 from curlew.fields.analytical import LinearField
-from curlew.geology.interactions import FaultOffset, FlowOffset, SheetOffset
+from curlew.geology.interactions import FaultOffset, FlowOffset, RK2Offset, SheetOffset
 
-# run these tests on CPU with stable float64 arithmetic
-curlew.device = "cpu"
-curlew.dtype = torch.float64
-curlew.default_dim = 2
+
+@pytest.fixture(autouse=True)
+def _interaction_defaults():
+    curlew.device = "cpu"
+    curlew.dtype = torch.float64
+    curlew.default_dim = 2
 
 def _LinearField(name, origin, gradient, *, normalise=False, input_dim=None):
     """Build a minimal GeoEvent with an attached linear scalar field."""
@@ -172,8 +175,12 @@ def test_flow_offset_duration_scales_constant_velocity():
 
 def test_flow_offset_position_dependent_velocity_needs_substeps():
     """
-    When velocity varies with position, multi-step RK2 integration should differ
-    from a single (coarse) step, since the path shape now matters.
+    When velocity varies with position, a single coarse step should differ from a
+    resolved path, since the path shape now matters.
+
+    The tolerance is small because the default integrator is RK4: one step is
+    already accurate to ~2e-7 here, where RK2 was off by ~1e-3. The point of the
+    test is that the difference is non-zero, not that it is large.
     """
     vel = _QuadVelocity(scale=0.25)
     X = torch.tensor([[1.0, 0.8], [1.2, -1.0]], dtype=curlew.dtype)
@@ -181,44 +188,37 @@ def test_flow_offset_position_dependent_velocity_needs_substeps():
     d_one = FlowOffset(vel, n_steps=1, direction=-0.3).disp(X, None)
     d_path = FlowOffset(vel, n_steps=50, direction=-0.3).disp(X, None)
 
-    assert (d_one - d_path).abs().max().item() > 1e-5
+    assert (d_one - d_path).abs().max().item() > 1e-9
     assert d_path.shape == X.shape
 
 
-def test_sheet_and_fault_offset_are_flow_offsets():
-    """SheetOffset/FaultOffset are FlowOffset subclasses; VFieldOffset has been removed."""
-    assert issubclass(SheetOffset, FlowOffset)
-    assert issubclass(FaultOffset, FlowOffset)
+def test_sheet_and_fault_offset_are_rk2_offsets():
+    """SheetOffset/FaultOffset share RK2Offset, not the Euler FlowOffset."""
+    assert issubclass(SheetOffset, RK2Offset)
+    assert issubclass(FaultOffset, RK2Offset)
+    assert not issubclass(SheetOffset, FlowOffset)
+    assert not issubclass(FaultOffset, FlowOffset)
     import curlew.geology.interactions as interactions
     assert not hasattr(interactions, "VFieldOffset")
 
 
-def test_flow_offset_compile_only_for_spatial_velocity():
-    """
-    ``curlew.compile`` wraps ``FlowOffset._integrate`` with ``torch.compile`` only
-    for the spatial-velocity-module path (used by restoration): its ``_velocity_at``
-    is closed-form tensor math with no ``G``-dependence, so it's safe to compile.
-    ``SheetOffset``/``FaultOffset`` (``velocity=None``) derive velocity from ``G``
-    via a nested ``autograd.grad`` call on every sub-step, so they must stay eager
-    regardless of the flag.
-    """
-    prev = curlew.compile
-    try:
-        vel = _ConstVelocity([0.3, -0.1])
-        X = torch.tensor([[0.0, 0.0], [1.5, -2.0]], dtype=curlew.dtype)
+def test_analytic_gradient_includes_younger_deformation():
+    """GeoEvent.gradient must pull analytic field gradients back through child undeform."""
+    from curlew.core import HSet
+    from curlew.fields.series import FSF
+    from curlew.geology import fault, strati
+    from curlew.geology.geomodel import GeoModel
 
-        curlew.compile = True
-        off_compiled = FlowOffset(vel, n_steps=3, direction=-1.0)
-        assert "_integrate" in vars(off_compiled)  # instance-level compiled override
+    torch.manual_seed(0)
+    s = strati("s", type=FSF, H=HSet(), input_dim=2, rff_features=32,
+               length_scale_range=(1.0, 3.0))
+    f = fault("f", type=FSF, H=HSet(), input_dim=2, rff_features=8,
+              length_scale_range=(3.0, 6.0), offset=0.8, width=0.5)
+    GeoModel([s, f])
+    x = torch.rand(16, 2, dtype=curlew.dtype) * 4 - 2
 
-        curlew.compile = False
-        off_eager = FlowOffset(vel, n_steps=3, direction=-1.0)
-        assert "_integrate" not in vars(off_eager)  # plain class method, uncompiled
-
-        assert torch.allclose(off_compiled.disp(X, None), off_eager.disp(X, None), atol=1e-8)
-
-        curlew.compile = True
-        sheet = SheetOffset(contact=(-1.0, 1.0), aperture=1.0, n_steps=1)
-        assert "_integrate" not in vars(sheet)  # G-dependent path stays eager
-    finally:
-        curlew.compile = prev
+    g = torch.as_tensor(s.gradient(x, normalize=False))
+    xr = x.clone().requires_grad_(True)
+    v = s.forward(xr, undef=True).squeeze()
+    g_auto = torch.autograd.grad(v.sum(), xr)[0]
+    assert torch.allclose(g, g_auto, atol=1e-10)

@@ -22,14 +22,19 @@ sandbox
 # benchmarks
 .benchmarks/
 
-# VS Code
-.vscode/
+# VS Code / Cursor (keep shared workspace settings)
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
 .VSCodeCounter
 
 # cursor
 .cursor/
 .literature/
 .agents/
+
+# local knowledge-graph dump
+graphify-out/
 
 # MACOSX
 .DS_STORE

@@ -2,7 +2,7 @@
 Utility functions for using `curlew`. For plotting and 3D visualisation see
 :mod:`curlew.visualise` and :mod:`curlew.visualise.napari_viewer`. For
 generalized winding numbers and fault proximity helpers see
-:mod:`curlew.utils.gwn`.
+:mod:`curlew.geometry.gwn`.
 """
 import numpy as np
 import torch

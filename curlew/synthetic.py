@@ -1,7 +1,13 @@
 """
 Generate synthetic datasets and models for testing purposes.
 """
+import itertools
+from types import SimpleNamespace
+
 import numpy as np
+import torch
+from torch import nn
+
 import curlew
 from curlew.core import CSet
 from curlew.geology.geomodel import GeoModel
@@ -942,3 +948,409 @@ def goguel(shape=None, zstep=300, dip=60.0, offset=0.2, n_faults=3, **kwargs):
         M.bind(prop)
 
     return M
+
+
+# ── Periclinal recumbent fold (GemPy-bubble bait) ─────────────────────────────
+
+
+class _PericlinalVortex(nn.Module):
+    """
+    Divergence-free vortex in the (x, z) plane, amplitude dying along y.
+
+    ``v = A(y) B exp(-r²) (-p_z/s_z², 0, p_x/s_x²)`` with
+    ``A = exp(-(y-y_c)²/s_y²)``. Each (x, z) slice is a Gaussian vortex;
+    ``A(y)`` makes the recumbent core periclinal. ``div v = 0`` identically.
+    """
+
+    def __init__(self, centre, sigma, B):
+        super().__init__()
+        self.dim = 3
+        c = torch.as_tensor(centre, dtype=curlew.dtype, device=curlew.device)
+        s = torch.as_tensor(sigma, dtype=curlew.dtype, device=curlew.device)
+        self.register_buffer("centre", c.reshape(3))
+        self.register_buffer("sigma", s.reshape(3))
+        self.B = float(B)
+
+    def _envelopes(self, x):
+        p = x - self.centre
+        sx, sy, sz = self.sigma
+        A = torch.exp(-(p[:, 1] / sy).square())
+        E = torch.exp(-(p[:, 0] / sx).square() - (p[:, 2] / sz).square())
+        return p, A, E
+
+    def forward(self, x, w=None, t=None):
+        del w, t
+        p, A, E = self._envelopes(x)
+        sx, _, sz = self.sigma
+        amp = self.B * A * E
+        v = torch.zeros_like(x)
+        v[:, 0] = -amp * p[:, 2] / sz.square()
+        v[:, 2] = amp * p[:, 0] / sx.square()
+        return v
+
+    def forward_and_jacobian(self, x, w=None, t=None):
+        v = self.forward(x, w, t)
+        p, A, E = self._envelopes(x)
+        sx, sy, sz = self.sigma
+        px, py, pz = p[:, 0], p[:, 1], p[:, 2]
+        sx2, sy2, sz2 = sx.square(), sy.square(), sz.square()
+        Ex = -2.0 * px / sx2
+        Ez = -2.0 * pz / sz2
+        Ay = A * (-2.0 * py / sy2)
+        n = x.shape[0]
+        J = v.new_zeros(n, 3, 3)
+        # vx = -B A E pz / sz²
+        J[:, 0, 0] = -self.B * A * E * Ex * pz / sz2
+        J[:, 0, 1] = -self.B * Ay * E * pz / sz2
+        J[:, 0, 2] = -self.B * A * ((E * Ez) * pz + E) / sz2
+        # vz =  B A E px / sx²
+        J[:, 2, 0] = self.B * A * ((E * Ex) * px + E) / sx2
+        J[:, 2, 1] = self.B * Ay * E * px / sx2
+        J[:, 2, 2] = self.B * A * E * Ez * px / sx2
+        return v, J
+
+
+class _VortexSum(nn.Module):
+    """Sum of :class:`_PericlinalVortex` velocities (still divergence-free)."""
+
+    def __init__(self, vortices):
+        super().__init__()
+        self.dim = 3
+        self.vortices = nn.ModuleList(vortices)
+
+    def forward(self, x, w=None, t=None):
+        return sum(v(x, w, t) for v in self.vortices)
+
+    def forward_and_jacobian(self, x, w=None, t=None):
+        vs, Js = zip(*(v.forward_and_jacobian(x, w, t) for v in self.vortices))
+        return sum(vs), sum(Js)
+
+
+def _z_crossings(z, s, h):
+    """Linear interpolated z where column ``s(z)`` crosses ``h``."""
+    out = []
+    ds = s[1:] - s[:-1]
+    hit = (s[:-1] - h) * (s[1:] - h) <= 0.0
+    hit &= ds != 0.0
+    for k in np.nonzero(hit)[0]:
+        t = (h - s[k]) / ds[k]
+        if 0.0 <= t <= 1.0:
+            out.append(float(z[k] + t * (z[k + 1] - z[k])))
+    return out
+
+
+def _batch_inverse_map(flow, pts, *, jac=False, batch=8192):
+    chunks_x, chunks_j = [], []
+    x = _tensor(pts, dev=curlew.device, dt=curlew.dtype)
+    for i in range(0, len(x), batch):
+        sl = x[i : i + batch]
+        if jac:
+            xi, ji = flow.inverse_map_with_jacobian(sl)
+            chunks_x.append(xi)
+            chunks_j.append(ji)
+        else:
+            chunks_x.append(flow.inverse_map(sl))
+    x0 = torch.cat(chunks_x, dim=0)
+    if not jac:
+        return x0
+    return x0, torch.cat(chunks_j, dim=0)
+
+
+def recumbent_mushroom(
+    shape=None,
+    *,
+    n_steps=24,
+    overturn=1.15 * np.pi,
+    sigma=None,
+    centre=None,
+    n_horizons=4,
+    n_sections=5,
+    x_stride=8,
+    core_stride=1,
+    younging_cut=0.3,
+    seed=0,
+):
+    """
+    Sparse 3-D periclinal recumbent fold.
+
+    A volume-preserving vortex in ``(x, z)``, dying along strike. Every
+    contact is the image of a plane. The central section is overturned; along
+    strike the same horizon is an open fold. Sampling keeps the limbs and
+    drops the hinge (``younging_cut``), which is where a scalar interpolator
+    closes an isosurface.
+
+    Parameters
+    ----------
+    shape : tuple, optional
+        Voxel counts ``(nx, ny, nz)``. Physical extent is :data:`EXTENT_3D`.
+    overturn : float or sequence of float
+        Rotation (radians) of the vortex at the strike centre. Default is a
+        little over π, enough to invert the lower limb.
+    centre, sigma : array-like, optional
+        Centre and widths (x, y, z) of the vortex. Pass ``(n, 3)`` arrays (and
+        ``n`` overturns, or one for all) for ``n`` vortices: their velocities
+        add, so the flow stays volume-preserving and every contact is still
+        the image of a plane. Each vortex makes its own recumbent fold.
+    younging_cut : float
+        Keep only samples with ``|n · e_z| >= younging_cut`` (drop the hinge).
+    n_sections : int
+        Strike sections to sample, including the recumbent core and lower-
+        amplitude flanks.
+    x_stride, core_stride : int
+        Sample every ``x_stride``-th column in the far field and every
+        ``core_stride``-th column inside ``2 σ_x`` of the vortex, so the
+        overturned limb is not starved relative to the upright far field.
+
+    Returns
+    -------
+    types.SimpleNamespace
+        ``grid``, ``flow``, ``phi`` (restored depth on the grid), ``C``
+        (:class:`~curlew.core.CSet` for :func:`~curlew.geology.restore`),
+        ``interfaces`` / ``orientations`` (GemPy-style records), ``horizons``
+        (restored-depth isovalues, shallow → deep), ``centre``.
+    """
+    from curlew.kinematics.flow import FlowOffset
+
+    if curlew.default_dim != 3:
+        raise ValueError(
+            "recumbent_mushroom is 3-D; set curlew.default_dim = 3 first"
+        )
+    if shape is None:
+        shape = (64, 48, 40)
+    G = _make_grid(shape)
+    extent = np.asarray(_physical_extent(shape), dtype=float)
+    c = np.asarray(centre if centre is not None else extent * 0.5, dtype=float)
+    # slightly below mid-depth so the mushroom sits in the section
+    if centre is None:
+        c[2] = extent[2] * 0.45
+    if sigma is None:
+        sigma = np.array(
+            [0.18 * extent[0], 0.22 * extent[1], 0.22 * extent[2]], dtype=float
+        )
+    sigma = np.asarray(sigma, dtype=float)
+    centres = np.atleast_2d(c)
+    n_vortices = len(centres)
+    sigmas = np.broadcast_to(np.atleast_2d(sigma), (n_vortices, 3)).astype(float)
+    overturns = np.broadcast_to(np.atleast_1d(np.asarray(overturn, dtype=float)), (n_vortices,))
+    # peak angular rate B / (sx sz) ; for sx = sz this is B / σ²
+    vortices = [
+        _PericlinalVortex(ci, si, float(oi) * float(si[0] * si[2]))
+        for ci, si, oi in zip(centres, sigmas, overturns)
+    ]
+    vel = vortices[0] if n_vortices == 1 else _VortexSum(vortices)
+    flow = FlowOffset(vel, n_steps=n_steps, integrator="rk4")
+
+    pts = G.coords()
+    x0 = _batch_inverse_map(flow, pts, jac=False)
+    phi = G.reshape(curlew._numpy(x0[:, 2]))
+    xyz = G.reshape(pts)
+    z_axis = xyz[0, 0, :, 2]
+
+    # pick restored-depth isovalues that actually overturn on the core sections
+    j_cores = sorted({int(np.argmin(np.abs(xyz[0, :, 0, 1] - ci[1]))) for ci in centres})
+    lo, hi = float(np.nanmin(phi)), float(np.nanmax(phi))
+    probe = np.linspace(lo + 0.15 * (hi - lo), hi - 0.15 * (hi - lo), 24)
+    multi = []
+    for h in probe:
+        n_multi = 0
+        for j_c in j_cores:
+            for i in range(phi.shape[0]):
+                if len(_z_crossings(z_axis, phi[i, j_c, :], h)) >= 2:
+                    n_multi += 1
+        multi.append(n_multi)
+    h_core = float(probe[int(np.argmax(multi))])
+    offsets = np.linspace(-0.12 * (hi - lo), 0.12 * (hi - lo), n_horizons)
+    horizons = np.clip(h_core + offsets, lo + 1e-3, hi - 1e-3)
+    horizons = np.unique(np.round(horizons, 5))[::-1]  # shallow (high φ) first
+
+    y_targets = np.linspace(
+        float(np.min(centres[:, 1] - 1.15 * sigmas[:, 1])),
+        float(np.max(centres[:, 1] + 1.15 * sigmas[:, 1])),
+        n_sections,
+    )
+    y_idx = [
+        int(np.argmin(np.abs(xyz[0, :, 0, 1] - y))) for y in y_targets
+    ]
+
+    names = [f"H{k + 1}" for k in range(len(horizons))]
+    contacts = {n: [] for n in names}
+    x_axis = xyz[:, 0, 0, 0]
+    in_core = np.any(
+        np.abs(x_axis[:, None] - centres[:, 0]) <= 2.0 * sigmas[:, 0], axis=1
+    )
+    i_far = np.arange(0, phi.shape[0], max(1, int(x_stride)))
+    i_core = np.where(in_core)[0][:: max(1, int(core_stride))]
+    i_samples = np.unique(np.concatenate([i_far, i_core]))
+    for name, h in zip(names, horizons):
+        for j in y_idx:
+            for i in i_samples:
+                for zc in _z_crossings(z_axis, phi[i, j, :], h):
+                    # bilinear-ish: nearest x,y, interpolated z
+                    x_pt = float(xyz[i, j, 0, 0])
+                    y_pt = float(xyz[i, j, 0, 1])
+                    contacts[name].append((x_pt, y_pt, zc))
+
+    all_pts = []
+    all_form = []
+    for name, rows in contacts.items():
+        if not rows:
+            continue
+        p = np.asarray(rows, dtype=float)
+        all_pts.append(p)
+        all_form.extend([name] * len(p))
+    if not all_pts:
+        raise RuntimeError(
+            "recumbent_mushroom found no horizon crossings; increase overturn "
+            "or refine `shape`"
+        )
+    contact_xyz = np.vstack(all_pts)
+    _, J = _batch_inverse_map(flow, contact_xyz, jac=True)
+    g = torch.bmm(
+        J.transpose(-1, -2),
+        torch.tensor(
+            [0.0, 0.0, 1.0], dtype=J.dtype, device=J.device
+        ).expand(J.shape[0], 3).unsqueeze(-1),
+    ).squeeze(-1)
+    g = torch.nn.functional.normalize(g, dim=-1)
+    younging = curlew._numpy(g)
+    nz = younging[:, 2]
+    keep = np.abs(nz) >= float(younging_cut)
+
+    contact_xyz = contact_xyz[keep]
+    younging = younging[keep]
+    forms = np.array(all_form)[keep]
+
+    # jitter nothing; drop exact duplicates from stride/section coincidence
+    key = np.round(contact_xyz, 4)
+    _, uniq = np.unique(key, axis=0, return_index=True)
+    uniq = np.sort(uniq)
+    contact_xyz = contact_xyz[uniq]
+    younging = younging[uniq]
+    forms = forms[uniq]
+
+    interfaces = np.rec.fromarrays(
+        [contact_xyz[:, 0], contact_xyz[:, 1], contact_xyz[:, 2], forms],
+        names=("X", "Y", "Z", "formation"),
+    )
+    dip = np.degrees(np.arccos(np.clip(np.abs(younging[:, 2]), 0.0, 1.0)))
+    azimuth = (np.degrees(np.arctan2(younging[:, 0], younging[:, 1])) + 360.0) % 360.0
+    polarity = np.where(younging[:, 2] >= 0.0, 1, -1).astype(int)
+    orientations = np.rec.fromarrays(
+        [
+            contact_xyz[:, 0],
+            contact_xyz[:, 1],
+            contact_xyz[:, 2],
+            younging[:, 0],
+            younging[:, 1],
+            younging[:, 2],
+            dip,
+            azimuth,
+            polarity,
+            forms,
+        ],
+        names=(
+            "X", "Y", "Z", "G_x", "G_y", "G_z",
+            "dip", "azimuth", "polarity", "formation",
+        ),
+    )
+
+    eq = []
+    gp, gv = [], []
+    for name in names:
+        m = forms == name
+        if m.sum() < 2:
+            continue
+        eq.append(contact_xyz[m])
+        gp.append(contact_xyz[m])
+        gv.append(younging[m])
+    C = CSet(
+        eq=eq or None,
+        gp=np.vstack(gp) if gp else None,
+        gv=np.vstack(gv) if gv else None,
+        gop=np.vstack(gp) if gp else None,
+        gov=np.vstack(gv) if gv else None,
+    )
+    return SimpleNamespace(
+        grid=G,
+        flow=flow,
+        phi=phi,
+        C=C,
+        interfaces=interfaces,
+        orientations=orientations,
+        horizons=horizons,
+        names=names,
+        centre=c,
+        sigma=sigma,
+        overturn=float(overturns[0]) if n_vortices == 1 else overturns.copy(),
+        centres=centres.copy(),
+        sigmas=sigmas.copy(),
+        overturns=overturns.copy(),
+        n_inverted=int((polarity < 0).sum()),
+        n_upright=int((polarity > 0).sum()),
+    )
+
+
+def write_gempy_tables(dataset, directory):
+    """
+    Write GemPy-style ``interfaces.csv`` and ``orientations.csv``.
+
+    Orientations carry both pole vectors ``G_x, G_y, G_z`` (younging of the
+    restored-depth potential) and ``dip, azimuth, polarity``.
+    """
+    import csv
+    from pathlib import Path
+
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    iface = dataset.interfaces
+    with open(directory / "interfaces.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["X", "Y", "Z", "formation"])
+        for row in iface:
+            w.writerow([row["X"], row["Y"], row["Z"], row["formation"]])
+    ori = dataset.orientations
+    with open(directory / "orientations.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(
+            ["X", "Y", "Z", "G_x", "G_y", "G_z", "dip", "azimuth", "polarity", "formation"]
+        )
+        for row in ori:
+            w.writerow(
+                [
+                    row["X"], row["Y"], row["Z"],
+                    row["G_x"], row["G_y"], row["G_z"],
+                    row["dip"], row["azimuth"], int(row["polarity"]),
+                    row["formation"],
+                ]
+            )
+    return directory / "interfaces.csv", directory / "orientations.csv"
+
+
+def count_interior_extrema(phi):
+    """
+    Count fully-connected interior local maxima and minima of a 2-D or 3-D scalar.
+
+    A pixel/voxel is an extremum only if it is strictly above (below) every
+    neighbour in its full :math:`3^d` neighbourhood (8-connected in 2-D,
+    26-connected in 3-D), not merely the face-adjacent ones. A bubble of an
+    implicit potential is an interior extremum: a closed isosurface (2-D:
+    isoline) around it. The true restored-depth field of a diffeomorphism of
+    a layer cake should return ``(0, 0)``.
+    """
+    a = np.asarray(phi)
+    if a.ndim not in (2, 3):
+        raise ValueError(f"phi must be a 2-D or 3-D array, got ndim={a.ndim}")
+    d = a.ndim
+    shape = a.shape
+    core = a[(slice(1, -1),) * d]
+    is_max = np.ones(core.shape, dtype=bool)
+    is_min = np.ones(core.shape, dtype=bool)
+    for offset in itertools.product((-1, 0, 1), repeat=d):
+        if all(o == 0 for o in offset):
+            continue
+        n = a[tuple(
+            slice(1 + o, s - 1 + o) for o, s in zip(offset, shape)
+        )]
+        is_max &= core > n
+        is_min &= core < n
+    return int(is_max.sum()), int(is_min.sum())

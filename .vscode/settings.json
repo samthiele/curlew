@@ -1,0 +1,13 @@
+{
+  "python.defaultInterpreterPath": "/Users/kamath92/anaconda3/envs/curlew_dev/bin/python",
+  "python.terminal.activateEnvironment": true,
+  "python.analysis.extraPaths": ["${workspaceFolder}"],
+  "python.analysis.diagnosticMode": "workspace",
+  "python.testing.unittestEnabled": false,
+  "python.testing.nosetestsEnabled": false,
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestPath": "/Users/kamath92/anaconda3/envs/curlew_dev/bin/pytest",
+  "python.testing.cwd": "${workspaceFolder}",
+  "python.testing.pytestArgs": ["tests"],
+  "python.testing.autoTestDiscoverOnSaveEnabled": true
+}

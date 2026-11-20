@@ -5,7 +5,7 @@ facilitating interactions with the underlying linked-list of GeoEvent instances
 """
 import curlew
 from curlew.geology.geoevent import GeoEvent
-from curlew.core import Pebble, LearnableBase
+from curlew.core import Pebble, LearnableBase, take_weights_changed
 from curlew.geometry import Grid, Transform
 
 import numpy as np
@@ -121,6 +121,8 @@ class GeoModel( LearnableBase ):
                 _rebind_global_constraints(ev.propertyField)
         _rebind_global_constraints(self)
 
+        self._wire_restoration_references()
+
         # store "nice-to-have" extras
         # (N.B. mostly used if e.g., geomodels are being pickled)
         self.grid = grid
@@ -129,6 +131,89 @@ class GeoModel( LearnableBase ):
     def __str__(self):
         from curlew.text import geomodel_str
         return geomodel_str(self)
+
+    def _wire_restoration_references(self):
+        """Resolve ``reference='parent'`` and sync event deformations."""
+        from curlew.kinematics.restoration import RestorationField
+
+        # Oldest-to-youngest: a 'parent' reference must itself be resolved
+        # before it is used as another event's reference.
+        for ev in self.events[::-1]:
+            field = ev.field
+            if isinstance(field, RestorationField):
+                field.resolve_reference(ev.parent)
+                if ev.deformation is not None:
+                    ev.deformation = field.integrator
+
+    def _resolve_event(self, name):
+        if isinstance(name, GeoEvent):
+            return name
+        if isinstance(name, str):
+            return self[name]
+        if isinstance(name, int):
+            return self.events[name]
+        raise TypeError(f"Expected GeoEvent, name, or index; got {type(name)!r}")
+
+    def fit_event(self, name, epochs, *, cache=False, **kwargs):
+        """
+        Train a single :class:`~curlew.geology.geoevent.GeoEvent` in isolation.
+
+        Parameters
+        ----------
+        name : str | GeoEvent | int
+            Event name, instance, or index in ``self.events`` (oldest = 0).
+        epochs : int
+            Training epochs.
+        cache : bool, optional
+            If False (default), do not retro-deform constraints through younger
+            events — use when fitting the shape/reference stage before the
+            equality stage is trained.
+        **kwargs
+            Passed to :meth:`~curlew.geology.geoevent.GeoEvent.fit`.
+        """
+        ev = self._resolve_event(name)
+        return ev.fit(epochs, cache=cache, **kwargs)
+
+    def prefit_staged(self, stages, **kwargs):
+        """
+        Sequential per-event training for multi-stage restoration.
+
+        Parameters
+        ----------
+        stages : sequence of (event_name, epochs) or (event_name, epochs, fit_kwargs)
+            Stages run in order. Typical two-stage restoration::
+
+                prefit_staged([
+                    ("shape", 2000),
+                    ("equality", 2000),
+                ])
+
+            Freeze earlier events before later stages, e.g.::
+
+                model.prefit_staged([("shape", 2000)])
+                model.freeze("shape")
+                model.prefit_staged([("equality", 2000)])
+
+        **kwargs
+            Default keywords forwarded to each :meth:`fit_event` call (overridden
+            by per-stage ``fit_kwargs``).
+        """
+        out = {}
+        for stage in stages:
+            if len(stage) == 2:
+                ev_name, epochs = stage
+                stage_kw = {}
+            elif len(stage) == 3:
+                ev_name, epochs, stage_kw = stage
+            else:
+                raise ValueError(
+                    "Each stage must be (name, epochs) or (name, epochs, kwargs)"
+                )
+            merged = {**kwargs, **stage_kw}
+            _, pebble = self.fit_event(ev_name, epochs, **merged)
+            key = ev_name if isinstance(ev_name, str) else ev_name.name
+            out[key] = pebble
+        return out
 
     def freeze( self, name=None, geometry=True, params=False ):
         """
@@ -185,7 +270,7 @@ class GeoModel( LearnableBase ):
             out[F.name] = pebble
         return out
 
-    def fit(self, epochs, early_stop=(100, 1e-4), custom_loss=None, best=True, vb=True, prefix='Training', seed=42):
+    def fit(self, epochs, early_stop=(100, 1e-4), custom_loss=None, best=True, vb=True, prefix='Training', schedule=None):
         """
         Train all GeoEvents in this model to fit the specified constraints
         simultaneously.
@@ -207,8 +292,6 @@ class GeoModel( LearnableBase ):
             Display a tqdm progress bar to monitor training.
         prefix : str, optional
             The prefix used for the tqdm progress bar.
-        seed : int, optional
-            Seed for the Bayes-by-Backprop weight-sampling generator (see Notes).
 
         Returns
         -------
@@ -223,29 +306,18 @@ class GeoModel( LearnableBase ):
         itself an ``nn.Module``), so nested :class:`~curlew.fields.series.FSF` potentials
         — and indeed every learnable parameter in the model — are not reachable via
         ``self.modules()``/``self.state_dict()`` (both come back empty on a bare
-        ``GeoModel``). Two things that ``BaseSF.fit`` gets "for free" from being a single
-        ``nn.Module`` are therefore done explicitly here, per ``field``/``deformation``/
-        ``overprint``/``propertyField`` across every event:
-
-        1. Every nested ``FSF`` gets a fresh held weight sample each epoch, so joint
-           ``fit`` trains through the same reparameterised Bayes-by-Backprop draws as
-           isolated per-event ``fit``/``prefit`` — without this, ``A_rho`` never sees a
-           data-fit gradient and every forward pass silently uses the posterior mean
-           instead of a weight sample.
-        2. Each owner's ``state_dict()`` is snapshotted on improvement and reloaded at the
-           end when ``best=True``, so joint ``fit`` actually returns the best-loss weights
-           instead of whatever the last (or early-stopped) epoch happened to leave behind.
+        ``GeoModel``). What ``BaseSF.fit`` gets "for free" from being a single
+        ``nn.Module`` is therefore done explicitly here, per ``field``/``deformation``/
+        ``overprint``/``propertyField`` across every event: each owner's
+        ``state_dict()`` is snapshotted on improvement and reloaded at the end when
+        ``best=True``, so joint ``fit`` actually returns the best-loss weights instead
+        of whatever the last (or early-stopped) epoch happened to leave behind.
         """
-        from curlew.fields.series import FSF
-
         owners = []
         for F in self.events:
             for o in (F.field, F.deformation, F.overprint, F.propertyField):
                 if o is not None:
                     owners.append(o)
-        fsf_modules = [m for o in owners for m in FSF.iter_in(o)]
-        bbb_gen = torch.Generator(device=curlew.device).manual_seed(seed) if fsf_modules else None
-
         bar = range(epochs)
         if vb:
             bar = tqdm(range(epochs), desc=prefix, bar_format="{desc}: {n_fmt}/{total_fmt}|{postfix}")
@@ -260,14 +332,16 @@ class GeoModel( LearnableBase ):
             custom_loss = []
 
         for epoch in bar:
-            if fsf_modules:
-                for m in fsf_modules:
-                    m.resample_weights(generator=bbb_gen)
+            if schedule is not None:
+                schedule(epoch, epochs)
             pebble = Pebble() # initialise loss
             for F in self.events[::-1]:
                 pebble = pebble + F.loss() # add loss incurred by each GeoEvent (and associated learnables like deformations, overprints, etc.)
             for loss_func in custom_loss:
                 pebble = pebble + loss_func(pebble, self, self.C) # add custom loss functions if they have been defined
+            # a deferred string weight just switched on: earlier totals are not comparable
+            if take_weights_changed(*owners):
+                best_loss, best_count = np.inf, 0
             total = pebble.total() # compute total loss
             if total.item() < (best_loss + eps):
                 best_loss = total.item()
@@ -307,10 +381,6 @@ class GeoModel( LearnableBase ):
         if best and best_state is not None:
             for o, sd in zip(owners, best_state):
                 o.load_state_dict(sd)
-
-        if fsf_modules:
-            for m in fsf_modules:
-                m.clear_weight_sample()
 
         return best_loss, best_pebble
 

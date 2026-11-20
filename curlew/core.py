@@ -113,8 +113,12 @@ class LearnableBase(nn.Module):
             total_ns = ns * n_iq
             C._iq_low_clamp = torch.empty(total_ns, dtype=curlew.dtype, device=curlew.device)
             C._iq_high_clamp = torch.empty(total_ns, dtype=curlew.dtype, device=curlew.device)
+            # Required separation, signed so the hinge acts on (start - end - shift).
+            C._iq_shift = torch.zeros(total_ns, dtype=curlew.dtype, device=curlew.device)
             offset = 0
-            for _start, _end, iq in C.iq[1]:
+            for item in C.iq[1]:
+                iq = item[2]
+                margin = iq_margin(item)
                 rel = iq if isinstance(iq, str) else str(iq)
                 if rel.strip() == '=' or '=' in rel:
                     raise ValueError(
@@ -123,12 +127,24 @@ class LearnableBase(nn.Module):
                 if '<' in rel:
                     C._iq_low_clamp[offset : offset + ns] = 0.0
                     C._iq_high_clamp[offset : offset + ns] = inf
+                    C._iq_shift[offset : offset + ns] = -margin
                 elif '>' in rel:
                     C._iq_low_clamp[offset : offset + ns] = ninf
                     C._iq_high_clamp[offset : offset + ns] = 0.0
+                    C._iq_shift[offset : offset + ns] = margin
                 else:
                     raise ValueError(f"Unsupported inequality relation {rel!r}; expected '<' or '>'")
                 offset += ns
+
+
+def iq_margin(item) -> float:
+    """Minimum separation of an inequality ``(P1, P2, rel[, margin])``; 0 when absent."""
+    if len(item) < 4 or item[3] is None:
+        return 0.0
+    margin = float(item[3])
+    if margin < 0:
+        raise ValueError(f"inequality margin must be >= 0, got {margin}")
+    return margin
 
 
 def sample_iq_pairs(iq, reuse_frac, last_worst_indices=None):
@@ -140,7 +156,8 @@ def sample_iq_pairs(iq, reuse_frac, last_worst_indices=None):
     """
     ns = iq[0]
     six_list, eix_list, pts_list = [], [], []
-    for c, (start, end, iq_rel) in enumerate(iq[1]):
+    for c, item in enumerate(iq[1]):
+        start, end, iq_rel = item[0], item[1], item[2]
         rel = iq_rel if isinstance(iq_rel, str) else str(iq_rel)
         if rel.strip() == "=" or "=" in rel:
             raise ValueError(
@@ -176,9 +193,16 @@ def sample_iq_pairs(iq, reuse_frac, last_worst_indices=None):
     return six_list, eix_list, pts_list
 
 
-def iq_pair_loss(start_vals, end_vals, low_clamp, high_clamp):
-    """Squared hinge on ``start_vals - end_vals`` using pre-allocated clamps."""
-    delta_all = torch.clamp(start_vals - end_vals, low_clamp, high_clamp) ** 2
+def iq_pair_loss(start_vals, end_vals, low_clamp, high_clamp, shift=None):
+    """Squared hinge on ``start_vals - end_vals - shift`` using pre-allocated clamps.
+
+    ``shift`` is the signed minimum separation of each pair (see ``CSet.iq``);
+    ``None`` means no margin.
+    """
+    delta = start_vals - end_vals
+    if shift is not None:
+        delta = delta - shift
+    delta_all = torch.clamp(delta, low_clamp, high_clamp) ** 2
     return delta_all, delta_all.mean()
 
 
@@ -220,9 +244,14 @@ class CSet:
         pv (torch.tensor or np.ndarray): (N,q) array of property value vectors.
         iq (tuple): Inequality constraints. Should be a tuple containing `(N,[(P1, P2, iq),...]`), where each P1 and P2 are (N,d) arrays or tensors
                     defining positions at which to evaluate inequality constraints such as `P1 > P2`. `iq` defines the inequality to evaluate (`<` or `>` only).
+                    An optional fourth entry, `(P1, P2, iq, margin)`, asks for a minimum separation: `P1 > P2` becomes
+                    `P1 >= P2 + margin` and `P1 < P2` becomes `P1 <= P2 - margin` (margin >= 0, in the units of the field).
                     Note that this inequality is computed for a random set of `N` pairs sampled from `P1` and `P2`. 
         eq (tuple): Equality constraints (traces). Should be a tuple or list containing (T1, T2, T3, ..., T_N), where the scalar value of all T_N should be equal (i.e.
                     minimise the mean-normalised variance of scalar field predictions at these locations).
+        sp (torch.tensor or np.ndarray): (N,i) present-day positions of strain-ellipse observations. Required whenever ``se`` or ``sr`` is set.
+        se (torch.tensor or np.ndarray): (N,i,i) eigenvectors of the spatial left Cauchy–Green tensor ``B = F Fᵀ`` at those positions. Columns are ordered minor to major. Optional; omitted observations are not compared.
+        sr (torch.tensor or np.ndarray): (N,) ratio of the major eigenvalue of ``B`` to the minor one. Optional; omitted observations are not compared.
         grid (tuple, torch.tensor or np.ndarray): A `curlew.geometry.Grid` instance defining the grid used to enforce global constraints (and associated sampling strategy).
         delta (float): The step size used when computing numerical derivatives at the grid points. Default (None) is to initialise
                        as half the distance between the first and second points listed in `grid`. Larger values of delta result
@@ -245,6 +274,9 @@ class CSet:
     pv : torch.tensor = None
     iq : tuple = None # inequality constraints
     eq : tuple = None # equality constraints
+    sp : torch.tensor = None # strain-ellipse positions
+    se : torch.tensor = None # strain-ellipse eigenvectors (minor, then major)
+    sr : torch.tensor = None # strain-ellipse eigenvalue ratio
     
     # global constraints
     grid : Grid = None # predefined grid, or params for sampling random ones
@@ -275,9 +307,9 @@ class CSet:
                         if not isinstance( attr[1][i][0], torch.Tensor): # possibly already a tensor
                             o[1].append( (_tensor( attr[1][i][0], dev=curlew.device, dt=curlew.dtype ),
                                             _tensor( attr[1][i][1], dev=curlew.device, dt=curlew.dtype ),
-                                            attr[1][i][2] ) )
+                                            *attr[1][i][2:] ) ) # relation (and margin)
                         else:
-                            o[1].append( (attr[1][i][0], attr[1][i][1], attr[1][i][2] )) # already tensors
+                            o[1].append( (attr[1][i][0], attr[1][i][1], *attr[1][i][2:] )) # already tensors
                     attr = o
                 elif k == 'eq': # equalities are also special (keep as a list of tensors as shape will differ)
                     attr = [ _tensor( t ) for t in attr ]            
@@ -301,12 +333,12 @@ class CSet:
                 elif k == 'iq': # inequalities are special
                     o = (attr[0], [] )
                     for i in range(len(attr[1])):
-                        p1, p2, rel = attr[1][i]
+                        p1, p2, rest = attr[1][i][0], attr[1][i][1], attr[1][i][2:]
                         if isinstance(p1, torch.Tensor):
                             p1 = _numpy(p1)
                         if isinstance(p2, torch.Tensor):
                             p2 = _numpy(p2)
-                        o[1].append((np.asarray(p1), np.asarray(p2), rel))
+                        o[1].append((np.asarray(p1), np.asarray(p2), *rest))  # relation (and margin)
                     attr = o   
                 elif k == 'eq': # equalities are also special (list of arrays as shape differs)
                     attr = [ _numpy( t ) for t in attr ]    
@@ -398,15 +430,27 @@ class CSet:
             for i in range(len(out.iq[1])):
                 out.iq[1][i] = ( f(out.iq[1][i][0]), # LHS
                                  f(out.iq[1][i][1]), # RHS
-                                 out.iq[1][i][2] ) # relation
+                                 *out.iq[1][i][2:] ) # relation (and margin)
         if out.eq is not None:
             out.eq = [f(t) for t in out.eq]
+        if out.sp is not None:
+            out.sp = f(out.sp)
         
         if self.grid is not None: 
             from curlew.utils import batchEval
             out.grid._setCache( batchEval( self.grid.coords(), f ) )
 
         return out
+
+    def _rotate_eigenvectors(self, R, evecs):
+        """Rotate column-eigenvectors ``(N, d, d)`` by the linear part of an affine map."""
+        if evecs is None:
+            return None
+        R = np.asarray(R)
+        if isinstance(evecs, torch.Tensor):
+            Rt = _tensor(R, dev=evecs.device, dt=evecs.dtype)
+            return torch.matmul(Rt, evecs)
+        return np.matmul(R, np.asarray(evecs))
 
     def _rotate_vectors(self, R, arr):
         """Apply the linear (rotation/scale) part of an affine transform to vectors."""
@@ -460,6 +504,7 @@ class CSet:
         R = Ta.matrix[:d, :d]
         out.gv = self._rotate_vectors(R, out.gv)
         out.gov = self._rotate_vectors(R, out.gov)
+        out.se = self._rotate_eigenvectors(R, out.se)
         if out.trend is not None:
             out.trend = self._rotate_vectors(R, out.trend)
         out.crs = dst_crs
@@ -500,13 +545,20 @@ class CSet:
             mask = e(out.pp)
             out.pp = out.pp[mask,:]
             out.pv = out.pv[mask, ...]
+        if out.sp is not None:
+            mask = e(out.sp)
+            out.sp = out.sp[mask, :]
+            if out.se is not None:
+                out.se = out.se[mask]
+            if out.sr is not None:
+                out.sr = out.sr[mask]
         if out.iq is not None:
             iq_list = []
             for i in range(len(out.iq[1])):
                 lhs = out.iq[1][i][0][ e(out.iq[1][i][0]), : ]
                 rhs = out.iq[1][i][1][ e(out.iq[1][i][1]), : ]
                 if (len(lhs) > 0) and (len(rhs) > 0):
-                    iq_list.append((lhs, rhs, out.iq[1][i][2]))
+                    iq_list.append((lhs, rhs, *out.iq[1][i][2:]))
 
             out.iq = None if len(iq_list) == 0 else (out.iq[0], iq_list)
         if out.eq is not None:
@@ -518,6 +570,96 @@ class CSet:
                 out.eq = None # no eq constraints remain
         return out
     
+#: Floors for string weights resolved with ``HSet.resolve_after > 0``, in the
+#: units of each loss: (1 degree)² for angular terms and (1 m)² for terms in
+#: restored depth. Other terms use ``RESOLVE_FLOOR_DEFAULT``.
+RESOLVE_FLOORS = {
+    "grad_loss": (np.pi / 180) ** 2,
+    "ori_loss": (np.pi / 180) ** 2,
+    "value_loss": 1.0,
+    "eq_loss": 1.0,
+    "iq_loss": 1.0,
+}
+RESOLVE_FLOOR_DEFAULT = 1e-8
+
+
+def resolve_floor(H, key) -> float:
+    """Floor of ``key`` used when resolving its string weight (see ``HSet.resolve_floor``)."""
+    floors = getattr(H, "resolve_floor", None) or {}
+    return float(floors.get(key, RESOLVE_FLOORS.get(key, RESOLVE_FLOOR_DEFAULT)))
+
+
+def resolve_string_weights(owner, H, terms) -> dict:
+    """
+    Numeric weights for one loss evaluation when ``H.resolve_after = K > 0``.
+
+    A string weight ``"w"`` means ``w / v`` for the term's loss ``v``. On the
+    first evaluation a term is resolved against its own value when that value is
+    at least the term's floor (``resolve_floor``). A term below its floor at the
+    start (for example a constraint the initial state already satisfies) is
+    deferred: its weight is 0 until evaluation ``K``, when it is resolved as
+    ``w / max(v, floor)``. If no term would be active on the first evaluation,
+    nothing could drive the warm-up, so every deferred term is resolved against
+    its floor at once.
+
+    Parameters
+    ----------
+    owner : object
+        The object whose loss is evaluated. It keeps the evaluation count
+        (``_resolve_calls``) and is flagged with ``_weights_changed`` when a
+        deferred term switches on, so fit loops can restart their best-loss
+        tracking.
+    H : HSet
+        Resolved weights are written back to it, as with ``resolve_after = 0``.
+    terms : dict
+        Maps each active loss key to its current (detached) value.
+
+    Returns
+    -------
+    dict
+        Maps each key in ``terms`` to its numeric weight (0 while deferred).
+    """
+    n = getattr(owner, "_resolve_calls", 0)
+    owner._resolve_calls = n + 1
+    K = int(H.resolve_after)
+    weights, deferred = {}, []
+    for key, v in terms.items():
+        h = getattr(H, key)
+        if not isinstance(h, str):
+            weights[key] = h
+            continue
+        floor = resolve_floor(H, key)
+        if n == 0 and v >= floor:
+            h = float(h) / v
+        elif n < K:
+            deferred.append(key)
+            weights[key] = 0.0
+            continue
+        else:
+            h = float(h) / max(v, floor)
+            owner._weights_changed = True
+        setattr(H, key, h)
+        weights[key] = h
+    if n == 0 and deferred and not any(
+        (w is not None) and w > 0 and terms[k] > 0 for k, w in weights.items()
+    ):
+        for key in deferred:
+            h = float(getattr(H, key)) / max(terms[key], resolve_floor(H, key))
+            setattr(H, key, h)
+            weights[key] = h
+    return weights
+
+
+def take_weights_changed(*owners) -> bool:
+    """True (and clear the flag) if any owner switched on a deferred string weight."""
+    changed = False
+    for o in owners:
+        if o is not None and getattr(o, "_weights_changed", False):
+            o._weights_changed = False
+            changed = True
+    return changed
+
+
 @dataclass
 class HSet:
     """
@@ -544,15 +686,16 @@ class HSet:
             Factor applied to scale the loss resulting from any provided inequality constraints.
         eq_loss : float | str
             Factor applied to scale the loss resulting from equality (trace) constraints in ``CSet.eq``.
-        kl_loss : float | str
-            Factor applied to the Bayes-by-Backprop complexity cost (``curlew.fields.series.FSF.kl_loss``,
-            summed over any nested ``FSF`` potentials). Default is 0 (disabled); enabling this is what
-            actually regularises the learned weight uncertainty toward the prior — without it, the
-            posterior std can drift toward 0 (collapsing to a point estimate) under the data-fit loss alone.
+        strain_loss : float | str
+            Factor applied to strain-ellipse observations. ``CSet.sp`` holds the
+            positions; ``se`` and ``sr`` are optional and only the ones supplied
+            are compared. Default is 0 (disabled). Used by a restore event;
+            scalar fields ignore it.
         energy_loss : float | str
-            Factor applied to the analytic path (kinetic) energy of any nested ``FSF``
-            velocity potentials (``curlew.fields.series.FSF.kinetic_energy``).
-            Default is 0 (disabled).
+            Factor applied to the analytic path (kinetic) energy of any nested
+            ``FSF`` velocity potentials
+            (``curlew.fields.series.FSF.kinetic_energy``). Default is 0
+            (disabled).
         use_dynamic_loss_weighting : bool
             Enables dynamic task loss weighting based on real-time loss values. Default is False.
             This approach ensures that each task contributes equally in magnitude (≈1)
@@ -564,6 +707,14 @@ class HSet:
             Fraction of inequality constraint pairs to retain as the "worst" from the previous epoch and reuse in the
             next; the remainder are drawn randomly. 0 = disabled. 0.5 = keep worst 50%, redraw the other 50%.
             Helps convergence by focusing the optimiser on high-loss inequality pairs.
+        resolve_after : int
+            Number of loss evaluations (one per training epoch) during which string weights whose loss starts
+            below its floor stay off. Default 0 resolves every string weight against its first value, as before.
+            With K > 0, a term already satisfied by the initial state (e.g. flat horizons under an identity
+            restoration) no longer resolves to ``w / ~0``: it waits until the other terms have moved the model and
+            is then resolved against its value at evaluation K (see ``resolve_string_weights``).
+        resolve_floor : dict
+            Per-term floors (loss units) that override ``RESOLVE_FLOORS``. Only used when ``resolve_after > 0``.
     """
     
     value_loss : float = 1
@@ -575,11 +726,13 @@ class HSet:
     prop_loss : float = 0 # "1.0"
     iq_loss : float = 0
     eq_loss : float = 0
-    kl_loss : float = 0
+    strain_loss : float = 0
     energy_loss : float = 0
     use_dynamic_loss_weighting : bool = False
     one_hot : bool = False
     reuse_worst_half : float = 0.5
+    resolve_after : int = 0
+    resolve_floor : dict = None
 
     def copy(self, **kwargs):
         """
@@ -608,6 +761,29 @@ class HSet:
                 if not callable(getattr(self, k)):
                     setattr(self, k, kwargs.get(k, 0 ) )
         return self
+
+    @classmethod
+    def restore(cls, **kwargs):
+        """
+        Loss weights for a restore event: value, gradient, and equality on;
+        monotonicity / thickness / orientation / inequality off. Pass keywords
+        to override individual terms.
+        """
+        h = cls(
+            value_loss=kwargs.pop("value_loss", "1.0"),
+            grad_loss=kwargs.pop("grad_loss", "1.0"),
+            eq_loss=kwargs.pop("eq_loss", "1.0"),
+            ori_loss=kwargs.pop("ori_loss", 0),
+            thick_loss=kwargs.pop("thick_loss", 0),
+            mono_loss=kwargs.pop("mono_loss", 0),
+            flat_loss=kwargs.pop("flat_loss", 0),
+            iq_loss=kwargs.pop("iq_loss", 0),
+            strain_loss=kwargs.pop("strain_loss", 0),
+            energy_loss=kwargs.pop("energy_loss", 0),
+        )
+        for k, v in kwargs.items():
+            setattr(h, k, v)
+        return h
 
 
 

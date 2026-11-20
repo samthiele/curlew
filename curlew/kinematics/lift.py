@@ -2,18 +2,18 @@
 GWN sheet labels and tangency confinement from open fault traces (2-D) or
 triangle meshes (3-D).
 
-Used with lifted :class:`~curlew.fields.clebsch.ClebschVelocity` and
-:class:`~curlew.geology.interactions.FlowOffset`.
+Used with lifted velocity fields and
+:class:`~curlew.kinematics.flow.FlowOffset`.
 """
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
 
 from curlew.core import _tensor
-from curlew.utils.gwn import (
+from curlew.geometry.gwn import (
     blended_tangency_polyline,
     closest_point_mesh,
     closest_point_polyline,
@@ -55,65 +55,89 @@ def _fault_geometry_dim(fault) -> int:
     )
 
 
+_SHEET_MOBILITY_MODES = ("both", "positive", "negative")
+
+
+def _parse_sheet_mobility(
+    sheet_mobility: Union[str, Sequence[str]],
+    n_faults: int,
+) -> Tuple[Tuple[str, ...], bool]:
+    """
+    Normalise ``sheet_mobility`` to a length-``n_faults`` tuple.
+
+    Returns ``(modes, from_scalar)`` where ``from_scalar`` is True when the
+    caller passed a single string (velocity μ still uses ``mobility_fault``).
+    """
+    if isinstance(sheet_mobility, str):
+        if sheet_mobility not in _SHEET_MOBILITY_MODES:
+            raise ValueError(
+                f"sheet_mobility must be one of {_SHEET_MOBILITY_MODES}, "
+                f"got {sheet_mobility!r}"
+            )
+        return (sheet_mobility,) * n_faults, True
+    mobs = tuple(sheet_mobility)
+    if len(mobs) != n_faults:
+        raise ValueError(
+            f"sheet_mobility length {len(mobs)} != n_faults {n_faults}"
+        )
+    for j, m in enumerate(mobs):
+        if m not in _SHEET_MOBILITY_MODES:
+            raise ValueError(
+                f"sheet_mobility[{j}] must be one of {_SHEET_MOBILITY_MODES}, "
+                f"got {m!r}"
+            )
+    return mobs, False
+
+
 class FaultLift(nn.Module):
     """
-    GWN sheet labels and confinement from open 2-D traces or 3-D fault meshes.
+    Sheet labels and tangency confinement from open 2-D traces or 3-D meshes.
 
-    Geometry type is inferred from ``faults``: each entry is either an open
-    polyline ``(P, 2)`` (2-D) or a triangle mesh ``(verts, faces)`` with
-    ``verts (V, 3)`` and ``faces (F, 3)`` (3-D).  All faults must share the
-    same dimension.
-
-    The lift is purely geometric: it tells the velocity field which sheet a
-    point is on so that ``v(x, w)`` can learn a different displacement on
-    each side of the cut. Slip direction, magnitude and asymmetry are fitted
-    from data, not prescribed here.
+    Each entry of ``faults`` is a polyline ``(P, 2)`` or ``(verts, faces)``
+    with ``verts (V, 3)`` and ``faces (F, 3)``. All faults share one dimension.
+    The lift says which side of a cut a point is on; the slip is fitted.
 
     Parameters
     ----------
     faults : sequence
-        One fault geometry per cut — polyline or ``(verts, faces)`` mesh tuple.
+        One geometry per cut.
     winding_power : float
-        Exponent p in ``(|w| / label_scale)^p`` for the **GWN corridor** (lift
-        nesting and diagnostics).  Does not set tangency projection unless
-        ``confine_mode="winding"``.
+        Exponent ``p`` in ``(|w| / label_scale)^p`` for the GWN corridor.
+        Sets tangency only when ``confine_mode="winding"``.
     corridor_ref : float, optional
-        GWN label scale for corridor weights (default ``π`` in 2-D,
-        ``2π`` in 3-D).
+        GWN scale for corridor weights. Default ``π`` (2-D) or ``2π`` (3-D).
     confine_mode : {"distance", "winding"}
-        How tangency projection strength λ is built.  ``"distance"`` (default):
-        λ = exp(-(d/σ)^p) from perpendicular distance ``d`` to the fault —
-        does not saturate with GWN.  ``"winding"``: λ equals the GWN corridor.
+        ``"distance"`` (default): ``λ = exp(-(d/σ)^p)`` from perpendicular
+        distance. ``"winding"``: ``λ`` is the corridor weight.
     confine_width : float, optional
-        Scale σ for distance confinement (same units as coordinates).  Default:
-        ~8% of the fault bounding-box span.
+        ``σ`` for distance confinement, in coordinate units. Default is about
+        8 % of the fault bounding-box span.
     confine_power : float
-        Exponent p in distance confinement ``exp(-(d/σ)^p)`` (``2`` = Gaussian).
+        ``p`` in ``exp(-(d/σ)^p)``. ``2`` is Gaussian.
     tip_taper : float
-        Fraction of each fault's characteristic length over which sheet labels
-        fade to zero around the tips.  ``0`` disables.
+        Fraction of each fault's length over which labels fade at the tips.
+        ``0`` disables it.
     lift_mode : {"independent", "nested"}
-        ``"independent"`` (default): one lift axis per fault, ``w in R^{n_faults}``.
-        ``"nested"``: single lift ``w in R`` built sequentially in fault order.
+        ``"independent"`` (default): one axis per fault.
+        ``"nested"``: one scalar, built in fault order.
     strike_tangent : {"blended", "closest"}
-        2-D only: how the fault strike / normal is defined at query points.
+        2-D strike and normal at a query point.
     strike_blend_power : float
-        2-D only: exponent on subtended-angle weights when
-        ``strike_tangent="blended"``.
-    sheet_mobility : {"both", "positive", "negative"}
-        Architectural footwall / hanging-wall asymmetry from GWN sign.
+        Exponent on subtended-angle weights when ``strike_tangent="blended"``.
+    sheet_mobility : {"both", "positive", "negative"} or a sequence
+        Which GWN side may slip. One string applies to every fault.
     mobility_fault : int, optional
-        Which fault's GWN defines μ for velocity scaling (default ``0``).
+        Which fault's GWN scales the velocity when ``sheet_mobility`` is one
+        string (default ``0``). Ignored for a per-fault sequence, where the
+        weights of the non-``"both"`` faults are multiplied.
     advect_traces : sequence of bool, optional
-        Per-fault Lagrangian geometry advection during integration.  Default:
-        ``[False, True, True, …]`` — the frontal fault stays fixed; younger
-        faults co-move with blocks above older cuts.
+        Lagrangian advection of each fault. Default ``[False, True, True, …]``:
+        the first fault stays fixed.
     advect_offset : float
-        When ``> 0``, carried geometry advects from probe points offset into
-        the hanging wall, avoiding tangential self-slip on the cut.
+        If positive, carried geometry is advected from points offset into the
+        hanging wall, so the cut does not slip along itself.
     activation_windows : sequence of (t_on, t_off), optional
-        Per-fault temporal existence windows over integration time
-        ``t in [0, 1]``.  Only active in Lagrangian integration.
+        When each fault exists for ``t ∈ [0, 1]``. Used only while integrating.
     """
 
     def __init__(
@@ -129,7 +153,7 @@ class FaultLift(nn.Module):
         lift_mode: str = "independent",
         strike_tangent: str = "blended",
         strike_blend_power: float = 1.0,
-        sheet_mobility: str = "both",
+        sheet_mobility: Union[str, Sequence[str]] = "both",
         mobility_fault: int = 0,
         advect_traces: Optional[Sequence[bool]] = None,
         advect_offset: float = 0.0,
@@ -152,11 +176,6 @@ class FaultLift(nn.Module):
             raise ValueError(f"winding_power must be > 0, got {winding_power}")
         if tip_taper < 0:
             raise ValueError(f"tip_taper must be >= 0, got {tip_taper}")
-        if sheet_mobility not in ("both", "positive", "negative"):
-            raise ValueError(
-                f"sheet_mobility must be 'both', 'positive', or 'negative', "
-                f"got {sheet_mobility!r}"
-            )
         dims = {_fault_geometry_dim(f) for f in faults}
         if len(dims) != 1:
             raise ValueError("all faults must share the same dimension (2 or 3)")
@@ -189,7 +208,9 @@ class FaultLift(nn.Module):
             raise ValueError(
                 f"mobility_fault must be in [0, {self.n_faults}), got {mobility_fault}"
             )
-        self.sheet_mobility = sheet_mobility
+        self.sheet_mobility, self._sheet_mobility_scalar = _parse_sheet_mobility(
+            sheet_mobility, self.n_faults,
+        )
         self.mobility_fault = int(mobility_fault)
         self.lift_mode = lift_mode
         self.winding_power = float(winding_power)
@@ -283,7 +304,7 @@ class FaultLift(nn.Module):
 
     @property
     def lift_dim(self) -> int:
-        """Extra Clebsch-potential input dimension (1 for nested lift)."""
+        """Extra Euler-potential input dimension (1 for nested lift)."""
         return 1 if self.lift_mode == "nested" else self.n_faults
 
     def activation(self, t: Optional[float]) -> Optional[torch.Tensor]:
@@ -314,26 +335,44 @@ class FaultLift(nn.Module):
     def _mobility_weight(
         self,
         w: torch.Tensor,
-        mobility: Optional[str] = None,
+        mobility: str,
     ) -> torch.Tensor:
         """Slip weight μ ∈ [0, 1] from normalised GWN label."""
-        mob = self.sheet_mobility if mobility is None else mobility
-        if mob == "both":
+        if mobility == "both":
             return w.new_ones(w.shape)
-        if mob not in ("positive", "negative"):
+        if mobility not in ("positive", "negative"):
             raise ValueError(
-                f"mobility must be 'both', 'positive', or 'negative', got {mob!r}"
+                f"mobility must be 'both', 'positive', or 'negative', got {mobility!r}"
             )
         s = (w / self.corridor_ref).clamp(-1.0, 1.0)
-        t = ((s + 1.0) * 0.5) if mob == "positive" else ((1.0 - s) * 0.5)
+        t = ((s + 1.0) * 0.5) if mobility == "positive" else ((1.0 - s) * 0.5)
         return smoothstep(t) ** self.winding_power
+
+    def _combine_mobility_weights(
+        self, w_raw: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        """
+        Scalar (N,) mobility from per-fault modes, or None when fully symmetric.
+
+        Scalar ``sheet_mobility``: μ from ``mobility_fault`` only (legacy).
+        Per-fault sequence: product of each non-``"both"`` fault's μ(w_i).
+        """
+        if all(m == "both" for m in self.sheet_mobility):
+            return None
+        if self._sheet_mobility_scalar:
+            i = self.mobility_fault
+            return self._mobility_weight(w_raw[:, i], self.sheet_mobility[i])
+        mu = None
+        for i, mob in enumerate(self.sheet_mobility):
+            if mob == "both":
+                continue
+            m = self._mobility_weight(w_raw[:, i], mob)
+            mu = m if mu is None else mu * m
+        return mu
 
     def _velocity_mobility(self, w_raw: torch.Tensor) -> Optional[torch.Tensor]:
         """Combined μ for scaling confined velocity (None when symmetric)."""
-        if self.sheet_mobility == "both":
-            return None
-        mu = self._mobility_weight(w_raw[:, self.mobility_fault])
-        return mu
+        return self._combine_mobility_weights(w_raw)
 
     def _tip_taper_weight(
         self,
@@ -450,15 +489,13 @@ class FaultLift(nn.Module):
         gate: Optional[torch.Tensor] = None,
     ) -> SheetState:
         """
-        Lagrangian sheet labels with **live** corridor geometry.
+        Lagrangian labels with live corridor geometry.
 
-        ``w_active`` / ``w_raw`` are fixed material labels (present-day); normals,
-        confinement and influence follow the advected trace positions.
-
-        With a temporal ``gate``, the frozen side identity (``w_raw``) is kept but
-        the lift **level** is recomputed from the live, gated influence/taper, so
-        the lift discontinuity closes in step with the confinement barrier as the
-        cut shuts; mobility (footwall/hanging-wall asymmetry) is unchanged.
+        ``w_active`` and ``w_raw`` are the present-day material labels.
+        Normals, confinement and influence follow the advected trace. With a
+        ``gate``, the frozen side (``w_raw``) is kept and the lift level is
+        recomputed from the live influence, so the jump closes with the
+        barrier. Mobility is unchanged.
         """
         _, infl, conf, nrm, taper = self._geometry_state(x, gate=gate)
         if gate is not None:
@@ -498,7 +535,7 @@ class FaultLift(nn.Module):
         tr = points if points is not None else self.trace(fault_index)
         if self.advect_offset <= 0:
             return tr
-        wf = 0 if w_raw.ndim == 1 else self.mobility_fault
+        wf = 0 if w_raw.ndim == 1 else int(fault_index)
         w_side = w_raw[:, wf] if w_raw.ndim > 1 else w_raw
         sign = torch.where(w_side >= 0, 1.0, -1.0).unsqueeze(-1)
         if self.dim == 2:
@@ -529,12 +566,17 @@ class FaultLift(nn.Module):
             level = w_raw.new_zeros(w_raw.shape[0])
             for i in range(self.n_faults):
                 level = level + infl[:, i] * self._hanging_weight(w_raw[:, i])
-            if self.sheet_mobility != "both":
-                mu = self._mobility_weight(w_raw[:, self.mobility_fault])
+            mu = self._combine_mobility_weights(w_raw)
+            if mu is not None:
                 level = level * mu
             return level.unsqueeze(-1)
         w_active = w_raw * taper
-        if self.sheet_mobility != "both":
-            mu = self._mobility_weight(w_raw)
-            w_active = w_active * mu
+        if any(m != "both" for m in self.sheet_mobility):
+            chans = []
+            for i, mob in enumerate(self.sheet_mobility):
+                wi = w_active[:, i]
+                if mob != "both":
+                    wi = wi * self._mobility_weight(w_raw[:, i], mob)
+                chans.append(wi)
+            w_active = torch.stack(chans, dim=-1)
         return w_active

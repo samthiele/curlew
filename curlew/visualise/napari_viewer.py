@@ -1231,7 +1231,7 @@ class NapariViewer:
             cmap_rhs = mpl_colormaps["Blues"]
             n_iq = max(1, len(iq_list))
             for i, entry in enumerate(iq_list):
-                P1, P2, rel = entry
+                P1, P2, rel = entry[0], entry[1], entry[2]
                 rel_s = (rel if isinstance(rel, str) else str(rel)).strip()
                 p1 = np.asarray(P1, dtype=np.float64)
                 p2 = np.asarray(P2, dtype=np.float64)

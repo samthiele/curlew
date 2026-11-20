@@ -58,7 +58,7 @@ how they interact with older and younger fields in the model. Currently, two dif
 - `curlew.geology.interactions.Overprint` defines overprinting relations (unconformities, onlaps, intrusions and domain boundaries) and determines how an event overprints (truncates) older geology.
 - `curlew.geology.interactions.OffsetBase` defines deformations that transform (retro-deform) the points a model is being evaluated at prior to the evaluation of older events. This can be used to represent offset from folds, faults, and sheet-intrusions (each of which has a specific deformation formulation that inherits from the base `curlew.geology.interactions.OffsetBase` class, e.g. `curlew.geology.interactions.FaultOffset`).
 
-`curlew.geology.geoevent.GeoEvent` instances are typically constructed using the factory functions in `curlew.geology`, including `curlew.geology.strati`, `curlew.geology.sheet`, `curlew.geology.fault`, `curlew.geology.fold`, etc.
+`curlew.geology.geoevent.GeoEvent` instances are typically constructed using the factory functions in `curlew.geology`, including `curlew.geology.strati`, `curlew.geology.restore`, `curlew.geology.sheet`, `curlew.geology.fault`, `curlew.geology.fold`, etc.
 
 Geologically meaningful isosurfaces (lithological contacts, fault surfaces, etc.) and volumes (regions between faults, reservoirs, finite faults, etc.) are also defined by the `curlew.geology.geoevent.GeoEvent` class, 
 using the `addIsosurface` and `addVolume` methods. Importantly, and unlike most geological modelling tools, isosurfaces can be defined either as fixed values (e.g., `1.0`) or by whichever value the model evaluates
@@ -135,9 +135,6 @@ dtype = torch.float64
 
 default_dim = 3
 """The default input dimensionality (2D or 3D) to use when creating new models. Default is 3."""
-
-compile = False 
-"""Whether to compile the model using torch.compile. This can significantly speed up larger models when using a GPU."""
 
 ccmap = None
 """A colourful (custom) matplotlib (categorical) colormap taylored for `curlew`. Will only be set if `matplotlib` is installed."""
@@ -233,8 +230,11 @@ from curlew import core
 from curlew import synthetic
 from curlew import geology
 from curlew import geometry
+from curlew.geometry import meshing
+import sys
+sys.modules[__name__ + ".meshing"] = meshing
 from curlew import visualise
 from curlew import text
 
 from curlew.core import CSet, HSet
-from curlew.geology import fault, strati, sheet
+from curlew.geology import fault, strati, sheet, restore

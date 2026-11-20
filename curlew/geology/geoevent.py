@@ -7,7 +7,7 @@ events such as faults and sheet intrusions.
 import curlew
 from curlew import _tensor, _numpy
 from curlew.core import Geode, Pebble
-from curlew.fields import BaseNF
+from curlew.fields import BaseNF, BaseSF
 from curlew.geology.interactions import Overprint, OffsetBase
 from curlew.geometry import Grid
 from curlew.utils import batchEval
@@ -275,50 +275,93 @@ class GeoEvent( object ):
         """
         fields = self._field_list()
         outList = []
-        for i, field in enumerate(fields):
-            if isinstance(self.field, int) or isinstance(self.field, float):
-                continue # no point fitting integers ;-) 
-            
-            # get CSet associated to this field
-            C = field.C 
-            assert C is not None, f"Field '{field.name}' has no constraints."
-            
-            # of evaluations of displacement fields
-            # that will not change
-            C0 = C # no need to reconstruct in many cases
-            if cache and self.child is not None:
-                C0 = C.numpy().transform( self.child.undeform ) # retro-deform other constraints
-            
-            # inject paleo-coordinate anchors so the field can use them during training if needed
-            for name, anchor in self.anchors.items():
-                # Only apply anchors associated to the current field
-                if isinstance(anchor, tuple) and (anchor[0] != i) and (anchor[0] != field.name):
-                    continue # ignore anchors associated to other fields
-                pos, direction = self.getAnchor(name, to_numpy=False)
-                if direction is not None: # anchor represents a direction
-                    setattr(field, name, direction)
-                elif pos is not None: # anchor represents a position
-                    setattr(field, name, pos)
+        # Fit unpinned, then pin in ``finally`` so an interrupt still leaves the frame.
+        # See curlew.kinematics.flow.FlowOffset.pin.
+        try:
+            for field in fields:
+                if getattr(field, "pinned", False):
+                    field.unpin()
+            for i, field in enumerate(fields):
+                if isinstance(self.field, int) or isinstance(self.field, float):
+                    continue # no point fitting integers ;-) 
+                
+                # get CSet associated to this field
+                C = field.C 
+                assert C is not None, f"Field '{field.name}' has no constraints."
+                
+                # of evaluations of displacement fields
+                # that will not change
+                C0 = C # no need to reconstruct in many cases
+                if cache and self.child is not None:
+                    C0 = C.numpy().transform( self.child.undeform ) # retro-deform other constraints
+                
+                # inject paleo-coordinate anchors so the field can use them during training if needed
+                for name, anchor in self.anchors.items():
+                    # Only apply anchors associated to the current field
+                    if isinstance(anchor, tuple) and (anchor[0] != i) and (anchor[0] != field.name):
+                        continue # ignore anchors associated to other fields
+                    pos, direction = self.getAnchor(name, to_numpy=False)
+                    if direction is not None: # anchor represents a direction
+                        setattr(field, name, direction)
+                    elif pos is not None: # anchor represents a position
+                        setattr(field, name, pos)
 
-            # fit
-            try:
-                out = field.fit(epochs, 
-                                C=C0, 
-                                transform=False, 
-                                opt=[self.deformation, self.overprint, self.propertyField], # include possibly learnable elements in these
-                                **kwargs)
-            finally:
-                if C0.grid is not None:
-                    C0.grid._clearCache()
-                field.bind(C) # ensure this always runs! (e.g., in case of keyboard interrupts)
-            
-            outList.append(out)
-        
+                # fit
+                try:
+                    out = field.fit(epochs, 
+                                    C=C0, 
+                                    transform=False, 
+                                    opt=[self.deformation, self.overprint, self.propertyField], # include possibly learnable elements in these
+                                    **kwargs)
+                finally:
+                    if C0.grid is not None:
+                        C0.grid._clearCache()
+                    field.bind(C) # ensure this always runs! (e.g., in case of keyboard interrupts)
+                
+                outList.append(out)
+        finally:
+            self._apply_frame_pins()
+
         # return
         if len(outList) == 1:
             return outList[0]
         else:
             return outList
+
+    def _apply_frame_pins(self) -> None:
+        """
+        Apply any ``restore(pin=...)`` request now that fitting is done.
+
+        Resolves a string ``pin`` against :attr:`anchors` first, so an anchor
+        added with :meth:`addAnchor` can be reused as the frame pin. Keeps
+        :attr:`deformation` pointing at the pinned integrator, so younger events
+        are undeformed into the *same* restored frame the scalar field reports.
+        """
+        for field in self._field_list():
+            spec = getattr(field, "_pin", None)
+            if spec is None:
+                continue
+            if isinstance(spec, str) and spec != "mean":
+                if spec not in self.anchors:
+                    raise KeyError(
+                        f"pin={spec!r} is not an anchor of event {self.name!r}; "
+                        f"known anchors: {sorted(self.anchors)}"
+                    )
+                stored = self.anchors[spec][1]
+                if isinstance(stored, dict):
+                    raise ValueError(
+                        f"anchor {spec!r} is a direction anchor; pin= needs a position"
+                    )
+                spec = stored
+            pinned = field.pin_frame(spec)
+            # `pin_frame` pins the field's own integrator in place and hands it
+            # back, so the question is simply whether this event's deformation
+            # *is* that integrator (a restore event) or something else (a fault
+            # or sheet offset, which owns no restored frame to pin). Compare the
+            # integrator directly: probing `.velocity` breaks on composite flows,
+            # which have a list of factors and so no single velocity module.
+            if self.deformation is not None and self.deformation is pinned:
+                self.deformation = pinned
     
     def forward(self, x: torch.Tensor, undef=True, field=0) -> torch.Tensor:
         """
@@ -614,29 +657,73 @@ class GeoEvent( object ):
         a gradient tensor will be returned.
         """
 
+        fobj = self.getField(field)
         if not isinstance(x, torch.Tensor):
-            x = _tensor(x ).requires_grad_(True)
-        if not x.requires_grad:
-            #x = torch.tensor(x, dtype=curlew.dtype, device=curlew.device, requires_grad=True)
-            x = x.detach().clone().requires_grad_(True)
-        
-        # evaluate scalar value for the selected underlying field
-        # Keep a torch copy for downstream calls (e.g. predict(values=...))
-        pred_t = self.forward(x, undef=transform, field=field).squeeze()
-
-        # get gradients
-        grad_out = torch.autograd.grad(
-            outputs=pred_t,
-            inputs=x,
-            grad_outputs=torch.ones_like(pred_t),
-            create_graph=create_graph,
-            retain_graph=retain_graph,
-        )[0]
-
-        # normalise gradients
-        if normalize:
-            norm = torch.norm(grad_out, dim=-1, keepdim=True) + 1e-8
-            grad_out = grad_out / norm
+            x = _tensor(x)
+        used_field_grad = (
+            not isinstance(fobj, (int, float))
+            and callable(getattr(type(fobj), "gradient", None))
+            and type(fobj).gradient is not BaseSF.gradient
+        )
+        undeform = (
+            used_field_grad and transform and self.child is not None
+            and getattr(fobj, "transform", None) is not None
+        )
+        if undeform:
+            # Analytic field gradients are taken w.r.t. the undeformed
+            # coordinates, so pull them back through the younger events with a
+            # vector-Jacobian product: grad_x phi = (D undeform)^T grad phi.
+            with torch.enable_grad():
+                xr = x if (create_graph and x.requires_grad) else x.detach().clone().requires_grad_(True)
+                xt = fobj.transform(xr, end=transform)
+                out = fobj.gradient(
+                    xt, normalize=False, transform=False,
+                    return_value=return_vals, create_graph=create_graph,
+                )
+                g_t, pred_t = out if return_vals else (out, None)
+                if xt.requires_grad:
+                    grad_out = torch.autograd.grad(
+                        xt, xr,
+                        grad_outputs=g_t if create_graph else g_t.detach(),
+                        create_graph=create_graph,
+                        retain_graph=retain_graph or create_graph,
+                    )[0]
+                else:
+                    grad_out = g_t
+            if pred_t is not None:
+                pred_t = pred_t.squeeze()
+            if not create_graph:
+                grad_out = grad_out.detach()
+            if normalize:
+                grad_out = grad_out / (torch.norm(grad_out, dim=-1, keepdim=True) + 1e-8)
+        elif used_field_grad:
+            if return_vals:
+                grad_out, pred_t = fobj.gradient(
+                    x, normalize=normalize, transform=transform,
+                    return_value=True, retain_graph=retain_graph,
+                    create_graph=create_graph,
+                )
+                pred_t = pred_t.squeeze()
+            else:
+                grad_out = fobj.gradient(
+                    x, normalize=normalize, transform=transform,
+                    retain_graph=retain_graph, create_graph=create_graph,
+                )
+                pred_t = None
+        else:
+            if not x.requires_grad:
+                x = x.detach().clone().requires_grad_(True)
+            pred_t = self.forward(x, undef=transform, field=field).squeeze()
+            grad_out = torch.autograd.grad(
+                outputs=pred_t,
+                inputs=x,
+                grad_outputs=torch.ones_like(pred_t),
+                create_graph=create_graph,
+                retain_graph=retain_graph,
+            )[0]
+            if normalize:
+                norm = torch.norm(grad_out, dim=-1, keepdim=True) + 1e-8
+                grad_out = grad_out / norm
 
         if to_numpy:
             grad_out = _numpy(grad_out)
@@ -997,6 +1084,97 @@ class GeoEvent( object ):
             else:
                 out.append(i)
         return out
+
+    def mesh(
+        self,
+        isosurface=None,
+        bounds=None,
+        max_depth: int = 8,
+        min_depth: int = 0,
+        field=None,
+        *,
+        iso=None,
+        **kwargs,
+    ):
+        """
+        Extract an isosurface by octree dual contouring.
+
+        Samples this event's value and gradient only near the contact — never on a
+        dense voxel grid. See :func:`curlew.geometry.meshing.dual_contour`.
+
+        Parameters
+        ----------
+        isosurface : str or float, optional
+            Name registered with :py:meth:`addIsosurface`, or a numeric level
+            of the scalar field (restored depth on a restore event).
+        bounds : (2, dim) array or :class:`~curlew.geometry.Grid`
+            Axis-aligned box, or a ``Grid`` (its world AABB; the grid is not sampled).
+        max_depth : int
+            Finest octree/quadtree level (``2**max_depth`` cells along an axis).
+        min_depth : int
+            Force subdivision to at least this level.
+        field : int or str, optional
+            Underlying field. Defaults to the field bound to a named
+            ``isosurface``, or field 0 for a numeric level.
+        iso : float, optional
+            Numeric isovalue. Alternative to passing the level as
+            ``isosurface``. Ignored when ``isosurface`` is a name.
+        **kwargs
+            Passed to :func:`curlew.geometry.meshing.dual_contour` (``thin_factor``,
+            ``bisection``, ``qef_tol``, ``batch_size``).
+
+        Returns
+        -------
+        verts : ndarray, shape ``(V, dim)``
+        faces : ndarray
+            ``(F, 3)`` triangles in 3-D, or ``(E, 2)`` segments in 2-D.
+        """
+        from curlew.fields import BaseSF
+        from curlew.geometry.meshing import dual_contour
+
+        if bounds is None:
+            raise TypeError("mesh() missing required argument: 'bounds'")
+
+        field_sel = 0 if field is None else field
+        if isinstance(isosurface, str):
+            assert isosurface in self.isosurfaces, f"Isosurface '{isosurface}' not found."
+            spec = self.isosurfaces[isosurface]
+            if isinstance(spec, tuple) and len(spec) == 2 and isinstance(spec[0], (int, str)):
+                if field is None:
+                    field_sel = spec[0]
+            iso_val = float(self.getIsovalue(isosurface))
+        else:
+            if isosurface is not None and iso is not None:
+                raise ValueError("pass a named isosurface, a numeric level, or iso=, not both")
+            level = isosurface if isosurface is not None else iso
+            if level is None:
+                raise TypeError("mesh() needs a named isosurface or a numeric iso")
+            iso_val = float(level)
+
+        fobj = self.getField(field_sel)
+        use_field = (
+            not isinstance(fobj, (int, float))
+            and callable(getattr(type(fobj), "gradient", None))
+            and type(fobj).gradient is not BaseSF.gradient
+        )
+
+        def value_and_grad(x):
+            if use_field:
+                with torch.no_grad():
+                    g, v = fobj.gradient(
+                        x, normalize=False, return_value=True, transform=True,
+                        accumulate=False,
+                    )
+            else:
+                xc = x.detach().clone().requires_grad_(True)
+                v = self.forward(xc, undef=True, field=field_sel).squeeze()
+                g = torch.autograd.grad(v, xc, torch.ones_like(v))[0]
+            return v.reshape(-1).detach(), g.detach()
+
+        return dual_contour(
+            value_and_grad, bounds, iso=iso_val,
+            max_depth=max_depth, min_depth=min_depth, **kwargs,
+        )
 
     def addVolume(self, name: str, expr: str):
         """

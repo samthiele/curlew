@@ -12,7 +12,9 @@ from curlew.core import (
     _tensor,
     cache_iq_worst_pairs,
     iq_pair_loss,
+    resolve_string_weights,
     sample_iq_pairs,
+    take_weights_changed,
 )
 import numpy as np
 import torch
@@ -289,7 +291,7 @@ class BaseSF(LearnableBase):
 
         # inititialize different loss parts
         L = {}
-        for k in ['value_loss', 'grad_loss', 'ori_loss', 'thick_loss', 'mono_loss', 'flat_loss', 'iq_loss', 'eq_loss', 'kl_loss']:
+        for k in ['value_loss', 'grad_loss', 'ori_loss', 'thick_loss', 'mono_loss', 'flat_loss', 'iq_loss', 'eq_loss']:
             L[k] = 0
 
         # LOCAL LOSS FUNCTIONS
@@ -389,14 +391,6 @@ class BaseSF(LearnableBase):
             if eq_terms:
                 L['eq_loss'] = torch.stack(eq_terms).mean()
 
-        # Bayes-by-Backprop complexity cost — summed over any nested FSF potentials
-        # (e.g. this field itself, if it is an FSF; Clebsch beta/alpha if composite).
-        if isinstance(H.kl_loss, str) or (H.kl_loss > 0):
-            from curlew.fields.series import FSF
-            l_kl = FSF.kl_loss_on(self)
-            if l_kl is not None:
-                L['kl_loss'] = l_kl
-
         # inequality losses (single batched forward; start/end interleaved so reshape separates)
         if (C.iq is not None) and (isinstance(H.iq_loss, str) or (H.iq_loss > 0)):
             ns = C.iq[0]
@@ -410,7 +404,8 @@ class BaseSF(LearnableBase):
             start_vals = all_vals[:, 0, :].reshape(-1)
             end_vals = all_vals[:, 1, :].reshape(-1)
             delta_all, L["iq_loss"] = iq_pair_loss(
-                start_vals, end_vals, C._iq_low_clamp, C._iq_high_clamp
+                start_vals, end_vals, C._iq_low_clamp, C._iq_high_clamp,
+                getattr(C, "_iq_shift", None),
             )
             self._last_iq_worst_indices = cache_iq_worst_pairs(
                 delta_all, ns, n_iq, six_list, eix_list, reuse_frac
@@ -425,10 +420,18 @@ class BaseSF(LearnableBase):
                     L[k] = 1 / v.item()
         
         # parse loss hyperparameters and build pebble
+        resolved = None
+        if getattr(H, "resolve_after", 0):  # deferred string weights (see HSet.resolve_after)
+            resolved = resolve_string_weights(self, H, {
+                k: float(v.detach()) if torch.is_tensor(v) else float(v) for k, v in L.items()
+                if isinstance(H.__getattribute__(k), str) or (H.__getattribute__(k) or 0) > 0
+            })
         pebble = Pebble()
         for k, v in L.items():
             h = H.__getattribute__(k) # hyperparmeter weight
-            if isinstance(h, str):
+            if resolved is not None:
+                h = resolved.get(k, h)
+            elif isinstance(h, str):
                 h = float(h) * (1/v).item() if v > 0 else 0.0
                 H.__setattr__(k, h )
             
@@ -448,7 +451,8 @@ class BaseSF(LearnableBase):
                  best : bool = True,
                  vb : bool = True,
                  prefix : str = 'Training',
-                 opt : list = []):
+                 opt : list = [],
+                 schedule = None):
         """
         Train this neural field to fit the specified constraints.
 
@@ -485,28 +489,11 @@ class BaseSF(LearnableBase):
         pebble : curlew.core.Pebble
             A detailed breakdown of the final loss.
 
-        Notes
-        -----
-        Every nested :class:`~curlew.fields.series.FSF` (Bayes-by-Backprop
-        weight posterior) gets a fresh held weight sample each epoch, so the
-        forward/loss computation trains through the reparameterised sample
-        rather than the posterior mean. Set ``H.kl_loss`` to weight the
-        complexity cost in :meth:`loss` (0 by default). Once training
-        finishes, every such field reverts to its posterior mean for
-        deterministic downstream use (see :meth:`~curlew.fields.series.FSF.clear_weight_sample`).
         """
         # bind the constraints
         if C is not None:
             self.bind(C)
 
-        from curlew.fields.series import FSF
-
-        fsf_modules = list(FSF.iter_in(self))
-        bbb_gen = (
-            torch.Generator(device=curlew.device).manual_seed(self.seed)
-            if fsf_modules
-            else None
-        )
 
         # Compile loss for faster repeated evaluation (PyTorch 2+)
         #if compile_loss and hasattr(torch, "compile"):
@@ -530,8 +517,8 @@ class BaseSF(LearnableBase):
         if vb:
             bar = tqdm(range(epochs), desc=prefix, bar_format="{desc}: {n_fmt}/{total_fmt}|{postfix}")
         for epoch in bar:
-            if fsf_modules:
-                FSF.resample_weights_on(self, generator=bbb_gen)
+            if schedule is not None:
+                schedule(epoch, epochs)
             pebble = _loss_fn(transform=transform)
             for o in opt:
                 if o is None:
@@ -543,6 +530,10 @@ class BaseSF(LearnableBase):
                 ) is None:
                     group = getattr(o, "name", type(o).__name__)
                     pebble = pebble + Pebble(optim={group: o.optim})
+
+            # a deferred string weight just switched on: earlier totals are not comparable
+            if take_weights_changed(self, *opt):
+                best_loss, best_count = np.inf, 0
 
             total = pebble.total()
 
@@ -578,9 +569,6 @@ class BaseSF(LearnableBase):
         if best:
             self.load_state_dict(best_state)
 
-        if fsf_modules:
-            FSF.clear_weight_samples_on(self)
-
         return best_loss, best_pebble # return summed and detailed loss
 
     def __str__(self):
@@ -611,7 +599,7 @@ class BaseNF(BaseSF):
             transform = None,
             seed = 42,
             vloss = nn.MSELoss(),
-            scale = 1e2,
+            nf_scale = 1e2,
             **kwargs
         ):
             """
@@ -633,19 +621,21 @@ class BaseNF(BaseSF):
                 The random seed to use for any random operations.
             vloss : callable, optional
                 The loss function to use for value fitting. Default is mean squared error (`nn.MSELoss()`).
-            scale : float, optional
-                A scaling factor to apply to outputs of the neural field, as often these struggle to learn functions with a large (>1) amplitude. Default is 1e2. 
-                
-                This value should be approximately equal to the expected range (max - min) of the scalar field that is being learned. It can be especially important when using a 
-                drift (trend), as it determines the extent to which the model initialisation is determined by the drift. Larger values should allow the model to deviate farther from the trend.
-                Also note that this term also tends to control the magnitude of residuals (to value or (in)equality constraints), so will also interact with the learning rate.
-                
-                N.B. The actual implementation of this scale depends on the neural field method being used.
+            nf_scale : float, optional
+                Output scale for MLP-style fields (``NFF``, ``GeoINR``), applied as
+                ``self.scale * mlp(x)``. Default is 1e2.
+
+                Do **not** use this for :class:`~curlew.fields.series.FSF`:
+                pass ``scale=`` in ``**kwargs`` instead (global series factor
+                ``s`` in ``out_scale = s / √F``). ``BaseNF`` no longer captures
+                ``scale`` before ``initField``, so that keyword reaches the
+                Fourier series.
 
             Keywords
             ---------
             All keywords are passed to the initField(...) function of the child class, to build the relevant
-            neural architecture.
+            neural architecture.  For ``FSF``, include ``scale`` here
+            (e.g. ``FSF(..., scale=2.0)``).
             """
             # initialise everything (including calling the initField class of the relevant child class)
             super().__init__(name=name, input_dim=input_dim, output_dim=output_dim, H=H, C=C, transform=transform, seed=seed, **kwargs)
@@ -653,30 +643,12 @@ class BaseNF(BaseSF):
             # store neural field specific properties
             self.closs = torch.nn.CosineSimilarity() # needed by some loss functions
             self.vloss = vloss # loss function to use for value fitting
-            self.scale = scale
+            # FSF stores series scale in ``out_scale``; ``nf_scale`` is unused there.
+            self.scale = nf_scale if hasattr(self, "out_scale") else kwargs.pop("scale", nf_scale)
             # optional worst-pair retention for inequality losses across epochs (see reuse_worst_half in HSet)
             self._last_iq_worst_indices = None
 
 # import other child classes for easy access
 from curlew.fields.analytical import LinearField, QuadraticField, PeriodicField, ListricField, EllipsoidalField
 from curlew.fields.fourier import NFF
-from curlew.fields.series import FSF, TemporalFSF
-from curlew.fields.clebsch import (
-    ClebschVelocity,
-    clebsch_velocity,
-    temporal_clebsch_velocity,
-)
-from curlew.fields.restoration import RestorationField
-from curlew.fields.restoration_constraints import (
-    LayerThickness,
-    OrthogonalThickness,
-    RestorationCache,
-    RestorationConstraint,
-    layer_thickness_loss,
-    orthogonal_thickness_loss,
-)
-from curlew.utils.gwn import gwn_mesh, gwn_polyline, gwn_ribbon_mesh
-from curlew.fields.lift import (
-    FaultLift,
-    SheetState,
-)
+from curlew.fields.series import FSF

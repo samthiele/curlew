@@ -1,6 +1,7 @@
-"""
-Utility functions for generating basic geometries (grids, sections, etc.) and
-performing other simple geometric tasks. 
+"""Grids, sections, and homogeneous transforms.
+
+Winding numbers live in :mod:`curlew.geometry.gwn`. Isosurface extraction
+lives in :mod:`curlew.geometry.meshing`.
 """
 
 from dataclasses import dataclass
@@ -23,26 +24,11 @@ def poisson_disk_indices_2d(
     seed: Optional[int] = None,
     ) -> np.ndarray:
     """
-    Fast Poisson-disk sampling on an arbitrary set of (x,y) points.
+    Indices into ``(x, y)`` of a subset with separation at least ``radius``.
 
-    A uniform grid-hashing approach ensures that any two chosen points are
-    at least ``radius`` apart by checking only the 8 neighboring cells.
-
-    Parameters
-    ----------
-    x, y : np.ndarray
-        1D arrays of the same length N (flattened coordinates).
-    radius : float
-        Minimum separation between sampled points.
-    max_points : int
-        Maximum number of points to return (may return fewer if not feasible).
-    seed : int | None, default=None
-        RNG seed for reproducibility.
-
-    Returns
-    -------
-    np.ndarray
-        Indices (into ``x``/``y``) of selected points, dtype=int64.
+    Cell size ``radius / √2`` makes the 8-neighbourhood enough. Returns fewer
+    than ``max_points`` when the set cannot supply them. ``seed`` fixes the
+    visit order.
     """
     if x.shape != y.shape:
         raise ValueError("x and y must have identical shapes.")
@@ -102,26 +88,11 @@ def poisson_disk_indices_3d(
     seed: Optional[int] = None,
 ) -> np.ndarray:
     """
-    Fast Poisson-disk sampling on an arbitrary set of (x,y,z) points.
+    Indices into ``(x, y, z)`` of a subset with separation at least ``radius``.
 
-    Uses a uniform 3D grid-hashing approach so that any two chosen points are
-    at least `radius` apart by checking only the 27 neighboring cells.
-
-    Parameters
-    ----------
-    x, y, z : np.ndarray
-        1D arrays of the same length N (flattened coordinates).
-    radius : float
-        Minimum separation between sampled points.
-    max_points : int
-        Maximum number of points to return (may return fewer if not feasible).
-    seed : int | None, default=None
-        RNG seed for reproducibility.
-
-    Returns
-    -------
-    np.ndarray
-        Indices (into x/y/z) of selected points, dtype=int64.
+    Cell size ``radius / √3`` makes the 27-neighbourhood enough. Returns fewer
+    than ``max_points`` when the set cannot supply them. ``seed`` fixes the
+    visit order.
     """
     if not (x.shape == y.shape == z.shape):
         raise ValueError("x, y, and z must have identical shapes.")
@@ -134,9 +105,7 @@ def poisson_disk_indices_3d(
     coords = np.c_[x, y, z]
     n = coords.shape[0]
 
-    # In 3D, choose cube side so the space diagonal equals `radius`:
-    # s * sqrt(3) = radius  ->  s = radius / sqrt(3)
-    cell = radius / np.sqrt(3.0)
+    cell = radius / np.sqrt(3.0)  # cube diagonal equals radius
 
     xmin, ymin, zmin = coords.min(axis=0)
     ix = np.floor((coords[:, 0] - xmin) / cell).astype(np.int32)
@@ -181,19 +150,12 @@ def poisson_disk_indices_3d(
 
 def grid( extent : tuple | np.ndarray, size : tuple, **kwds ):
     """
-    Construct a grid using the provided extent (or the bounds of passed point set) and
-    voxel size (float) or grid dimensions (int). 
-    
-    Parameters
-    ----------
-    extent : tuple | np.ndarray
-        The extent of the grid in each dimension as [(xmin,ymin,...), (xmax, ymax, ...)]. If a tuple is provided, it is interpreted as the bounds of the grid in each dimension.
-        If a numpy array is provided, the min and max of these points in each dimension will be computed and used as the bounds.
-    size : tuple
-        The size of the grid in each dimension. If a float is provided, it is interpreted as the voxel size in each dimension.
-        If an integer is provided, it is interpreted as the number of grid cells in each dimension.
-    **kwds : dict
-        Additional keyword arguments are passed directly to `Grid.__init__`.
+    A :class:`Grid` spanning ``extent``.
+
+    ``extent`` is ``((xmin, ...), (xmax, ...))``, or a point array whose
+    per-axis min and max are used. ``size`` is a spacing (float) or a cell
+    count (int), one value or one per axis. :attr:`Grid.dims` is that
+    coordinate span. Extra keywords go to :class:`Grid`.
     """
     # get grid bounds if not passed directly
     if isinstance(extent, np.ndarray):
@@ -216,30 +178,13 @@ def grid( extent : tuple | np.ndarray, size : tuple, **kwds ):
     return Grid(span, step, **kwds)
 
 class Grid(object):
-    """
-    Class encapsulating more advanced grids (e.g., non-axis aligned grids) and facilitating array reshaping.
-    """
+    """Sampling grid, axis-aligned or rotated, and the reshape back to an image."""
     def __init__( self, dims, step, center=None, rotation=None, sampleArgs={} ):
         """
-        Initialize a grid object with specified dimensions, step size, origin, and rotation.
-        Parameters:
-            dims (tuple): Dimensions of the grid. A tuple of integers specifying the size along each axis.
-            step (float or int or tuple): Step size for the grid. If a single float or int is provided, 
-                it is applied uniformly to all dimensions. If a tuple is provided, it specifies the step 
-                size for each dimension.
-            center (tuple, optional): The origin (center) of the grid in the global coordinate space. Defaults to the origin.
-            rotation (numpy.ndarray, optional): A rotation matrix defining the orientation of the grid. 
-                Defaults to None.
-            sampleArgs (dict, optional): Additional arguments for sampling with draw(). Defaults to an empty dictionary.
-        Attributes:
-            dims (tuple): Stored dimensions of the grid.
-            step (tuple): Step size for each dimension.
-            ndim (int): Number of dimensions in the grid.
-            sampleArgs (dict): Additional arguments for sampling.
-            axes (list): List of numpy arrays representing the axes of the grid.
-            shape (tuple): Shape of the grid based on the axes.
-            matrix (numpy.ndarray): Transformation matrix combining origin and rotation.
-            center (numpy.ndarray): Stored origin (center) of the grid for convenience.
+        ``dims`` is the coordinate span along each axis. ``step`` is the
+        spacing, one value or one per axis. ``center`` defaults to the origin.
+        ``rotation`` is ``(ndim, ndim)``. ``sampleArgs`` is passed to
+        :meth:`sample` by :meth:`draw`.
         """
 
         self.dims = tuple([i for i in dims]) # store dims
@@ -268,16 +213,11 @@ class Grid(object):
         return grid_str(self)
 
     def coords(self, transform=True):
-        """
-        Get an (N,2) or (N,3) array of coordinates representing the position of each cell in this grid. 
-        """
+        """Cell centres as ``(N, ndim)``. ``transform=False`` skips the rigid frame."""
         if self._cache is not None:
             assert transform, "Transform cannot be False if altCoords have been defined."
-            return self._cache # easy!
+            return self._cache
 
-        # create ravelled list of points
-        #points = np.array( np.meshgrid( *self.axes, indexing='xy' ) ).T.reshape((-1,self.ndim))
-        #points = np.array( np.meshgrid( *self.axes, indexing='xy' ) ).reshape((-1,self.ndim))
         coords = np.meshgrid(*self.axes, indexing='ij')
         grid = np.array([c.T for c in coords[::-1]]).T
         grid = grid[...,::-1]
@@ -290,53 +230,35 @@ class Grid(object):
         return points
     
     def reshape(self, values):
-        """
-        Reshape an (N,) or (N,d) array of points to an N-d grid (image or voxel) array.
-        """
+        """``(N,)`` or ``(N, d)`` values back to ``shape`` or ``shape + (d,)``."""
         if len(values.shape) == 1:
             return values.reshape(self.shape) # easy
         else:
             return values.reshape( self.shape + (values.shape[-1], ) )
     
     def _setCache(self, coords):
-        """
-        Store a cached transformed grid. Used during training of individual fields, to avoid lots of recomputations 
-        of transformed grid coords.
-        """
+        """Cache transformed cell centres so a field fit does not rebuild them."""
         assert (np.array( coords.shape ) == np.array( self.coords().shape )).all()
         self._cache = coords
     
     def _clearCache(self):
-        """ Remove any defined cache. """
+        """Drop the cached coordinates."""
         self._cache = None
     
     def draw(self, transform=None):
-        """
-        Draw a random sample according to `self.sampleArgs`. This is used to draw
-        random samples (using `self.sample`) when fitting global constraints.
-        """
+        """One draw from :meth:`sample` using ``sampleArgs``, as a tensor."""
         coords = self.sample(**self.sampleArgs, tensor=True)
-        if transform and (self._cache is not None): # we need to apply a transform?
-            # N.B. assumes that if self._cache is defined then this contains
-            # pre-computed transformed grid point positions
+        if transform and (self._cache is not None):
+            # The cache holds the transformed centres, so the field frame applies here.
             coords = transform(coords, end=None)
         return coords
 
     def sample(self, N=4096, poissonDisk=None, tensor=False):
         """
-        Sample random points from this grid. Used for e.g., evaluating "global" constraints. 
+        ``N`` cell centres, without replacement.
 
-        Parameters
-        ----------
-        N : int
-            The number of random samples to select.
-        poissonDisk : tuple | optional (defaults to None)
-            If not None, should be given as a tuple (r, k, seed), where r is the minimum distance between
-            the points and k is the maximum number of points allowed, and seed ensures reproducibility
-            (can be None to use previous random seed).
-            If None, draws randomly from the grid.
-        tensor : bool | optional
-            True if sampled points should be returned as a torch.Tensor. Default is False. 
+        ``poissonDisk=(radius, max_points, seed)`` enforces a minimum
+        separation instead. ``tensor=True`` returns a torch tensor.
         """
 
         # get grid of points to sample from
@@ -368,34 +290,13 @@ class Grid(object):
     
     def contour(self, values, iso, normals=False, transform=True, mask=None, erodeMask=0 ):
       """
-      Use values computed for this grid to extract 2D (lines) or 3D (surfaces) contours. Requires scikit-image.
+      Isosurface of ``values`` (length ``len(coords())``) at ``iso``.
 
-      Parameters
-      -----------
-          values : np.ndarray
-              A 1D array of values to extract contours from. Length must be the same as `self.coords()`.
-          iso : float
-              The isovalue to extract. Must be within the range of `values`.
-          normals : bool
-              If True, an array of vertex normals will be returned in addition to the vertices and faces.
-          transform : bool | optional
-              True (default) if this grids transorm matrix should be applied to return coordinates in world coords. Otherwise
-              internal (local) grid coordinates will be returned.
-          mask : np.ndarray | None
-              Optional boolean mask specifying which grid cells are considered valid for contouring.
-              Can be provided either as a ravelled 1D array with the same length as `values`, or
-              as an array already shaped like this grid (`self.shape`). Masked-out regions are
-              ignored by the contouring algorithm.
-          erodeMask : int
-              If non-zero and `mask` is provided, morphologically filter the combined mask
-              before contouring. Positive values apply binary erosion (trim boundary voxels);
-              negative values apply binary dilation (expand the mask by ``abs(erodeMask)``
-              iterations). Dilation is often needed when the mask boundary coincides with the
-              isosurface being extracted. Default is 0 (no filtering).
-      
-      Returns
-      --------
-          An array of `vert`, `faces` for 3D grids, or a list of contour polylines (lists of coordinates) for 2D grids.
+      3-D returns ``(verts, faces)``, plus vertex normals when ``normals``.
+      2-D returns a list of polylines. ``transform`` (default) maps them
+      through this grid's frame. ``mask`` is a boolean array, ravelled or
+      shaped like the grid. ``erodeMask > 0`` erodes it; a negative value
+      dilates by that many iterations.
       """
       try:
           import skimage
@@ -414,8 +315,8 @@ class Grid(object):
               mask = m
           else:
               raise ValueError(
-                  "volume_mask must be either 1D (len(values),) or shaped like the grid (self.shape). "
-                  f"Got volume_mask.shape={m.shape}, expected {(len(values),)} or {self.shape}."
+                  "mask must be 1D (len(values),) or shaped like the grid (self.shape). "
+                  f"Got mask.shape={m.shape}, expected {(len(values),)} or {self.shape}."
               )
           contour_mask = contour_mask & mask
           if erodeMask:
@@ -477,9 +378,7 @@ class Grid(object):
           return contours
         
     def copy(self):
-        """
-        Create a copy of the current Grid instance.
-        """
+        """A new grid with the same frame, and the cache if one is set."""
         new_grid = Grid(self.dims, self.step, center=self.center, rotation=self.matrix[:self.ndim, :self.ndim], sampleArgs=self.sampleArgs)
         if self._cache is not None:
             new_grid._setCache(self._cache)
@@ -488,60 +387,39 @@ class Grid(object):
 
 def compute_topology_adjacency(soft_masks, symmetrize=True, connection="conservative"):
     """
-    Differentiable adjacency matrix from class soft-assignment volumes. This is
-    used by the `curlew.core.Geode.topology` method to compute the adjacency matrix from
-    gridded lithology and structure IDs.
+    Class-contact areas from soft masks ``(B, C, H, W)`` or ``(B, C, D, H, W)``.
 
-    Uses depthwise convolution with a neighbourhood kernel, then batch matrix
-    multiplication to accumulate voxel contact area between classes.
-
-    Parameters
-    ----------
-    soft_masks : torch.Tensor
-        Shape ``(B, C, *spatial)`` with ``spatial`` either ``(H, W)`` or ``(D, H, W)``.
-        Values are non-negative class weights (e.g. softmax probabilities) per voxel.
-    symmetrize : bool, optional
-        If True (default), return ``(A + A.T) / 2`` so contact area is mutual.
-    connection : str, optional
-        ``'conservative'`` (default): only face-shared neighbours count (4-connected in 2D,
-        6-connected in 3D). ``'inclusive'``: face, edge, and vertex neighbours count
-        (8-connected in 2D, 26-connected in 3D).
-
-    Returns
-    -------
-    torch.Tensor
-        Shape ``(B, C, C)``; diagonal entries are zero (no self-contact).
+    A depthwise neighbourhood sums the weight of class ``i`` against the
+    neighbours of class ``j``. The diagonal is zero. ``symmetrize`` (default)
+    returns ``(A + Aᵀ) / 2``. ``connection="conservative"`` counts shared faces
+    (4- or 6-connected); ``"inclusive"`` also counts edges and vertices
+    (8- or 26-connected).
     """
-    # Require batched multi-channel image/volume layout: (B, C, H, W) or (B, C, D, H, W).
+    # (B, C, H, W) or (B, C, D, H, W).
     if soft_masks.ndim not in (4, 5):
         raise ValueError(
             "soft_masks must have shape (B, C, H, W) or (B, C, D, H, W); "
             f"got {tuple(soft_masks.shape)}"
         )
-    # Unpack batch size, class count, and voxel count for the matrix multiply below.
     B, C = soft_masks.shape[:2]
     spatial = soft_masks.shape[2:]
     n_vox = int(np.prod(spatial))
     device, dtype = soft_masks.device, soft_masks.dtype
 
-    # Conservative = shared faces only; inclusive = shared faces, edges, or vertices.
     connection = connection.lower()
     if connection not in ("conservative", "inclusive"):
         raise ValueError(
             f"connection must be 'conservative' or 'inclusive', not {connection!r}"
         )
 
-    # Build a depthwise stencil: centre 0, ones where two cells are considered adjacent.
     if len(spatial) == 2:
         if connection == "conservative":
-            # Face neighbours only (4-connected).
             kernel = torch.tensor(
                 [[0.0, 1.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, 0.0]],
                 device=device,
                 dtype=dtype,
             )
         else:
-            # Face, edge, and vertex neighbours (8-connected).
             kernel = torch.ones((3, 3), device=device, dtype=dtype)
             kernel[1, 1] = 0.0
         kernel = kernel.view(1, 1, 3, 3).expand(C, 1, 3, 3)
@@ -549,12 +427,10 @@ def compute_topology_adjacency(soft_masks, symmetrize=True, connection="conserva
     elif len(spatial) == 3:
         kernel = torch.zeros((3, 3, 3), device=device, dtype=dtype)
         if connection == "conservative":
-            # Face neighbours only (6-connected).
             kernel[1, 1, 0] = kernel[1, 1, 2] = 1.0
             kernel[1, 0, 1] = kernel[1, 2, 1] = 1.0
             kernel[0, 1, 1] = kernel[2, 1, 1] = 1.0
         else:
-            # Face, edge, and vertex neighbours (26-connected).
             kernel[:] = 1.0
             kernel[1, 1, 1] = 0.0
         kernel = kernel.view(1, 1, 3, 3, 3).expand(C, 1, 3, 3, 3)
@@ -562,15 +438,11 @@ def compute_topology_adjacency(soft_masks, symmetrize=True, connection="conserva
     else:
         raise ValueError(f"topology supports 2D and 3D grids only; spatial shape {spatial}")
 
-    # Collapse spatial dims so bmm accumulates contact area: A[i,j] = sum_v X_i(v) * Neigh(X_j)(v).
     flat_masks = soft_masks.reshape(B, C, n_vox)
     flat_dilated = dilated.reshape(B, C, n_vox).transpose(1, 2)
     adjacency = torch.bmm(flat_masks, flat_dilated)
     
-    # Remove self-contact (every voxel neighbours its own class).
     adjacency = adjacency * (1.0 - torch.eye(C, device=device, dtype=dtype).unsqueeze(0))
-    
-    # Average with transpose so edge voxels do not bias i->j vs j->i.
     if symmetrize:
         adjacency = 0.5 * (adjacency + adjacency.transpose(1, 2))
     return adjacency
@@ -579,66 +451,36 @@ def compute_topology_adjacency(soft_masks, symmetrize=True, connection="conserva
 # TODO - make this return a Grid object?
 def section(dims : tuple, origin : np.ndarray, normal : np.ndarray, width : float = None, height : float = None, step=None):
     """
-    Create a grid of 3D points on a plane. Useful for evaluating and plotting
-    cross sections through 3D models.
+    Points on a plane through ``origin`` with normal ``normal``.
 
-    Parameters
-    ----------
-    dims : tuple of int
-        A tuple (nx, ny) specifying the number of grid points in the horizontal and vertical directions.
-    origin : array-like, shape (3,)
-        The center point of the grid.
-    normal : array-like, shape (3,)
-        The normal vector defining the plane (need not be unit length).
-    width : float
-        The total extent of the grid in the horizontal direction. If None, step must be defined.
-    height : float
-        The total extent of the grid in the vertical direction. If None, step must be defined.
-    step : float, optional
-        Spacing between grid points. If provided, the grid points will be spaced by this 
-        amount in both in-plane directions, and the extents will be determined by `dims` and `step` 
-        rather than by the given `width` and `height`.
-
-    Returns
-    -------
-    grid : np.ndarray
-        An array of shape (nx, ny, 3) representing the grid of 3D points.
+    ``dims`` is ``(nx, ny)``. Without ``step``, the grid spans ``width`` and
+    ``height``. With ``step`` (a float or ``(sx, sy)``), those extents are
+    ignored. Returns ``(shape, points)``: ``shape`` is ``(nx, ny, 3)`` and
+    ``points`` is ``(nx * ny, 3)``.
     """
 
-    # Ensure origin and normal are numpy arrays of type float.
     origin = np.asarray(origin, dtype=float)
     normal = np.asarray(normal, dtype=float)
-    
-    # Normalize the normal vector.
     n = normal / np.linalg.norm(normal)
-    
-    # To construct an orthonormal basis for the plane, we need a vector that is
-    # not parallel to n. We choose an arbitrary vector; for example, if n is close
-    # to [0,0,1] we can choose [1,0,0], otherwise we choose [0,0,1].
+
+    # A vector not parallel to n. Vertical n uses north as the in-plane "up".
     if np.allclose(n, [0, 0, 1]) or np.allclose(n, [0, 0, -1]):
-        arbitrary = np.array([0, 1, 0], dtype=float) # height axis is N-S (map)
+        arbitrary = np.array([0, 1, 0], dtype=float)
     else:
-        arbitrary = np.array([0, 0, 1], dtype=float) # height axis is up-down (section)
-    
-    # First in-plane axis: u = n x arbitrary
+        arbitrary = np.array([0, 0, 1], dtype=float)
+
     u = np.cross(n, arbitrary)
     u /= np.linalg.norm(u)
-    
-    # Second in-plane axis: v = n x u (this ensures u, v, n is a right-handed frame)
-    v = np.cross(n, u)
+    v = np.cross(n, u)  # (u, v, n) right-handed
     v /= np.linalg.norm(v)
     
     nx, ny = dims
     
     if step is None:
-        # If step is not provided, we want the grid to exactly span the given width and height.
-        # For nx>1, the spacing along the u-direction is width/(nx-1) so that the points
-        # go from -width/2 to +width/2.
+        # Endpoints sit on ±width/2, so the spacing is width/(nx-1).
         u_coords = np.linspace(-width/2, width/2, nx)
         v_coords = np.linspace(-height/2, height/2, ny)
     else:
-        # If step is provided, we ignore width and height.
-        # We center the grid so that the middle point is at zero.
         if isinstance(step, tuple) or isinstance(step, list):
             sx = step[0]
             sy = step[1]
@@ -656,23 +498,7 @@ def section(dims : tuple, origin : np.ndarray, normal : np.ndarray, width : floa
     return grid.shape, grid.reshape((-1,3))
 
 def triangle_wave(x, A=1, T=2*np.pi, n_terms=11):
-    """
-    Approximates a triangle wave using a Fourier series.
-
-    Parameters:
-    x : array-like
-        Input values (time or position).
-    A : float
-        Amplitude of the triangle wave.
-    T : float
-        Period (wavelength) of the triangle wave.
-    n_terms : int
-        Number of terms in the Fourier series approximation.
-
-    Returns:
-    f_x : array-like
-        Approximated triangle wave values.
-    """
+    """Fourier triangle wave of amplitude ``A`` and period ``T``, ``n_terms`` odd harmonics."""
     f_x = x * 0
     isTorch = isinstance(f_x, torch.Tensor)
     for n in range(1, n_terms + 1, 2):  # Only odd harmonics
@@ -683,34 +509,14 @@ def triangle_wave(x, A=1, T=2*np.pi, n_terms=11):
     return (8/np.pi**2)*f_x  # Normalizing factor for amplitude scaling
 
 def blended_wave( x, f=0.5, A=1, T=2*np.pi ):
-    """
-    Blend a triangle and a sinusoid wave to get varying degrees of sharpness in the fold geometry. 
-
-    Parameters:
-    x : array-like
-        Input values (time or position).
-    f : float
-        The blending factor to use. 0 gives a perfectly sinusoidal wave, while 1 gives a perfectly triangular wave.
-    A : float
-        Amplitude of the wave.
-    T : float
-        Period (wavelength) of the function.
-
-    Returns:
-    f_x : array-like
-        Approximated blend between a triangle wave and a sine wave. 
-    """
+    """``(1 - f)`` times a sinusoid plus ``f`` times a triangle wave, both of amplitude ``A`` and period ``T``."""
     y1 = triangle_wave(x, A=A, T=T, n_terms=1) # sinusoid wave 
     y2 = triangle_wave(x, A=A, T=T, n_terms=11) # triangle wave 
     return (1-f)*y1 + f*y2
 
 @dataclass
 class Transform:
-    """
-    Homogeneous transform supporting:
-      - 3x3 matrices for 2D points
-      - 4x4 matrices for 3D points
-    """
+    """Homogeneous transform: 3×3 for 2-D points, 4×4 for 3-D. An int ``n`` is the identity in ``n`` dimensions."""
     matrix: ArrayLike
 
     def __post_init__(self):
@@ -736,10 +542,7 @@ class Transform:
         self.__post_init__()
 
     def apply(self, points: ArrayLike) -> ArrayLike:
-        """
-        Apply the transform to an (N,2) or (N,3) array of points.
-        Handles both numpy arrays and pytorch tensors.
-        """
+        """Apply to ``(N, 2)`` or ``(N, 3)`` points. NumPy stays NumPy; torch stays torch."""
         if isinstance(points, torch.Tensor):
             return self._apply_torch(points)
         elif isinstance(points, np.ndarray):
@@ -753,9 +556,8 @@ class Transform:
 
     def inverse(self) -> "Transform":
         """Return a Transform representing the inverse operation."""
-        # Always invert on CPU to avoid cuSOLVER initialisation issues;
-        # _apply_torch will move the matrix to the right device on demand.
-        mat = torch.as_tensor(self.matrix)  # CPU, from numpy source of truth
+        # Invert on CPU. cuSOLVER is not initialised for a one-off inverse.
+        mat = torch.as_tensor(self.matrix)
 
         try:
             inv = torch.linalg.inv(mat)
@@ -791,9 +593,6 @@ class Transform:
 
         n, d = points.shape
 
-        # Cast lazily: matches device and dtype of the incoming points.
-        # Zero-copy if already matching; cheap cast otherwise.
-        # Keeps self.matrix as the CPU numpy source of truth.
         mat = torch.as_tensor(self.matrix, dtype=points.dtype, device=points.device)
 
         if mat.shape == (3, 3) and d != 2:

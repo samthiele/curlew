@@ -229,14 +229,11 @@ def blended_tangency_polyline(
     blend_power: float = 1.0,
 ):
     """
-    Strike frame from a blend of segment tangents weighted by the subtended-
-    angle magnitudes — the same angular visibility GWN already uses.
+    Strike and distance from segment tangents weighted by subtended-angle magnitude.
 
-    ``blend_power`` sharpens the blend: ``1`` is the default soft corner
-    rotation; larger values (e.g. ``4``) favour the dominant visible segment;
-    very large values approximate closest-segment tangents.
-
-    Returns closest point, blended unit tangent, blended distance.
+    ``blend_power=1`` is a soft corner. Larger values favour the dominant
+    segment and approach the closest-segment tangent. Returns the closest
+    point, the blended unit tangent, and the blended distance.
     """
     if blend_power <= 0:
         raise ValueError(f"blend_power must be > 0, got {blend_power}")

@@ -81,3 +81,87 @@ def test_synthetic():
             assert np.percentile(np.abs(g.scalar[mask] - g.fields[fname][mask]), 99) < 1e-6
 
             g.stackValues(mn=0, mx=1)
+
+
+def test_count_interior_extrema_26():
+    from curlew.synthetic import count_interior_extrema
+
+    peak = np.zeros((5, 5, 5))
+    peak[2, 2, 2] = 1.0
+    assert count_interior_extrema(peak) == (1, 0)
+
+    pit = np.zeros((5, 5, 5))
+    pit[2, 2, 2] = -1.0
+    assert count_interior_extrema(pit) == (0, 1)
+
+    # Higher than all six faces, lower than a corner: not a 26-max.
+    saddle = np.zeros((5, 5, 5))
+    saddle[2, 2, 2] = 1.0
+    saddle[1, 1, 1] = 2.0
+    n_max, n_min = count_interior_extrema(saddle)
+    assert n_max == 1  # the corner voxel
+    assert n_min == 0
+
+    x = np.linspace(-1.0, 1.0, 9)
+    xx, yy, zz = np.meshgrid(x, x, x, indexing="ij")
+    assert count_interior_extrema(xx) == (0, 0)
+
+
+def test_recumbent_mushroom_opposing_limbs(tmp_path):
+    """
+    Periclinal recumbent fold: through-going truth, inverted + upright limbs
+    of the same horizon (the GemPy-bubble bait).
+    """
+    import torch
+    from curlew.synthetic import (
+        count_interior_extrema,
+        recumbent_mushroom,
+        write_gempy_tables,
+    )
+
+    curlew.default_dim = 3
+    curlew.device = "cpu"
+    curlew.dtype = torch.float64
+    ds = recumbent_mushroom(shape=(48, 40, 36), n_steps=16, seed=0)
+    assert ds.n_inverted >= 8
+    assert ds.n_upright > ds.n_inverted
+    both = False
+    for name in np.unique(ds.orientations["formation"]):
+        pol = ds.orientations["polarity"][ds.orientations["formation"] == name]
+        if (pol < 0).any() and (pol > 0).any():
+            both = True
+            break
+    assert both, "at least one horizon must show inverted and upright younging"
+    n_max, n_min = count_interior_extrema(ds.phi)
+    assert (n_max, n_min) == (0, 0)
+    assert ds.C.eq is not None and len(ds.C.eq) >= 2
+    assert ds.C.gp.shape[0] == len(ds.interfaces)
+
+    out = write_gempy_tables(ds, tmp_path)
+    assert out[0].exists() and out[1].exists()
+
+def test_recumbent_mushroom_two_vortices():
+    """Two vortices: one fold each, still through-going; one vortex is unchanged."""
+    import torch
+    from curlew.synthetic import EXTENT_3D, count_interior_extrema, recumbent_mushroom
+
+    curlew.default_dim = 3
+    curlew.device = "cpu"
+    curlew.dtype = torch.float64
+    E = np.asarray(EXTENT_3D, dtype=float)
+    centres = np.array([[0.34, 0.42, 0.45], [0.66, 0.58, 0.45]]) * E
+    sigma = np.array([0.11, 0.10, 0.20]) * E
+    ds = recumbent_mushroom(shape=(48, 40, 36), n_steps=16, centre=centres, sigma=sigma,
+                            overturn=1.35 * np.pi)
+    assert ds.centres.shape == (2, 3) and ds.sigmas.shape == (2, 3) and len(ds.overturns) == 2
+    assert count_interior_extrema(ds.phi) == (0, 0)
+    inv = ds.orientations["polarity"] < 0
+    x = ds.orientations["X"]
+    for cx in centres[:, 0]:                     # each fold has overturned samples
+        assert np.any(inv & (np.abs(x - cx) <= 2.0 * sigma[0]))
+
+    one = recumbent_mushroom(shape=(24, 20, 18), n_steps=8, overturn=1.2 * np.pi)
+    same = recumbent_mushroom(shape=(24, 20, 18), n_steps=8, overturn=[1.2 * np.pi],
+                              centre=[one.centre], sigma=[one.sigma])
+    assert np.allclose(one.phi, same.phi)
+    assert one.centres.shape == (1, 3) and isinstance(one.overturn, float)

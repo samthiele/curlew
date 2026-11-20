@@ -1,20 +1,25 @@
 """
 Fourier-series neural fields (FSF) for scalar potential representation.
 
-Gradients and Hessians are computed in closed form (no autograd through the
-series), which improves speed and stability for interpolation and — via the
-raw API — for Clebsch / diffeomorphic deformation downstream.
+A scalar potential is a random Fourier series. Linear mode uses a Cartesian
+pair of learnable amplitudes per mode, ``A cos(Ω·x) + B sin(Ω·x)`` — equivalent
+to amplitude-and-phase but well-defined at the origin, where a polar ``(R, φ)``
+chart is singular. Activated mode keeps a single amplitude, a frozen random
+phase, and a per-mode bias. Values, gradients and Hessians are computed in
+closed form (no autograd through the series), which improves speed and
+stability for interpolation and — via the raw API — for Euler /
+diffeomorphic deformation downstream.
 
-Mode amplitudes ``A`` carry a Bayes-by-Backprop variational posterior
-(Blundell et al. 2015, "Weight Uncertainty in Neural Networks",
-arXiv:1505.05424) instead of a point estimate: each amplitude is
-``A_mu + softplus(A_rho) * eps`` for held Gaussian noise ``eps``, giving
-analytic, reparameterised weight uncertainty (and cheap MC uncertainty via
-repeated forward passes) without the tuning finickiness of feature dropout.
+Module layout
+-------------
+1. Trigonometric and activation kernels  (``_SinCos``, ``_activation_*``)
+2. Mode sampling                         (``_draw_fourier_omega`` and helpers)
+3. Mode-bank builders                    (``_build_*_fourier_modes``)
+4. The field itself                      (:class:`FSF`)
 """
-import contextlib
 import math
-from typing import List, Optional, Sequence, Tuple, Union
+import warnings
+from typing import Optional, Tuple, Union
 
 import curlew
 import torch
@@ -22,6 +27,35 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from curlew.fields import BaseNF
+
+# Offset separating the phase draw from the frequency draw, which reseeds the
+# global RNG with ``seed`` (and ``seed + 1`` on the paired-Euler path).
+_PHASE_SEED_OFFSET = 104729
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 1. Trigonometric and activation kernels
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class _SinCos(torch.autograd.Function):
+    """Return (sin(x), cos(x)) with one transcendental pair per autograd pass."""
+
+    @staticmethod
+    def forward(ctx, proj: torch.Tensor):
+        s = torch.sin(proj)
+        c = torch.cos(proj)
+        ctx.save_for_backward(s, c)
+        return s, c
+
+    @staticmethod
+    def backward(ctx, gs: torch.Tensor, gc: torch.Tensor):
+        s, c = ctx.saved_tensors
+        return gs * c - gc * s
+
+
+def _sincos(proj: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    return _SinCos.apply(proj)
 
 
 def _activation_derivs(
@@ -43,9 +77,214 @@ def _activation_derivs(
     raise ValueError(f"unknown activation {name!r}")
 
 
-def _inv_softplus(y: torch.Tensor) -> torch.Tensor:
-    """Inverse of softplus, numerically safe for small and large ``y``."""
-    return y + torch.log(-torch.expm1(-y))
+# ═══════════════════════════════════════════════════════════════════════════
+# 2. Mode sampling
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _golden_order(n: int) -> torch.Tensor:
+    """
+    The permutation ``k_j = rank of {j rho}``, ``j = 0..n-1``, ``rho`` the golden ratio.
+
+    Visiting an even set of ``n`` points in this order gives every contiguous
+    run the spread of a Kronecker run, while the *set* stays exactly even.
+    """
+    rho = 0.5 * (5.0**0.5 - 1.0)
+    v = torch.frac(torch.arange(n, dtype=torch.float64) * rho)
+    return torch.argsort(torch.argsort(v))
+
+
+def _stratified_directions(n: int, dim: int, seed: int) -> torch.Tensor:
+    """
+    An **even set** of ``n`` unit axes, visited in **golden-ratio order**.
+
+    For a real sine series with random phase, ``+Omega`` and ``-Omega`` are the
+    same mode (the sign is absorbed into the amplitude and phase), so a
+    direction only matters as an *axis*: the half-turn ``[0, pi)`` in 2-D, the
+    hemisphere in 3-D.
+
+    **The set.** A Sobol draw leaves holes whose size and place depend on the
+    seed, and whose largest grows with ``n`` like the largest of ``n`` random
+    gaps. A Kronecker sequence bounds that growth but still has up to three gap
+    sizes. An even set removes it:
+
+    * 2-D: ``n`` axes exactly ``pi / n`` apart, ``theta_k = pi {(k + 1/2)/n + u0}``.
+    * 3-D: a hemispherical Fibonacci lattice, one axis per equal-area latitude
+      strip, ``cos Theta_k = (k + 1/2)/n``, with azimuth ``2 pi {k rho + u1}``.
+      Its largest empty cap stays at ~1.4-1.5x the radius of a cap holding
+      ``1/n`` of the hemisphere, for every ``n``.
+
+    **The order.** Axis ``j`` is the set's point ``k = _golden_order(n)[j]``.
+    The caller hands axes out by wavelength rank (longest first), so in natural
+    order ``k = j`` the coarsest modes would share one sector (2-D) or one
+    latitude strip (3-D). The golden permutation spreads any contiguous run
+    like a Kronecker run, at no cost to the set.
+
+    **The seed.** A hemisphere has a privileged pole and equator, and a fixed
+    set a privileged orientation. 2-D's offset ``u0`` is a random rotation of
+    the half-turn; in 3-D a seeded, uniformly random rotation (Shoemake's
+    random unit quaternion) turns the whole lattice. A seed therefore only
+    rotates the set: hole sizes and the order of the axes do not depend on it.
+
+    This changes only the *discrepancy* of the draw, not its measure -- the
+    axes remain uniform -- so the amplitude prior in
+    :meth:`FSF._build_amplitude_denom` is untouched.
+    """
+    g = torch.Generator().manual_seed(int(seed) + 8191)
+    k = _golden_order(n).to(torch.float64)
+    if dim == 2:
+        off = torch.rand((), generator=g, dtype=torch.float64)
+        a = math.pi * torch.frac((k + 0.5) / n + off)
+        return torch.stack([torch.cos(a), torch.sin(a)], dim=1)
+    rho = 0.5 * (5.0**0.5 - 1.0)
+    off = torch.rand(2, generator=g, dtype=torch.float64)
+    az = 2.0 * math.pi * torch.frac(k * rho + off[0])
+    cz = (k + 0.5) / n                                   # upper hemisphere: axes
+    sn = (1.0 - cz * cz).clamp_min(0.0).sqrt()
+    d = torch.stack([sn * torch.cos(az), sn * torch.sin(az), cz], dim=1)
+    # Uniform random rotation from a random unit quaternion (Shoemake 1992).
+    u1, u2, u3 = torch.rand(3, generator=g, dtype=torch.float64)
+    s1, s2 = (1.0 - u1).sqrt(), u1.sqrt()
+    w, x = s1 * torch.sin(2 * math.pi * u2), s1 * torch.cos(2 * math.pi * u2)
+    y, z = s2 * torch.sin(2 * math.pi * u3), s2 * torch.cos(2 * math.pi * u3)
+    R = torch.stack([
+        torch.stack([1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)]),
+        torch.stack([2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)]),
+        torch.stack([2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]),
+    ])
+    return d @ R.T
+
+
+def _sample_wavelengths(
+    u0: torch.Tensor,
+    length_scale_range: Tuple[float, float],
+    sampling: str,
+) -> torch.Tensor:
+    """
+    Map unit Sobol coordinate ``u0 ∈ (0, 1)`` to wavelengths in ``length_scale_range``.
+
+    ``"log"`` (default) is log-uniform in λ, so a linear histogram piles up at
+    the fine end. ``"uniform"`` is uniform in λ.
+    """
+    lo = float(length_scale_range[0])
+    hi = float(length_scale_range[1])
+    # hi == lo is legitimate: a single-wavelength bank (all modes on one
+    # radius, directions still spread). Both branches below degenerate to the
+    # constant `lo` in that case, so only hi < lo is an error.
+    if lo <= 0.0 or hi <= 0.0 or hi < lo:
+        raise ValueError(
+            f"length_scale_range must satisfy 0 < min <= max, got {length_scale_range}"
+        )
+    lo_t = torch.tensor(lo, dtype=u0.dtype, device=u0.device)
+    hi_t = torch.tensor(hi, dtype=u0.dtype, device=u0.device)
+    if sampling == "log":
+        log_lo = torch.log10(lo_t)
+        log_hi = torch.log10(hi_t)
+        ten = torch.tensor(10.0, dtype=u0.dtype, device=u0.device)
+        return torch.pow(ten, log_lo + u0 * (log_hi - log_lo))
+    if sampling == "uniform":
+        return lo_t + u0 * (hi_t - lo_t)
+    raise ValueError(
+        f"wavelength_sampling must be 'log' or 'uniform', got {sampling!r}"
+    )
+
+
+def _draw_fourier_omega(
+    *,
+    rff_features: int,
+    length_scale_range: Tuple[float, float],
+    input_dim: int,
+    lift_dim: int,
+    stochastic_scales: bool,
+    seed: int,
+    stratify_directions: bool = False,
+    n_directions: Optional[int] = None,
+    wavelength_sampling: str = "log",
+) -> torch.Tensor:
+    """Sample fixed Fourier rows ``Ω_k`` with shape ``(F, input_dim + lift_dim)``."""
+    d_in = input_dim + lift_dim
+
+    torch.manual_seed(seed)
+
+    sobol = torch.quasirandom.SobolEngine(dimension=d_in + 1, scramble=True)
+    u = (
+        sobol.draw(rff_features)
+        .to(device=curlew.device, dtype=curlew.dtype)
+        .clamp(1e-6, 1 - 1e-6)
+    )
+    lengths = _sample_wavelengths(u[:, 0], length_scale_range, wavelength_sampling)
+    k_raw = torch.special.ndtri(u[:, 1:].clamp(1e-6, 1 - 1e-6))
+
+    if not stochastic_scales:
+        k_raw = F.normalize(k_raw, dim=1)
+
+    if stratify_directions or n_directions is not None:
+        if stochastic_scales or lift_dim != 0 or input_dim not in (2, 3):
+            warnings.warn(
+                "stratify_directions / n_directions are only applied for "
+                "lift_dim=0, input_dim in (2, 3) and stochastic_scales=False; "
+                "ignoring.",
+                RuntimeWarning,
+            )
+        else:
+            # longest wavelength first, so contiguous runs = radial bands
+            order = torch.argsort(lengths, descending=True)
+            n_dir = rff_features if n_directions is None else int(n_directions)
+            if not 1 <= n_dir <= rff_features:
+                raise ValueError(
+                    f"n_directions must be in [1, rff_features={rff_features}], "
+                    f"got {n_directions}"
+                )
+            dirs = _stratified_directions(n_dir, input_dim, seed).to(
+                device=k_raw.device, dtype=k_raw.dtype
+            )
+            # Cycling the direction index over wavelength-sorted modes makes the
+            # bank a *polar grid*: n_dir rays, each carrying ~F/n_dir radii
+            # spread across the whole range. n_dir == F recovers the plain
+            # stratified bank exactly (arange % F is the identity), so the
+            # existing path is untouched.
+            k_raw = k_raw.clone()
+            k_raw[order] = dirs[torch.arange(rff_features) % n_dir]
+
+    return 2.0 * torch.pi * k_raw / lengths.unsqueeze(1)
+
+
+def _paired_spatial_direction(
+    u: torch.Tensor,
+    axis: torch.Tensor,
+    fallback: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Orthogonal companion ``v`` with ``|v| = |u|`` row-wise and ``u · v = 0``.
+
+    ``fallback`` supplies random directions when ``u`` is parallel to ``axis``.
+    """
+    mag = u.norm(dim=1, keepdim=True).clamp(min=1e-12)
+    u_hat = u / mag
+    ax = axis / axis.norm().clamp(min=1e-12)
+    cross = torch.linalg.cross(u_hat, ax.expand_as(u_hat), dim=1)
+    cn = cross.norm(dim=1)
+    parallel = cn < 1e-6
+    if parallel.any():
+        w = fallback[parallel]
+        w = w - (w * u_hat[parallel]).sum(1, keepdim=True) * u_hat[parallel]
+        wn = w.norm(dim=1, keepdim=True).clamp(min=1e-12)
+        cross[parallel] = w / wn.squeeze(1)
+        cn = cross.norm(dim=1)
+    v_hat = cross / cn.unsqueeze(1).clamp(min=1e-12)
+    return v_hat * mag
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 3. Mode-bank builders
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _out_scale(scale: float, rff_features: int) -> torch.Tensor:
+    """Global output scale ``s/√F``."""
+    return torch.tensor(
+        scale / math.sqrt(rff_features), dtype=curlew.dtype, device=curlew.device
+    )
 
 
 def _build_fourier_modes(
@@ -54,132 +293,239 @@ def _build_fourier_modes(
     length_scale_range: Tuple[float, float],
     input_dim: int,
     lift_dim: int,
-    freq_sampling: str,
     stochastic_scales: bool,
     scale: float,
     seed: int,
+    stratify_directions: bool = False,
+    n_directions: Optional[int] = None,
+    wavelength_sampling: str = "log",
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Sample fixed Fourier directions and return ``(fourier_projection, freq_scaling, out_scale)``.
+    Sample fixed Fourier directions (Sobol quasi-Monte-Carlo) and return
+    ``(fourier_projection, freq_scaling, out_scale)``.
     """
-    d_in = input_dim + lift_dim
-    torch.manual_seed(seed)
-    lo = torch.log10(
-        torch.tensor(length_scale_range[0], dtype=curlew.dtype, device=curlew.device)
+    omega = _draw_fourier_omega(
+        rff_features=rff_features,
+        length_scale_range=length_scale_range,
+        input_dim=input_dim,
+        lift_dim=lift_dim,
+        stochastic_scales=stochastic_scales,
+        seed=seed,
+        stratify_directions=stratify_directions,
+        n_directions=n_directions,
+        wavelength_sampling=wavelength_sampling,
     )
-    hi = torch.log10(
-        torch.tensor(length_scale_range[1], dtype=curlew.dtype, device=curlew.device)
-    )
-
-    if freq_sampling == "quasi":
-        sobol = torch.quasirandom.SobolEngine(dimension=d_in + 1, scramble=True)
-        u = sobol.draw(rff_features).to(
-            device=curlew.device, dtype=curlew.dtype
-        ).clamp(1e-6, 1 - 1e-6)
-        lengths = torch.pow(
-            torch.tensor(10.0, dtype=curlew.dtype, device=curlew.device),
-            lo + u[:, 0] * (hi - lo),
-        )
-        k_raw = torch.special.ndtri(u[:, 1:].clamp(1e-6, 1 - 1e-6))
-    else:
-        lengths = torch.pow(
-            10.0,
-            torch.linspace(lo, hi, rff_features, dtype=curlew.dtype, device=curlew.device),
-        )
-        k_raw = torch.randn(
-            rff_features, d_in, device=curlew.device, dtype=curlew.dtype
-        )
-
-    if not stochastic_scales:
-        k_raw = F.normalize(k_raw, dim=1)
-
-    omega = 2.0 * torch.pi * k_raw / lengths.unsqueeze(1)
-    fourier_projection = omega.T
     freq_scaling = (omega**2).sum(1).clamp(min=1e-8)
-    out_scale = torch.tensor(
-        scale / math.sqrt(rff_features), dtype=curlew.dtype, device=curlew.device
+    return omega.T, freq_scaling, _out_scale(scale, rff_features)
+
+
+def _plane_basis(normal: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Orthonormal pair ``(e1, e2)`` spanning the plane perpendicular to ``normal``."""
+    n = normal.reshape(-1).to(dtype=curlew.dtype, device=curlew.device)
+    if int(n.numel()) != 3:
+        raise ValueError(f"plane basis expects a 3-vector, got length {int(n.numel())}")
+    n = n / n.norm().clamp_min(1e-12)
+    ref = n.new_tensor(
+        [0.0, 1.0, 0.0] if float(n[:2].norm()) < 1e-6 else [0.0, 0.0, 1.0]
     )
-    return fourier_projection, freq_scaling, out_scale
+    e1 = torch.linalg.cross(n, ref)
+    e1 = e1 / e1.norm().clamp_min(1e-12)
+    e2 = torch.linalg.cross(n, e1)
+    e2 = e2 / e2.norm().clamp_min(1e-12)
+    return e1, e2
+
+
+def _build_cylindrical_fourier_modes(
+    *,
+    hinge,
+    rff_features: int,
+    length_scale_range: Tuple[float, float],
+    lift_dim: int,
+    stochastic_scales: bool,
+    scale: float,
+    seed: int,
+    stratify_directions: bool = False,
+    n_directions: Optional[int] = None,
+    wavelength_sampling: str = "log",
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    2-D Fourier bank embedded in the plane perpendicular to ``hinge``.
+
+    Directions and wavelengths are drawn as in 2-D (``n_directions`` on the
+    circle, Sobol radii), then lifted to R³ on an orthonormal basis of that
+    plane. The result is a cylindrical field: ``Ω · hinge = 0`` identically,
+    with ``F`` features and ``n_directions`` in-plane rays — not a 3-D sphere
+    draw projected after the fact.
+    """
+    omega2 = _draw_fourier_omega(
+        rff_features=rff_features,
+        length_scale_range=length_scale_range,
+        input_dim=2,
+        lift_dim=lift_dim,
+        stochastic_scales=stochastic_scales,
+        seed=seed,
+        stratify_directions=stratify_directions,
+        n_directions=n_directions,
+        wavelength_sampling=wavelength_sampling,
+    )
+    hinge_t = torch.as_tensor(hinge, dtype=curlew.dtype, device=curlew.device)
+    e1, e2 = _plane_basis(hinge_t)
+    spatial = omega2[:, :2] @ torch.stack((e1, e2), dim=0)
+    omega = spatial if lift_dim == 0 else torch.cat([spatial, omega2[:, 2:]], dim=1)
+    freq_scaling = (omega**2).sum(1).clamp(min=1e-8)
+    return omega.T, freq_scaling, _out_scale(scale, rff_features)
+
+
+def _build_paired_fourier_modes(
+    *,
+    rff_features: int,
+    length_scale_range: Tuple[float, float],
+    input_dim: int,
+    lift_dim: int,
+    stochastic_scales: bool,
+    scale: float,
+    seed: int,
+    pair_axis=None,
+    wavelength_sampling: str = "log",
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Paired Euler frequency banks for full 3-D :math:`\\nabla\\alpha\\times\\nabla\\beta`.
+
+    Mode ``k`` shares wavelength (and lift frequencies) in both slots; spatial
+    directions are orthogonal companions with equal magnitude so the diagonal
+    cross-product term is non-degenerate.
+
+    Returns ``(proj_alpha, proj_beta, freq_scaling, out_scale)``.
+    """
+    if input_dim != 3:
+        raise ValueError(f"paired Fourier modes require input_dim=3, got {input_dim}")
+
+    omega_a = _draw_fourier_omega(
+        rff_features=rff_features,
+        length_scale_range=length_scale_range,
+        input_dim=input_dim,
+        lift_dim=lift_dim,
+        stochastic_scales=stochastic_scales,
+        seed=seed,
+        wavelength_sampling=wavelength_sampling,
+    )
+    torch.manual_seed(seed + 1)
+    fallback = torch.randn(
+        rff_features, input_dim, dtype=curlew.dtype, device=curlew.device
+    )
+
+    if pair_axis is None:
+        axis = torch.zeros(input_dim, dtype=curlew.dtype, device=curlew.device)
+        axis[2] = 1.0
+    else:
+        axis = torch.as_tensor(
+            pair_axis, dtype=curlew.dtype, device=curlew.device
+        ).reshape(-1)
+        if axis.numel() != input_dim:
+            raise ValueError(
+                f"pair_axis must have length {input_dim}, got {axis.numel()}"
+            )
+
+    u = omega_a[:, :input_dim]
+    omega_b = omega_a.clone()
+    omega_b[:, :input_dim] = _paired_spatial_direction(u, axis, fallback)
+
+    freq_scaling = (omega_a**2).sum(1).clamp(min=1e-8)
+    return omega_a.T, omega_b.T, freq_scaling, _out_scale(scale, rff_features)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 4. The field
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 class FSF(BaseNF):
     """
     FourierSeriesField — learnable scalar potential as a damped random Fourier series.
 
-    Each mode uses amplitude ``A`` and phase ``phi`` (phase shifts the sinusoid;
-    amplitude can be regularised or dropped out independently of phase).
-
     Two operating modes, selected by ``activation``:
 
     ── Linear mode (``activation=None``, default) ─────────────────────────────
 
-        φ(x) = (s/√F) Σ_k  A_k sin(Ω_k·x + φ_k) / |Ω_k|^{freq_damp}
+        φ(x) = (s/√F) Σ_k  (A_k cos(Ω_k·x) + B_k sin(Ω_k·x)) / |Ω_k|^{freq_damp}
 
-    With the default ``freq_damp=2`` this matches the legacy ``/ |Ω_k|²``
-    damping. Lower values (e.g. ``1``) weaken high-frequency suppression so
-    short-wavelength modes contribute more strongly to ``∇φ`` for the same ``A_k``.
+    ``A_k`` and ``B_k`` are both parameters. That is the Cartesian form of
+    ``R_k sin(Ω_k·x + φ_k)``: same span, but the ``(R, φ)`` chart is singular
+    as ``R → 0`` (Lázaro-Gredilla et al. 2010), which is where a Euler
+    potential starts. With i.i.d. Gaussian ``(A, B)`` the prior over φ is a
+    stationary GP.
+
+    With the default ``freq_damp=2`` this is the ``/ |Ω_k|²`` damping. Lower
+    values (e.g. ``1``) weaken high-frequency suppression so short-wavelength
+    modes contribute more strongly to ``∇φ`` for the same amplitudes.
+    ``freq_damp=0`` removes the damping (``D_k = 1``).
 
     ── Activated mode (``activation`` given) ───────────────────────────────────
 
-        φ(x) = (s/√F) Σ_k  A_k σ( sin(Ω_k·x + φ_k) + b_k ) / |Ω_k|²
+        φ(x) = (s/√F) Σ_k C_k σ(sin(Ω_k·x + φ_k) + b_k) / |Ω_k|^{freq_damp}
 
-        ``bias`` (``b_k``) breaks symmetry for vergent / asymmetric folds.
-        The activation input is a sinusoid in [-1, 1], which keeps σ' active
-        at initialisation and gives natural hinge loci at sin(·)=0.
+        The phase ``φ_k`` is a raw angle (``phi_mu``), initialised uniformly
+        from a seeded draw, and the signed outer amplitude ``C_k`` controls
+        mode strength. Because ``C`` carries the amplitude, the phase lives on
+        the circle alone and the angle is its natural chart: ``sin(θ + φ)`` is
+        smooth in ``φ`` everywhere. (A Cartesian ``atan2(B, A)`` chart would
+        add an unseen radius whose drift rescales the phase learning rate by
+        ``1/|(A, B)|``.) Separating phase from amplitude keeps the activation
+        input in ``[-1, 1]``. ``bias`` (``b_k``) breaks symmetry for vergent /
+        asymmetric folds.
 
-    Analytic derivatives (spatial coordinates only when ``lift_dim > 0``):
+    Analytic derivatives (spatial coordinates only when ``lift_dim > 0``), with
+    ``D_k = |Ω_k|^{freq_damp}`` and ``θ = Ω·x``:
 
-        Linear:   ∇φ = (s/√F) Σ A_k cos(Ω·x+φ)/|Ω|² · Ω_k
-                  H_φ = (s/√F) Σ −A_k sin(Ω·x+φ)/|Ω|² · Ω_k Ω_kᵀ
+        Linear:   ∇φ = (s/√F) Σ (B_k cos θ − A_k sin θ)/D_k · Ω_k
+                  H_φ = (s/√F) Σ −(A_k cos θ + B_k sin θ)/D_k · Ω_k Ω_kᵀ
 
         Activated: chain rule through σ(sin(·)+b) — see ``gradient_and_hessian``.
 
-    Optional features
-    -----------------
-    ``lift_dim``        : append fault-sheet coordinates (Clebsch / fault lift).
-    ``domain``          : smooth box envelope on φ (and exact envelope derivatives).
-    Weight uncertainty (Bayes by Backprop) : ``A`` is a diagonal Gaussian
-                          posterior (``A_mu``, ``A_rho``) rather than a point
-                          estimate, with a scale-mixture-of-Gaussians prior
-                          (``prior_pi``, ``prior_sigma1``, ``prior_sigma2``).
-                          :meth:`kl_loss` gives the complexity cost (add it to
-                          training via ``HSet.kl_loss``); :meth:`mc_forward` /
-                          :meth:`weight_sample` give cheap MC uncertainty.
-                          During :meth:`~curlew.fields.BaseNF.fit`, a fresh
-                          weight sample is drawn each epoch on all nested
-                          :class:`FSF` instances (Clebsch β/α, time-blended
-                          layers, or a scalar field fit directly); the field
-                          reverts to its posterior mean (``A_mu``) once
-                          training finishes, for deterministic downstream use.
+    Prior interpretation
+    --------------------
+    The ``1/|Ω|^{freq_damp}`` damping is the high-frequency tail of a **Matérn
+    prior with ν = freq_damp**, in any dimension: modes are drawn from
+    (uniform on ``S^{d-1}``) × (log-uniform radius), a measure whose density
+    with respect to Lebesgue ``dω`` is ``∝ r^{-d}``, so with amplitude variance
+    ``v(r) = D(r)^{-2}`` the induced spectral density is
+
+        S(r) ∝ v(r) · r^{-d} = r^{-(2·freq_damp + d)}
+
+    ``freq_damp=0`` drops the extra ``r^{-2ν}`` factor (``D_k = 1``). The
+    remaining ``r^{-d}`` is the sampling measure, not amplitude damping.
+
+    This diverges as ``r → 0`` and is kept finite only by the
+    ``length_scale_range`` cutoff, so that band is a load-bearing prior
+    assumption rather than a pure quadrature choice.
 
     Parameters passed through ``initField`` / constructor keywords
     ----------------------------------------------------------------
-    rff_features, length_scale_range, freq_sampling, activation, scale,
-    learning_rate, lift_dim, posterior_rho_init, prior_pi, prior_sigma1,
-    prior_sigma2, domain, taper, taper_frac, envelope_floor,
-    stochastic_scales, xavier_amplitudes, freq_damp
+    rff_features, length_scale_range, activation, scale, learning_rate,
+    lift_dim, stochastic_scales, stratify_directions, n_directions,
+    xavier_amplitudes, freq_damp, wavelength_sampling, energy_normalised
     """
+
+    # ── Construction ────────────────────────────────────────────────────────
 
     def initField(
         self,
         rff_features: int,
-        length_scale_range: Tuple[float, float],
-        freq_sampling: str = "random",
+        length_scale_range: Optional[Tuple[float, float]] = None,
         activation: Optional[str] = None,
         scale: float = 1.0,
         learning_rate: float = 1e-1,
         lift_dim: int = 0,
-        posterior_rho_init: float = 0.0,
-        prior_pi: float = 0.5,
-        prior_sigma1: float = 1.0,
-        prior_sigma2: float = 0.002,
-        domain: Optional[Sequence[Tuple[float, float]]] = None,
-        taper: Union[None, float, Sequence[float]] = None,
-        taper_frac: Union[None, float, Sequence[float]] = None,
-        envelope_floor: float = 0.0,
-        stochastic_scales: bool = True,
+        stochastic_scales: bool = False,
+        stratify_directions: bool = False,
+        n_directions: Optional[int] = None,
         xavier_amplitudes: bool = True,
         freq_damp: float = 2.0,
+        wavelength_sampling: str = "log",
+        fourier_projection: Optional[torch.Tensor] = None,
+        freq_scaling: Optional[torch.Tensor] = None,
+        out_scale: Optional[torch.Tensor] = None,
+        energy_normalised: bool = False,
     ):
         """
         Build Fourier frequencies and learnable mode parameters.
@@ -189,10 +535,8 @@ class FSF(BaseNF):
         rff_features : int
             Number of Fourier modes F.
         length_scale_range : (float, float)
-            Minimum and maximum wavelength for log-uniform frequency sampling.
-        freq_sampling : ``"random"`` | ``"quasi"``
-            ``"quasi"`` uses a Sobol sequence; ``"random"`` uses evenly spaced
-            log wavelengths plus Gaussian directions (legacy FSF behaviour).
+            Minimum and maximum wavelength. Default sampling is log-uniform
+            in λ (see ``wavelength_sampling``).
         activation : None | ``"tanh"`` | ``"cubic"`` | ``"softplus"``
             Nonlinearity applied to each mode in activated mode.
         scale : float
@@ -202,279 +546,282 @@ class FSF(BaseNF):
         lift_dim : int
             Extra input coordinates (e.g. fault sheet labels). Derivatives
             are returned with respect to spatial ``input_dim`` only.
-        posterior_rho_init : float
-            Initial value of the (unconstrained) posterior std parameter
-            ``A_rho`` for every mode; the initial std is
-            ``softplus(posterior_rho_init)``. Default ``-5.0`` gives a small
-            initial std (≈0.0067) so training starts close to a point
-            estimate and grows uncertainty only where the loss favours it.
-        prior_pi : float
-            Mixture weight of the wide prior component (Blundell et al. 2015,
-            eq. 7). Must lie in (0, 1).
-        prior_sigma1, prior_sigma2 : float
-            Std of the wide and narrow scale-mixture prior components
-            respectively (``prior_sigma1 > prior_sigma2``, e.g. a "spike and
-            slab"-like prior). Both must be positive.
-        domain, taper, taper_frac, envelope_floor
-            Optional separable soft-box envelope on φ.
         stochastic_scales : bool
-            If True (default), direction vectors are not normalised and |Ω|
-            follows a chi-like distribution (as in ``curlew.fields.NFF``).
+            If True, direction vectors are not normalised and |Ω| follows a
+            chi-like distribution (as in ``curlew.fields.NFF``).
+        stratify_directions : bool
+            If True, replace the Sobol directions with an even set of axes
+            (2-D: equal spacing; 3-D: hemispherical Fibonacci lattice) in
+            golden-ratio order over the wavelength-sorted modes, so no seed
+            leaves a hole in the angular coverage. Only applied for ``lift_dim=0``, ``input_dim in (2, 3)``
+            and ``stochastic_scales=False``; warns and is ignored otherwise.
+            See :func:`_stratified_directions`.
+        n_directions : int, optional
+            Number of *distinct* wave directions to share across the bank — a
+            **polar grid** of ``n_directions`` rays. Implies
+            ``stratify_directions``. ``None`` (default) or ``rff_features``
+            gives one direction per mode, i.e. exactly the stratified bank.
+
+            Each ray carries about ``rff_features / n_directions`` Sobol
+            wavelengths interleaved across the whole ``length_scale_range``
+            (not a tensor-product grid: radii differ from ray to ray).
+
+            Sharing a direction is also what makes ``integrator="shear"``
+            cheap: those shears commute and merge, cutting sequential depth
+            from ``F`` to ``n_directions``. Too few rays and the field cannot
+            fold in an arbitrary direction — a genuine trade, not a free win.
         xavier_amplitudes : bool
-            If True (default), initialise mode amplitudes ``A`` with Xavier
-            normal (as legacy ``w1``). Required for geology / scalar-field
-            fitting where zero amplitudes stall optimisation. Set False for
-            Clebsch potentials that are scaled manually after construction.
+            If True (default), initialise mode amplitudes with Xavier
+            normal (as legacy ``w1``). In linear mode ``A`` and ``B`` share the
+            old variance (each scaled by ``1/√2``). Required for geology /
+            scalar-field fitting where zero amplitudes stall optimisation.
+            Set False for potentials that are scaled manually after construction.
+        freq_damp : float
+            Exponent ν of the ``1/|Ω|^ν`` amplitude damping. Must be
+            non-negative. ``0`` turns damping off (``D_k = 1``).
+        wavelength_sampling : ``"log"`` | ``"uniform"``
+            How the radial coordinate is mapped onto ``length_scale_range``.
+            ``"log"`` (default) is log-uniform in λ — equal mass per decade,
+            so a linear histogram of wavelengths piles up at ``λ_min``.
+            ``"uniform"`` is uniform in λ.
+        fourier_projection, freq_scaling, out_scale
+            Optional pre-built frequency buffers (see
+            :func:`_build_fourier_modes` / :func:`_build_paired_fourier_modes`).
+            When ``fourier_projection`` is set, the other two must be supplied
+            and ``rff_features`` / ``length_scale_range`` are not used for
+            sampling (but ``rff_features`` must still match the mode count).
+        energy_normalised : bool
+            Cubic activation only. Divide each mode by the RMS of its own
+            gradient, ``√(e(b_k)/e(0))`` with ``e(b) = b⁴ − b²/2 + 5/8`` (the
+            full-period mean of ``(σ'(sin θ + b) cos θ)²`` up to a constant).
+            ``C_k²`` then fixes the mode's gradient energy ``⟨‖∇φ_k‖²⟩`` (the
+            speed, when φ is a stream function) and ``bias`` / ``phi``
+            only change its shape. Default False (unchanged behaviour).
         """
-        assert freq_sampling in ("random", "quasi"), (
-            f"freq_sampling must be 'random' or 'quasi', got {freq_sampling!r}"
-        )
-        assert activation in (None, "tanh", "cubic", "softplus"), (
-            f"activation must be None, 'tanh', 'cubic', or 'softplus', "
-            f"got {activation!r}"
-        )
-        if not 0.0 < prior_pi < 1.0:
-            raise ValueError("prior_pi must be in (0, 1)")
-        if not (prior_sigma1 > 0 and prior_sigma2 > 0):
-            raise ValueError("prior_sigma1 and prior_sigma2 must be positive")
+        if activation not in (None, "tanh", "cubic", "softplus"):
+            raise ValueError(
+                "activation must be None, 'tanh', 'cubic', or 'softplus', "
+                f"got {activation!r}"
+            )
+        if freq_damp < 0:
+            raise ValueError(f"freq_damp must be non-negative, got {freq_damp}")
+        if wavelength_sampling not in ("log", "uniform"):
+            raise ValueError(
+                "wavelength_sampling must be 'log' or 'uniform', got "
+                f"{wavelength_sampling!r}"
+            )
+        if length_scale_range is None and fourier_projection is None:
+            raise ValueError("length_scale_range is required")
+        if energy_normalised and activation != "cubic":
+            raise ValueError(
+                "energy_normalised needs activation='cubic' (closed-form energy), "
+                f"got {activation!r}"
+            )
 
         self.activation = activation
         self.lift_dim = int(lift_dim)
-        self.prior_pi = float(prior_pi)
-        self.prior_sigma1 = float(prior_sigma1)
-        self.prior_sigma2 = float(prior_sigma2)
-        self._posterior_rho_init = float(posterior_rho_init)
-        self._eps: Optional[torch.Tensor] = None  # held reparameterisation noise; None => posterior mean
-        if freq_damp <= 0:
-            raise ValueError(f"freq_damp must be positive, got {freq_damp}")
         self.freq_damp = float(freq_damp)
+        self.stochastic_scales = bool(stochastic_scales)
+        self.wavelength_sampling = str(wavelength_sampling)
+        self.energy_normalised = bool(energy_normalised)
 
-        projection, freq_scaling, out_scale = _build_fourier_modes(
-            rff_features=rff_features,
-            length_scale_range=length_scale_range,
-            input_dim=self.input_dim,
-            lift_dim=self.lift_dim,
-            freq_sampling=freq_sampling,
-            stochastic_scales=stochastic_scales,
-            scale=scale,
-            seed=self.seed,
-        )
+        # ── Frequency bank ──────────────────────────────────────────────────
+        if fourier_projection is None:
+            projection, freq_scaling, out_scale = _build_fourier_modes(
+                rff_features=rff_features,
+                length_scale_range=length_scale_range,
+                input_dim=self.input_dim,
+                lift_dim=self.lift_dim,
+                stochastic_scales=stochastic_scales,
+                scale=scale,
+                seed=self.seed,
+                stratify_directions=stratify_directions,
+                n_directions=n_directions,
+                wavelength_sampling=self.wavelength_sampling,
+            )
+        else:
+            projection = self._validate_prebuilt(
+                fourier_projection, freq_scaling, out_scale, rff_features
+            )
         self.register_buffer("fourier_projection", projection)
         self.register_buffer("freq_scaling", freq_scaling)
         self.register_buffer("out_scale", out_scale)
 
         # ── Learnable mode parameters ───────────────────────────────────────
-        # Amplitudes are a diagonal Gaussian posterior q(A|A_mu, A_rho), sampled via
-        # the reparameterisation trick: A = A_mu + softplus(A_rho) * eps (see sampled_A).
-        self.A_mu = nn.Parameter(torch.zeros(rff_features, dtype=curlew.dtype, device=curlew.device))
-        if xavier_amplitudes:
-            nn.init.xavier_normal_(self.A_mu.unsqueeze(0))  # (1, F) for fan_in scaling
-        self.A_rho = nn.Parameter(
-            torch.full((rff_features,), self._posterior_rho_init, dtype=curlew.dtype, device=curlew.device)
-        )
-        self.phi = nn.Parameter(torch.zeros(rff_features, dtype=curlew.dtype, device=curlew.device))
-        if activation is not None:
-            self.bias = nn.Parameter(
-                torch.zeros(rff_features, dtype=curlew.dtype, device=curlew.device)
+        zeros = torch.zeros(rff_features, dtype=curlew.dtype, device=curlew.device)
+        if activation is None:
+            self.A_mu = nn.Parameter(zeros.clone())
+            self.B_mu = nn.Parameter(zeros.clone())
+            # Cartesian pair (A cos θ + B sin θ). Xavier each then /√2 so the
+            # initial field variance matches the old one-amplitude series.
+            if xavier_amplitudes:
+                nn.init.xavier_normal_(self.A_mu.unsqueeze(0))
+                nn.init.xavier_normal_(self.B_mu.unsqueeze(0))
+                scale = 1.0 / math.sqrt(2.0)
+                self.A_mu.data.mul_(scale)
+                self.B_mu.data.mul_(scale)
+        else:
+            # C is the signed outer amplitude; phi_mu is the raw phase angle.
+            self.C_mu = nn.Parameter(zeros.clone())
+            if xavier_amplitudes:
+                nn.init.xavier_normal_(self.C_mu.unsqueeze(0))
+            self.bias = nn.Parameter(zeros.clone())
+            # Seed the learnable phase from a private generator (not the
+            # global RNG, which `_draw_fourier_omega` reseeds).
+            phase_gen = torch.Generator().manual_seed(
+                int(self.seed) + _PHASE_SEED_OFFSET
             )
+            phi = (
+                2.0
+                * math.pi
+                * torch.rand(rff_features, generator=phase_gen, dtype=torch.float64)
+            ).to(dtype=curlew.dtype, device=curlew.device)
+            self.phi_mu = nn.Parameter(phi)
 
-        # ── Optional domain envelope ──────────────────────────────────────────
-        self.windowed = domain is not None
-        if self.windowed:
-            if len(domain) != self.input_dim:
-                raise ValueError(f"domain needs {self.input_dim} (lo, hi) pairs")
-            bounds = torch.tensor(domain, dtype=curlew.dtype, device=curlew.device)
-            if taper is None:
-                if taper_frac is None:
-                    raise ValueError("supply taper or taper_frac with domain")
-                taper = (torch.tensor(taper_frac, dtype=curlew.dtype, device=curlew.device)
-                         * (bounds[:, 1] - bounds[:, 0])).tolist()
-            width = torch.tensor(taper, dtype=curlew.dtype, device=curlew.device)
-            if width.ndim == 0:
-                width = width.expand(self.input_dim).clone()
-            if not torch.all(width > 0) or not torch.all(bounds[:, 1] > bounds[:, 0]):
-                raise ValueError("taper widths and domain extents must be positive")
-            self.register_buffer("win_lo", bounds[:, 0])
-            self.register_buffer("win_hi", bounds[:, 1])
-            self.register_buffer("win_w", width)
-            if not 0.0 <= envelope_floor < 1.0:
-                raise ValueError("envelope_floor must be in [0, 1)")
-            self.envelope_floor = float(envelope_floor)
-
+        self._build_derived_buffers()
         self.to(curlew.device)
         self.init_optim(lr=learning_rate)
 
+    def _validate_prebuilt(
+        self,
+        projection: torch.Tensor,
+        freq_scaling: Optional[torch.Tensor],
+        out_scale: Optional[torch.Tensor],
+        rff_features: int,
+    ) -> torch.Tensor:
+        """Check an externally supplied frequency bank and return the projection."""
+        if freq_scaling is None or out_scale is None:
+            raise ValueError(
+                "freq_scaling and out_scale are required when "
+                "fourier_projection is pre-built"
+            )
+        n_modes = projection.shape[1]
+        if n_modes != rff_features:
+            raise ValueError(
+                f"fourier_projection has {n_modes} modes, "
+                f"expected rff_features={rff_features}"
+            )
+        expected_rows = self.input_dim + self.lift_dim
+        if projection.shape[0] != expected_rows:
+            raise ValueError(
+                f"fourier_projection rows {projection.shape[0]} != "
+                f"input_dim + lift_dim ({expected_rows})"
+            )
+        return projection
+
+    def _build_derived_buffers(self) -> None:
+        """
+        Precompute everything that depends only on the (fixed) frequency bank:
+        spatial frequency rows, their outer products, and the amplitude divisor.
+        """
+        ox = self.fourier_projection[: self.input_dim, :].T.contiguous()
+        n_modes, d = ox.shape
+        self.register_buffer("omega_spatial", ox)
+        self.register_buffer(
+            "omega_outer",
+            (ox.unsqueeze(-1) * ox.unsqueeze(-2)).reshape(n_modes, d * d).contiguous(),
+        )
+        # D_k = |Ω_k|^{freq_damp}; freq_scaling is |Ω_k|², hence the half power.
+        # freq_damp=0 → D_k = 1 (no damping); avoid 0^0 if any |Ω| is zero.
+        if self.freq_damp == 0.0:
+            denom = torch.ones_like(self.freq_scaling)
+        else:
+            denom = self.freq_scaling.pow(0.5 * self.freq_damp)
+        self.register_buffer("amplitude_denom", denom)
+
+    def project_frequencies_onto_plane(self, normal) -> "FSF":
+        """
+        Project every spatial wavevector onto the plane perpendicular to ``normal``.
+
+        After this, ``φ(x + s n) = φ(x)``: the field is invariant along
+        ``n``. Wavelengths ``|Ω|`` are kept. Modes that were parallel to
+        ``n`` are replaced by an in-plane direction at the same ``|Ω|``.
+        Lift-frequency rows (if any) are left unchanged.
+        """
+        n = torch.as_tensor(
+            normal, dtype=self.omega_spatial.dtype, device=self.omega_spatial.device
+        ).reshape(-1)
+        if int(n.numel()) != self.input_dim:
+            raise ValueError(
+                f"normal must have length {self.input_dim}, got {int(n.numel())}"
+            )
+        n = n / n.norm().clamp_min(1e-12)
+        ox = self.fourier_projection[: self.input_dim, :].T.contiguous()
+        mag = ox.norm(dim=-1, keepdim=True).clamp_min(1e-30)
+        ox = ox - (ox @ n).unsqueeze(-1) * n
+        inplane = ox.norm(dim=-1, keepdim=True)
+        collapsed = inplane.squeeze(-1) < (1e-12 * mag.squeeze(-1))
+        if bool(collapsed.any()):
+            arb = torch.zeros_like(n)
+            arb[int(n.abs().argmin())] = 1.0
+            e = arb - (arb @ n) * n
+            e = e / e.norm().clamp_min(1e-12)
+            ox = ox.clone()
+            ox[collapsed] = e
+            inplane = ox.norm(dim=-1, keepdim=True)
+        ox = ox / inplane * mag
+        with torch.no_grad():
+            self.fourier_projection[: self.input_dim, :].copy_(ox.T)
+            self.freq_scaling.copy_(
+                (self.fourier_projection.pow(2).sum(0)).clamp(min=1e-8)
+            )
+        self._build_derived_buffers()
+        return self
+
+    # ── Introspection ───────────────────────────────────────────────────────
+
     @property
     def dim(self) -> int:
-        """Spatial dimension (alias for ``input_dim``; used by Clebsch adapters)."""
+        """Spatial dimension (alias for ``input_dim``)."""
         return self.input_dim
 
-    # ── Weight uncertainty (Bayes by Backprop) ──────────────────────────────
-    # Blundell et al. 2015, "Weight Uncertainty in Neural Networks" (arXiv:1505.05424).
+    def mode_wavelengths(self) -> torch.Tensor:
+        """``λ_k = 2π / |Ω_k^spatial|`` (F,), in model units."""
+        return 2.0 * math.pi / self.omega_spatial.norm(dim=1).clamp_min(1e-30)
+
+    def _omega_spatial(self) -> torch.Tensor:
+        """Deprecated accessor — read the ``omega_spatial`` buffer directly."""
+        return self.omega_spatial
 
     @classmethod
     def iter_in(cls, module: nn.Module):
-        """Yield every :class:`FSF` submodule (e.g. Clebsch β/α potentials)."""
+        """Yield every :class:`FSF` submodule under ``module``."""
         for m in module.modules():
             if isinstance(m, cls):
                 yield m
 
-    @classmethod
-    def resample_weights_on(
-        cls, module: nn.Module, generator: Optional[torch.Generator] = None
-    ) -> None:
-        """Draw a fresh held reparameterisation sample on each :class:`FSF` under ``module``."""
-        for m in cls.iter_in(module):
-            m.resample_weights(generator=generator)
-
-    @classmethod
-    def clear_weight_samples_on(cls, module: nn.Module) -> None:
-        """Revert every :class:`FSF` under ``module`` to its posterior mean (deterministic)."""
-        for m in cls.iter_in(module):
-            m.clear_weight_sample()
-
-    @classmethod
-    @contextlib.contextmanager
-    def weight_sample_on(
-        cls, module: nn.Module, generator: Optional[torch.Generator] = None
-    ):
-        """Hold one coherent weight sample on all nested :class:`FSF` instances."""
-        fields = list(cls.iter_in(module))
-        prev = [m._eps for m in fields]
-        try:
-            cls.resample_weights_on(module, generator=generator)
-            yield
-        finally:
-            for m, pm in zip(fields, prev):
-                m._eps = pm
-
-    @classmethod
-    def kl_loss_on(cls, module: nn.Module) -> torch.Tensor:
-        """Sum the Bayes-by-Backprop complexity cost over every :class:`FSF` under ``module``."""
-        terms = [m.kl_loss() for m in cls.iter_in(module)]
-        if not terms:
-            return None
-        return torch.stack(terms).sum()
+    # ── Energy ──────────────────────────────────────────────────────────────
 
     @classmethod
     def kinetic_energy_on(cls, module: nn.Module) -> Optional[torch.Tensor]:
-        """
-        Sum :meth:`kinetic_energy` over every :class:`FSF` **and**
-        :class:`TemporalFSF` under ``module`` (temporal potentials contribute
-        their path-averaged energy with spectral gates folded in).
-        """
-        terms = [
-            m.kinetic_energy()
-            for m in module.modules()
-            if isinstance(m, (FSF, TemporalFSF))
-        ]
+        """Sum :meth:`kinetic_energy` over every :class:`FSF` under ``module``."""
+        terms = [m.kinetic_energy() for m in cls.iter_in(module)]
         if not terms:
             return None
         return torch.stack(terms).sum()
 
-    def resample_weights(self, generator: Optional[torch.Generator] = None) -> None:
-        """
-        Draw and hold fresh reparameterisation noise ``eps ~ N(0, I)`` for ``A``.
-
-        The held sample stays fixed (``A = A_mu + softplus(A_rho) * eps``) until
-        cleared or resampled — one coherent draw per integration or MC sample.
-        """
-        self._eps = torch.randn(
-            self.A_mu.shape[0], generator=generator, dtype=self.A_mu.dtype, device=self.A_mu.device
-        )
-
-    def clear_weight_sample(self) -> None:
-        """Revert to the posterior mean ``A_mu`` (deterministic)."""
-        self._eps = None
-
-    @contextlib.contextmanager
-    def weight_sample(self, generator: Optional[torch.Generator] = None):
-        """Hold one random weight sample, then restore the previous state."""
-        prev = self._eps
-        try:
-            self.resample_weights(generator=generator)
-            yield
-        finally:
-            self._eps = prev
-
-    def _sigma(self) -> torch.Tensor:
-        """Posterior std ``softplus(A_rho)`` (always positive)."""
-        return F.softplus(self.A_rho).clamp_min(1e-8)
-
-    def sampled_A(self) -> torch.Tensor:
-        """Current amplitudes: ``A_mu`` if no sample is held, else a reparameterised draw."""
-        if self._eps is None:
-            return self.A_mu
-        return self.A_mu + self._sigma() * self._eps
-
-    @staticmethod
-    def _log_gaussian(w: torch.Tensor, mu: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
-        """Elementwise ``log N(w | mu, sigma^2)``."""
-        return (
-            -0.5 * math.log(2.0 * math.pi)
-            - torch.log(sigma)
-            - (w - mu) ** 2 / (2.0 * sigma ** 2)
-        )
-
-    def kl_loss(self) -> torch.Tensor:
-        """
-        Bayes-by-Backprop complexity cost ``log q(A|theta) - log P(A)`` for the
-        currently held weight sample (Blundell et al. 2015, eq. 2), using a
-        scale-mixture-of-Gaussians prior (eq. 7). Draws a fresh sample on the
-        fly if none is currently held.
-        """
-        eps = self._eps if self._eps is not None else torch.randn_like(self.A_mu)
-        sigma = self._sigma()
-        w = self.A_mu + sigma * eps
-
-        log_q = self._log_gaussian(w, self.A_mu, sigma).sum()
-
-        zero = torch.zeros_like(w)
-        s1 = w.new_full((), self.prior_sigma1)
-        s2 = w.new_full((), self.prior_sigma2)
-        log_p1 = self._log_gaussian(w, zero, s1) + math.log(self.prior_pi)
-        log_p2 = self._log_gaussian(w, zero, s2) + math.log(1.0 - self.prior_pi)
-        log_p = torch.logaddexp(log_p1, log_p2).sum()
-
-        return log_q - log_p
-
     def kinetic_energy(self) -> torch.Tensor:
         """
-        Analytic domain-averaged kinetic energy ``⟨‖∇φ‖²⟩`` as a quadratic in
-        the amplitudes (see :meth:`sampled_A` for BBB draws):
+        Analytic domain-averaged kinetic-energy surrogate as a quadratic in
+        the amplitudes:
 
-            ⟨‖∇φ‖²⟩ ≈ out_scale² · Σ_k A_k² |ω_k^spatial|² / (2 |Ω_k|⁴)
+            ⟨‖∇φ‖²⟩ ≈ out_scale² · Σ_k (A_k² + B_k²) |ω_k^spatial|² / (2 D_k²)
 
-        For a Clebsch streamfunction β, ``v = ∇⊥β`` has ``|v| = |∇β|`` at
-        fixed time. Weight via ``HSet.energy_loss`` in restoration flows.
+        In activated mode the same expression uses ``C_k²``: ``phi_mu`` is
+        the phase and ``C_k`` is the outer amplitude. For a
+        nonlinear activation this remains a regularising surrogate rather than
+        the exact spatial average of the activated field's gradient energy.
+        Weight via ``HSet.energy_loss`` when this field is nested under a
+        trained module that exposes that term.
         """
-        a = self.sampled_A()
-        ox = self._omega_spatial()
-        w = (ox**2).sum(1) / self.freq_scaling.pow(self.freq_damp)
-        return 0.5 * self.out_scale**2 * (a**2 * w).sum()
+        w = (self.omega_spatial**2).sum(1) / self.amplitude_denom.pow(2)
+        if self.activation is None:
+            amp2 = self.A_mu.pow(2) + self.B_mu.pow(2)
+        else:
+            amp2 = self.C_mu.pow(2)
+        return 0.5 * self.out_scale**2 * (amp2 * w).sum()
 
-    @torch.no_grad()
-    def mc_forward(
-        self,
-        x: torch.Tensor,
-        w: Optional[torch.Tensor] = None,
-        n_samples: int = 20,
-        generator: Optional[torch.Generator] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Mean and standard deviation of φ over posterior weight samples.
-
-        Each draw reparameterises ``A ~ q(A|theta)``; useful for a cheap
-        uncertainty spread without retraining an ensemble.
-        """
-        samples = []
-        for _ in range(n_samples):
-            with self.weight_sample(generator=generator):
-                samples.append(self.evaluate_raw(x, w=w))
-        stacked = torch.stack(samples)
-        return stacked.mean(0), stacked.std(0)
-
-    # ── Raw evaluation (Clebsch / flow — no drift, transform, or normalise) ─
+    # ── Raw evaluation (no drift, transform, or normalise) ──────────────────
 
     def evaluate_raw(
         self, x: torch.Tensor, w: Optional[torch.Tensor] = None
@@ -485,10 +832,7 @@ class FSF(BaseNF):
         Does not apply ``Transform``, drift, or gradient normalisation.
         """
         psi, _, _ = self._rff(x, w, value=True, derivs=False)
-        if not self.windowed:
-            return psi
-        envelope, _, _ = self._envelope(x, derivs=False)
-        return envelope * psi
+        return psi
 
     def gradient_and_hessian(
         self, x: torch.Tensor, w: Optional[torch.Tensor] = None
@@ -496,23 +840,25 @@ class FSF(BaseNF):
         """
         Spatial gradient (N, dim) and Hessian (N, dim, dim) of φ.
 
-        Used by Clebsch velocity construction and Magnus integration. When
-        ``windowed``, envelope derivatives are included exactly.
+        Used where analytic Hessians are needed (e.g. custom adapters). When only
+        the gradient is wanted, prefer :meth:`gradient_raw`. The Hessian is an
+        ``(N, F, d, d)`` product and costs about twice the gradient.
         """
-        if not self.windowed:
-            _, grad, hess = self._rff(x, w, value=False, derivs=True)
-            return grad, hess
-        psi, grad, hess = self._rff(x, w, value=True, derivs=True)
-        envelope, grad_e, hess_e = self._envelope(x, derivs=True)
-        grad = envelope.unsqueeze(-1) * grad + psi.unsqueeze(-1) * grad_e
-        cross = torch.einsum("ni,nj->nij", grad_e, grad)
-        hess = (
-            envelope[:, None, None] * hess
-            + psi[:, None, None] * hess_e
-            + cross
-            + cross.mT
-        )
+        _, grad, hess = self._rff(x, w, value=False, derivs=True)
         return grad, hess
+
+    def gradient_raw(
+        self, x: torch.Tensor, w: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Spatial gradient ∇φ alone (N, dim), skipping the Hessian.
+
+        Identical to ``gradient_and_hessian(...)[0]`` but ~2.5x cheaper: it
+        avoids the ``Ω_k Ω_kᵀ`` outer-product einsum, which the gradient does
+        not need in linear mode.
+        """
+        _, grad, _ = self._rff(x, w, value=False, derivs=True, hess=False)
+        return grad
 
     # ── Geomodelling API (BaseNF) ───────────────────────────────────────────
 
@@ -545,14 +891,13 @@ class FSF(BaseNF):
         if transform and self.transform is not None:
             coords = self.transform(coords, end=transform)
 
-        grad, pot = self._geomodelling_grad_value(coords)
+        pot, grad, _ = self._rff(coords, None, value=True, derivs=True, hess=False)
 
         if accumulate or normalize:
             norm = torch.norm(grad, dim=-1, keepdim=True) + 1e-8
             if accumulate:
                 self.mnorm = (
-                    self.mnorm * self.nnorm
-                    + torch.mean(norm, axis=0).item() * len(norm)
+                    self.mnorm * self.nnorm + torch.mean(norm, axis=0).item() * len(norm)
                 )
                 self.nnorm += len(norm)
                 self.mnorm = self.mnorm / self.nnorm
@@ -563,23 +908,99 @@ class FSF(BaseNF):
             return grad, pot
         return grad
 
+    # ── Per-mode basis derivatives (linearised-Laplace / sensitivity API) ────
+
+    def basis_derivatives(
+        self,
+        x: torch.Tensor,
+        w: Optional[torch.Tensor] = None,
+        *,
+        order: int = 2,
+    ) -> Tuple[
+        torch.Tensor,
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+    ]:
+        """
+        Per-mode basis functions ``f_k(x) = ∂φ/∂w_k`` and their spatial derivatives.
+
+        Linear mode is linear in the concatenated amplitudes ``(A_mu, B_mu)``
+        (``2F`` columns: cosine then sine). Activated mode is linear in
+        ``C_mu`` only (the activation acts on the learned-phase sinusoid, never
+        on ``C``). Used to assemble the sensitivity forcing ``B``.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local spatial coordinates ``(N, input_dim)``.
+        w : torch.Tensor, optional
+            Lift coordinates when ``lift_dim > 0``.
+        order : int
+            Highest spatial derivative to return (0–2).
+
+        Returns
+        -------
+        (f, g, h, t) : tuple
+            ``f`` ``(N, n_w)``; ``g`` ``(N, n_w, d)``; ``h`` ``(N, n_w, d, d)``;
+            ``t`` is always ``None``. ``n_w = 2F`` (linear) or ``F`` (activated
+            outer amplitudes). Entries above ``order`` are ``None``.
+
+        Notes
+        -----
+        Contracting against :meth:`_amplitude_vector` reproduces the field::
+
+            f @ w                        == evaluate_raw(x, w)
+            einsum('nkd,k->nd', g, w)    == gradient_and_hessian(x, w)[0]
+        """
+        if order not in (0, 1, 2):
+            raise ValueError(f"order must be 0, 1 or 2, got {order}")
+
+        proj = self._projection(x, w)               # (N, F)
+        coef = self.out_scale / self.amplitude_denom  # (F,)
+        ox = self.omega_spatial                     # (F, d)
+        d = ox.shape[1]
+
+        s, c = _sincos(proj)
+
+        if self.activation is None:
+            # Columns: ∂/∂A (cos) then ∂/∂B (sin).
+            #   ∂φ/∂A = coef c,  d1 = -s, d2 = -c
+            #   ∂φ/∂B = coef s,  d1 =  c, d2 = -s
+            f0 = torch.cat([c, s], dim=-1)
+            d1 = torch.cat([-s, c], dim=-1)
+            d2 = torch.cat([-c, -s], dim=-1)
+            coef = torch.cat([coef, coef], dim=0)
+            ox = torch.cat([ox, ox], dim=0)
+            omega_outer = torch.cat([self.omega_outer, self.omega_outer], dim=0)
+        else:
+            coef = coef * self._energy_gain()
+            u = s + self.bias
+            sig, sp, spp = _activation_derivs(u, self.activation)
+            f0 = sig
+            d1 = sp * c
+            d2 = spp * c * c - sp * s
+            omega_outer = self.omega_outer
+
+        f = coef * f0
+        if order == 0:
+            return f, None, None, None
+
+        g = (coef * d1).unsqueeze(-1) * ox
+        if order == 1:
+            return f, g, None, None
+
+        h = ((coef * d2).unsqueeze(-1) * omega_outer.unsqueeze(0)).view(
+            x.shape[0], -1, d, d
+        )
+        return f, g, h, None
+
     # ── Internal series evaluation ──────────────────────────────────────────
-
-    def _omega_spatial(self) -> torch.Tensor:
-        """Spatial frequency rows (F, input_dim)."""
-        return self.fourier_projection[: self.input_dim, :].T
-
-    def _amplitude_denom(self) -> torch.Tensor:
-        """Per-mode amplitude divisor |Ω|^{freq_damp} (``freq_scaling = |Ω|²``)."""
-        return self.freq_scaling.pow(0.5 * self.freq_damp)
-
-    def _effective_amplitudes(self) -> torch.Tensor:
-        """Scaled amplitudes (F,) from the current weight sample (or posterior mean)."""
-        return self.out_scale * self.sampled_A() / self._amplitude_denom()
 
     def _lifted_coords(
         self, x: torch.Tensor, w: Optional[torch.Tensor]
     ) -> torch.Tensor:
+        """Concatenate lift coordinates onto ``x`` (identity when ``lift_dim=0``)."""
         if self.lift_dim == 0:
             return x
         if w is None or w.numel() == 0:
@@ -589,9 +1010,69 @@ class FSF(BaseNF):
     def _projection(
         self, x: torch.Tensor, w: Optional[torch.Tensor]
     ) -> torch.Tensor:
-        """Mode projections Ω_k·x̃ + φ_k  (N, F)."""
-        lifted = self._lifted_coords(x, w)
-        return lifted @ self.fourier_projection + self.phi
+        """Mode projections ``Ω_k·x̃`` (linear) or ``Ω_k·x̃ + φ_k`` (activated)."""
+        proj = self._lifted_coords(x, w) @ self.fourier_projection
+        if self.activation is not None:
+            proj = proj + self._phase()
+        return proj
+
+    def _phase(self) -> torch.Tensor:
+        """Learned activated-mode phase angle."""
+        if self.activation is None:
+            raise AttributeError("linear FSF has no separate phase")
+        return self.phi_mu
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Activated checkpoints saved with the old Cartesian phase chart
+        # (A_mu, B_mu) load as the equivalent angle atan2(B, A).
+        a, b, phi = prefix + "A_mu", prefix + "B_mu", prefix + "phi_mu"
+        if self.activation is not None and phi not in state_dict and a in state_dict:
+            state_dict[phi] = torch.atan2(state_dict.pop(b), state_dict.pop(a))
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    def _lift_phase(
+        self, x: Optional[torch.Tensor], w: Optional[torch.Tensor]
+    ) -> torch.Tensor:
+        """
+        Non-spatial part of the phase: lift labels, plus learned phase when
+        activated. Shape ``(F,)`` with no lift, ``(N, F)`` otherwise.
+        """
+        n_modes = self.omega_spatial.shape[0]
+        if self.lift_dim == 0 or w is None:
+            extra = self.omega_spatial.new_zeros(n_modes)
+        else:
+            if x is None:
+                raise ValueError("lift phase needs `x` when lift `w` is set")
+            extra = (
+                self._lifted_coords(x, w) @ self.fourier_projection
+                - x[:, : self.input_dim] @ self.omega_spatial.T
+            )
+        if self.activation is not None:
+            return extra + self._phase()
+        return extra
+
+    def _energy_gain(self):
+        """Per-mode ``√(e(0)/e(b))`` when :attr:`energy_normalised`, else ``1``."""
+        if not getattr(self, "energy_normalised", False):
+            return 1.0
+        b2 = self.bias * self.bias
+        return torch.rsqrt((b2 * b2 - 0.5 * b2 + 0.625) / 0.625)
+
+    def _effective_amplitudes(self) -> torch.Tensor:
+        """Damped, scaled cosine amplitudes or activated outer amplitudes."""
+        if self.activation is None:
+            return self.out_scale * self.A_mu / self.amplitude_denom
+        return self.out_scale * self.C_mu * self._energy_gain() / self.amplitude_denom
+
+    def _effective_amplitudes_sin(self) -> torch.Tensor:
+        """Damped, scaled sine amplitudes ``s·B_k / (√F · D_k)``. Linear mode only."""
+        return self.out_scale * self.B_mu / self.amplitude_denom
+
+    def _amplitude_vector(self) -> torch.Tensor:
+        """Learnable weights matching :meth:`basis_derivatives` columns."""
+        if self.activation is None:
+            return torch.cat([self.A_mu, self.B_mu])
+        return self.C_mu
 
     def _rff(
         self,
@@ -600,537 +1081,43 @@ class FSF(BaseNF):
         *,
         value: bool,
         derivs: bool,
+        hess: bool = True,
     ):
         """
         Core Fourier series: value, spatial gradient, and Hessian.
 
-        Linear mode uses sin(Ω·x+φ); activated mode uses σ(sin(·)+bias).
+        Linear mode is ``A cos(Ω·x) + B sin(Ω·x)``; activated mode is
+        ``C σ(sin(Ω·x+φ)+bias)``. ``hess=False`` skips the Hessian
+        einsum.
         """
         proj = self._projection(x, w)
+        ox = self.omega_spatial
+        d = ox.shape[1]
+        n = proj.shape[0]
+        s, c = _sincos(proj)
+
+        if self.activation is None:
+            a = self._effective_amplitudes()
+            b = self._effective_amplitudes_sin()
+            # value ~ A c + B s;  d/dθ ~ B c - A s;  d²/dθ² ~ -(A c + B s)
+            combo = a * c + b * s
+            psi = combo.sum(-1) if value else None
+            if not derivs:
+                return psi, None, None
+            grad = (b * c - a * s) @ ox
+            if not hess:
+                return psi, grad, None
+            hessian = (-combo @ self.omega_outer).view(n, d, d)
+            return psi, grad, hessian
+
         amps = self._effective_amplitudes()
-        ox = self._omega_spatial()
-
-        s = torch.sin(proj)
-        c = torch.cos(proj)
-
-        if self.activation is None:
-            psi = (amps * s).sum(-1) if value else None
-            if not derivs:
-                return psi, None, None
-            grad = (amps * c) @ ox
-            hess = torch.einsum("nk,ki,kj->nij", -(amps * s), ox, ox)
-            return psi, grad, hess
-
         sig, sp, spp = _activation_derivs(s + self.bias, self.activation)
+
         psi = (amps * sig).sum(-1) if value else None
         if not derivs:
             return psi, None, None
         grad = (amps * sp * c) @ ox
-        hess = torch.einsum(
-            "nk,ki,kj->nij", amps * (spp * c * c - sp * s), ox, ox
-        )
-        return psi, grad, hess
-
-    def _envelope(self, x: torch.Tensor, *, derivs: bool):
-        """Separable soft-box envelope E(x) and optional derivatives."""
-        a = (x - self.win_lo) / self.win_w
-        b = (self.win_hi - x) / self.win_w
-        s_lo, s_hi = torch.sigmoid(a), torch.sigmoid(b)
-        e = s_lo * s_hi
-        envelope = e.prod(dim=-1)
-        floor = 1.0 - self.envelope_floor
-        if not derivs:
-            return self.envelope_floor + floor * envelope, None, None
-
-        inv_w = 1.0 / self.win_w
-        d_lo = s_lo * (1 - s_lo) * inv_w
-        d_hi = -s_hi * (1 - s_hi) * inv_w
-        e_p = d_lo * s_hi + s_lo * d_hi
-        e_pp = (
-            (s_lo * (1 - s_lo) * (1 - 2 * s_lo) * inv_w**2) * s_hi
-            + 2 * d_lo * d_hi
-            + s_lo * (s_hi * (1 - s_hi) * (1 - 2 * s_hi) * inv_w**2)
-        )
-        e_safe = e.clamp_min(1e-12)
-        r1, r2 = e_p / e_safe, e_pp / e_safe
-        grad_e = envelope.unsqueeze(-1) * r1
-        hess_e = envelope[:, None, None] * torch.einsum("ni,nj->nij", r1, r1)
-        idx = torch.arange(self.input_dim, device=x.device)
-        hess_e[:, idx, idx] = envelope.unsqueeze(-1) * r2
-        return self.envelope_floor + floor * envelope, floor * grad_e, floor * hess_e
-
-    def _geomodelling_grad_value(
-        self, coords: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Gradient and scalar value at coords (local field frame)."""
-        if not self.windowed:
-            pot, grad, _ = self._rff(coords, None, value=True, derivs=True)
-            return grad, pot
-        psi, grad, hess = self._rff(coords, None, value=True, derivs=True)
-        envelope, grad_e, hess_e = self._envelope(coords, derivs=True)
-        pot = envelope * psi
-        grad = envelope.unsqueeze(-1) * grad + psi.unsqueeze(-1) * grad_e
-        return grad, pot
-
-
-class TemporalFSF(BaseNF):
-    """
-    Fourier-series potential with a prescribed spectral schedule over
-    integration time ``t ∈ [0, 1]``.
-
-    Modes are drawn once from ``length_scale_range = (λ_fine, λ_coarse)``.
-    By default each mode's **spatial direction** is learnable while its
-    spatial frequency magnitude ``|ω_k|`` stays fixed at the drawn value, so
-    the temporal gate schedule (which depends only on ``|ω_k|``) is unchanged
-    under direction updates.
-
-    Mode strengths are **positive magnitudes** ``A_k = softplus(A_rho_k)``;
-    polarity lives in the phase ``φ_k`` (a sign flip is ``φ → φ + π``). Use
-    :meth:`set_amplitudes` to set magnitudes (optionally folding a signed
-    input into ``φ``).
-
-    The default **lowpass** gate
-
-        g_k(t) = exp(−½ (|ω_k| / ω_c(t))²),   ω_c(t) = 2π / λ_c(t)
-
-    only **opens** finer modes as ``t → 1``; long wavelengths stay active once
-    admitted. Set ``spectral_gate="bandpass"`` for a Gaussian window in log‑ω
-    that sweeps from coarse to fine (closing long‑λ modes behind the front), or
-    ``spectral_gate="reverse"`` to run the cutoff schedule backwards
-    (fine at ``t = 0``, coarse at ``t = 1``).
-
-    Lowpass / bandpass center wavelength:
-
-        λ_c(t) = λ_fine · (λ_coarse / λ_fine)^(1 − t).
-
-    Reverse:
-
-        λ_c(t) = λ_fine · (λ_coarse / λ_fine)^t.
-
-    Restoration integrates ``t : 1 → 0``, so lowpass starts at full bandwidth
-    (present) and ends coarse (reference).
-
-    Parameters passed through ``initField`` / constructor keywords
-    ----------------------------------------------------------------
-    rff_features, length_scale_range, freq_sampling, activation, scale,
-    learning_rate, lift_dim, domain, taper, taper_frac, envelope_floor,
-    stochastic_scales, learnable_directions, init_std, freq_damp,
-    spectral_gate, spectral_band_width
-
-    Learnable mode parameters: ``A_rho`` (→ ``A = softplus(A_rho)``), ``phi``,
-    optional ``bias``, and (if enabled) ``theta`` / ``dir_raw``.
-    """
-
-    def initField(
-        self,
-        rff_features: int,
-        length_scale_range: Tuple[float, float],
-        freq_sampling: str = "random",
-        activation: Optional[str] = None,
-        scale: float = 1.0,
-        learning_rate: float = 1e-1,
-        lift_dim: int = 0,
-        domain: Optional[Sequence[Tuple[float, float]]] = None,
-        taper: Union[None, float, Sequence[float]] = None,
-        taper_frac: Union[None, float, Sequence[float]] = None,
-        envelope_floor: float = 0.0,
-        stochastic_scales: bool = True,
-        learnable_directions: bool = True,
-        init_std: float = 0.0,
-        freq_damp: float = 2.0,
-        spectral_gate: str = "lowpass",
-        spectral_band_width: Optional[float] = None,
-    ):
-        assert freq_sampling in ("random", "quasi"), (
-            f"freq_sampling must be 'random' or 'quasi', got {freq_sampling!r}"
-        )
-        assert activation in (None, "tanh", "cubic", "softplus"), (
-            f"activation must be None, 'tanh', 'cubic', or 'softplus', "
-            f"got {activation!r}"
-        )
-        if spectral_gate not in ("lowpass", "bandpass", "reverse"):
-            raise ValueError(
-                f"spectral_gate must be 'lowpass', 'bandpass', or 'reverse', "
-                f"got {spectral_gate!r}"
-            )
-
-        self.activation = activation
-        self.lift_dim = int(lift_dim)
-        self.learnable_directions = bool(learnable_directions)
-        if freq_damp <= 0:
-            raise ValueError(f"freq_damp must be positive, got {freq_damp}")
-        self.freq_damp = float(freq_damp)
-        self.spectral_gate = spectral_gate
-        lam_fine, lam_coarse = float(length_scale_range[0]), float(length_scale_range[1])
-        if lam_fine <= 0 or lam_coarse <= 0 or lam_coarse < lam_fine:
-            raise ValueError(
-                f"length_scale_range must be (λ_fine, λ_coarse) with "
-                f"0 < λ_fine ≤ λ_coarse, got {length_scale_range}"
-            )
-        self.register_buffer(
-            "lam_fine",
-            torch.tensor(lam_fine, dtype=curlew.dtype, device=curlew.device),
-        )
-        self.register_buffer(
-            "lam_coarse",
-            torch.tensor(lam_coarse, dtype=curlew.dtype, device=curlew.device),
-        )
-        omega_fine = 2.0 * math.pi / lam_fine
-        omega_coarse = 2.0 * math.pi / lam_coarse
-        if spectral_band_width is None:
-            spectral_band_width = 0.35 * abs(math.log(omega_fine) - math.log(omega_coarse))
-        if spectral_band_width <= 0:
-            raise ValueError(
-                f"spectral_band_width must be positive, got {spectral_band_width}"
-            )
-        self.spectral_band_width = float(spectral_band_width)
-
-        projection, freq_scaling, out_scale = _build_fourier_modes(
-            rff_features=rff_features,
-            length_scale_range=length_scale_range,
-            input_dim=self.input_dim,
-            lift_dim=self.lift_dim,
-            freq_sampling=freq_sampling,
-            stochastic_scales=stochastic_scales,
-            scale=scale,
-            seed=self.seed,
-        )
-        self.register_buffer("freq_scaling", freq_scaling)
-        self.register_buffer("out_scale", out_scale)
-
-        # Spatial rows (F, dim). |ω_spatial| is frozen so spectral gates stay
-        # tied to the drawn bank; only the unit direction may be learned.
-        ox = projection[: self.input_dim, :].T
-        spatial_mag = ox.norm(dim=1).clamp_min(1e-8)
-        self.register_buffer("spatial_omega_mag", spatial_mag)
-
-        # Per-mode weight in <|grad phi|^2> for amplitude A_k (depends on freq_damp).
-        # Pure direction updates leave |ω_spatial| (and |Ω|) unchanged, so this
-        # quadratic weight can stay a fixed buffer.
-        energy_w = (ox**2).sum(1) / freq_scaling.pow(self.freq_damp)
-        self.register_buffer("energy_w", energy_w)
-
-        if self.learnable_directions:
-            if self.input_dim == 2:
-                self.theta = nn.Parameter(torch.atan2(ox[:, 1], ox[:, 0]))
-            else:
-                self.dir_raw = nn.Parameter(ox.detach().clone())
-            if self.lift_dim > 0:
-                self.register_buffer(
-                    "lift_projection", projection[self.input_dim :, :].contiguous()
-                )
-            # Keep the init bank for inspection / warm-start comparisons.
-            self.register_buffer("fourier_projection", projection)
-        else:
-            self.register_buffer("fourier_projection", projection)
-
-        # Unconstrained magnitude logits; A = softplus(A_rho) ≥ 0. Polarity is
-        # carried by φ (sign(A)·sin(θ) ≡ |A|·sin(θ+π)), so signed amplitudes
-        # are redundant with phase for linear / odd activated modes (b≡0).
-        if init_std > 0:
-            a0 = torch.abs(
-                torch.randn(rff_features, dtype=curlew.dtype, device=curlew.device)
-            ) * float(init_std)
-            a0 = a0.clamp_min(1e-8)
-            self.A_rho = nn.Parameter(_inv_softplus(a0))
-        else:
-            # softplus(A_rho) ≈ 0 → inactive bank until training moves ρ
-            self.A_rho = nn.Parameter(
-                torch.full(
-                    (rff_features,),
-                    -20.0,
-                    dtype=curlew.dtype,
-                    device=curlew.device,
-                )
-            )
-        self.phi = nn.Parameter(
-            torch.zeros(rff_features, dtype=curlew.dtype, device=curlew.device)
-        )
-        if activation is not None:
-            self.bias = nn.Parameter(
-                torch.zeros(rff_features, dtype=curlew.dtype, device=curlew.device)
-            )
-
-        self.windowed = domain is not None
-        if self.windowed:
-            if len(domain) != self.input_dim:
-                raise ValueError(f"domain needs {self.input_dim} (lo, hi) pairs")
-            bounds = torch.tensor(domain, dtype=curlew.dtype, device=curlew.device)
-            if taper is None:
-                if taper_frac is None:
-                    raise ValueError("supply taper or taper_frac with domain")
-                taper = (
-                    torch.tensor(taper_frac, dtype=curlew.dtype, device=curlew.device)
-                    * (bounds[:, 1] - bounds[:, 0])
-                ).tolist()
-            width = torch.tensor(taper, dtype=curlew.dtype, device=curlew.device)
-            if width.ndim == 0:
-                width = width.expand(self.input_dim).clone()
-            if not torch.all(width > 0) or not torch.all(bounds[:, 1] > bounds[:, 0]):
-                raise ValueError("taper widths and domain extents must be positive")
-            self.register_buffer("win_lo", bounds[:, 0])
-            self.register_buffer("win_hi", bounds[:, 1])
-            self.register_buffer("win_w", width)
-            if not 0.0 <= envelope_floor < 1.0:
-                raise ValueError("envelope_floor must be in [0, 1)")
-            self.envelope_floor = float(envelope_floor)
-
-        self.to(curlew.device)
-        self.init_optim(lr=learning_rate)
-
-    @property
-    def dim(self) -> int:
-        return self.input_dim
-
-    @property
-    def A(self) -> torch.Tensor:
-        """Positive mode magnitudes ``softplus(A_rho)`` with shape ``(F,)``."""
-        return F.softplus(self.A_rho)
-
-    def set_amplitudes(self, values, *, signed: bool = False) -> None:
-        """
-        Set mode magnitudes from ``values`` (broadcastable to ``(F,)``).
-
-        Parameters
-        ----------
-        values
-            Target amplitudes. Taken in absolute value unless ``signed=False``
-            and negatives are rejected.
-        signed : bool
-            If True, negative entries flip the corresponding phase by ``π``
-            and the magnitude is set to ``|values|``. If False (default),
-            ``values`` must be non-negative.
-        """
-        v = torch.as_tensor(values, dtype=self.A_rho.dtype, device=self.A_rho.device)
-        if v.ndim == 0:
-            v = v.expand_as(self.A_rho)
-        else:
-            v = v.reshape(-1)
-            if v.numel() == 1:
-                v = v.expand_as(self.A_rho)
-            if v.shape != self.A_rho.shape:
-                raise ValueError(
-                    f"amplitudes must broadcast to {tuple(self.A_rho.shape)}, "
-                    f"got {tuple(v.shape)}"
-                )
-        if signed:
-            neg = v < 0
-            if bool(neg.any()):
-                self.phi.data[neg] = self.phi.data[neg] + math.pi
-            v = v.abs()
-        elif bool((v < 0).any()):
-            raise ValueError(
-                "amplitudes must be non-negative; pass signed=True to fold "
-                "signs into phase"
-            )
-        self.A_rho.data.copy_(_inv_softplus(v.clamp_min(1e-12)))
-
-    def _clamp_t(self, t: Optional[float]) -> float:
-        if t is None:
-            return 1.0
-        return min(max(float(t), 0.0), 1.0)
-
-    def cutoff_wavelength(self, t: Optional[float] = None) -> torch.Tensor:
-        """Center cutoff wavelength λ_c(t) for the spectral window."""
-        t = self._clamp_t(t)
-        ratio = self.lam_coarse / self.lam_fine
-        if self.spectral_gate == "reverse":
-            return self.lam_fine * ratio ** t
-        return self.lam_fine * ratio ** (1.0 - t)
-
-    def _center_omega(self, t: Optional[float]) -> torch.Tensor:
-        lam_c = self.cutoff_wavelength(t)
-        return (2.0 * math.pi / lam_c).clamp(min=1e-8)
-
-    def _gates_for(self, t: Optional[float], ox: torch.Tensor) -> torch.Tensor:
-        """Per-mode gates g_k(t) from spatial frequency rows."""
-        omega_mag = ox.norm(dim=1).clamp(min=1e-8)
-        if self.spectral_gate == "bandpass":
-            log_om = omega_mag.log()
-            log_om_c = self._center_omega(t).log()
-            sigma = self.spectral_band_width
-            return torch.exp(-0.5 * ((log_om - log_om_c) / sigma) ** 2)
-        omega_c = self._center_omega(t)
-        return torch.exp(-0.5 * (omega_mag / omega_c) ** 2)
-
-    def spectral_gates(self, t: Optional[float] = None) -> torch.Tensor:
-        """Per-mode Gaussian gates g_k(t) with shape (F,)."""
-        return self._gates_for(t, self._omega_spatial())
-
-    def kinetic_energy(
-        self, t: Optional[float] = None, n_quad: int = 8
-    ) -> torch.Tensor:
-        """
-        Analytic domain-averaged kinetic energy ``⟨‖∇φ(·, t)‖²⟩`` with the
-        spectral gates folded into the amplitudes:
-
-            E(t) = ½ out_scale² Σ_k (A_k g_k(t))² w_k
-
-        (same quadratic as :meth:`FSF.kinetic_energy`, with the effective
-        gated amplitudes in place of ``A``). If ``t`` is None, returns the
-        **path-averaged** energy ``∫₀¹ E(t) dt`` via midpoint quadrature with
-        ``n_quad`` nodes — the natural regulariser for a time-varying flow.
-        """
-        def _energy_at(tt: float) -> torch.Tensor:
-            g_eff = self.spectral_gates(tt)
-            return ((self.A * g_eff) ** 2 * self.energy_w).sum()
-
-        if t is not None:
-            e = _energy_at(float(t))
-        else:
-            nodes = (torch.arange(n_quad, dtype=curlew.dtype) + 0.5) / n_quad
-            e = torch.stack([_energy_at(float(tt)) for tt in nodes]).mean()
-        return 0.5 * self.out_scale**2 * e
-
-    def evaluate_raw(
-        self,
-        x: torch.Tensor,
-        w: Optional[torch.Tensor] = None,
-        t: Optional[float] = None,
-    ) -> torch.Tensor:
-        """Evaluate φ(x, t) without geomodelling transform or drift."""
-        psi, _, _ = self._rff(x, w, t=t, value=True, derivs=False)
-        if not self.windowed:
-            return psi
-        envelope, _, _ = self._envelope(x, derivs=False)
-        return envelope * psi
-
-    def gradient_and_hessian(
-        self,
-        x: torch.Tensor,
-        w: Optional[torch.Tensor] = None,
-        t: Optional[float] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Spatial ∇φ and H_φ at fixed integration time ``t``."""
-        if not self.windowed:
-            _, grad, hess = self._rff(x, w, t=t, value=False, derivs=True)
-            return grad, hess
-        psi, grad, hess = self._rff(x, w, t=t, value=True, derivs=True)
-        envelope, grad_e, hess_e = self._envelope(x, derivs=True)
-        grad = envelope.unsqueeze(-1) * grad + psi.unsqueeze(-1) * grad_e
-        cross = torch.einsum("ni,nj->nij", grad_e, grad)
-        hess = (
-            envelope[:, None, None] * hess
-            + psi[:, None, None] * hess_e
-            + cross
-            + cross.mT
-        )
-        return grad, hess
-
-    def evaluate(self, x: torch.Tensor, t: Optional[float] = None) -> torch.Tensor:
-        """Evaluate at present-day spectrum (``t = 1``) unless overridden."""
-        return self.evaluate_raw(x, w=None, t=t)
-
-    def _unit_dir(self) -> torch.Tensor:
-        """Learnable spatial unit directions ``û_k`` with shape ``(F, dim)``."""
-        if self.input_dim == 2:
-            return torch.stack([self.theta.cos(), self.theta.sin()], dim=-1)
-        return F.normalize(self.dir_raw, dim=1)
-
-    def _omega_spatial(self) -> torch.Tensor:
-        """Spatial frequency rows ``(F, dim)``. Magnitudes are frozen at init."""
-        if self.learnable_directions:
-            return self.spatial_omega_mag.unsqueeze(-1) * self._unit_dir()
-        return self.fourier_projection[: self.input_dim, :].T
-
-    def _current_fourier_projection(self) -> torch.Tensor:
-        """
-        Full frequency matrix ``(dim + lift_dim, F)`` used in ``Ω·x̃``.
-
-        With ``learnable_directions``, spatial columns are rebuilt from the
-        frozen magnitudes and current unit directions; lift rows stay fixed.
-        """
-        if not self.learnable_directions:
-            return self.fourier_projection
-        proj = self._omega_spatial().T
-        if self.lift_dim > 0:
-            proj = torch.cat([proj, self.lift_projection], dim=0)
-        return proj
-
-    def _amplitude_denom(self) -> torch.Tensor:
-        """Per-mode amplitude divisor |Ω|^{freq_damp} (``freq_scaling = |Ω|²``)."""
-        return self.freq_scaling.pow(0.5 * self.freq_damp)
-
-    def _effective_amplitudes(self, t: Optional[float]) -> torch.Tensor:
-        return (
-            self.out_scale
-            * self.A
-            * self.spectral_gates(t)
-            / self._amplitude_denom()
-        )
-
-    def _lifted_coords(
-        self, x: torch.Tensor, w: Optional[torch.Tensor]
-    ) -> torch.Tensor:
-        if self.lift_dim == 0:
-            return x
-        if w is None or w.numel() == 0:
-            w = x.new_zeros(x.shape[0], self.lift_dim)
-        return torch.cat([x, w], dim=-1)
-
-    def _projection(
-        self, x: torch.Tensor, w: Optional[torch.Tensor]
-    ) -> torch.Tensor:
-        lifted = self._lifted_coords(x, w)
-        return lifted @ self._current_fourier_projection() + self.phi
-
-    def _rff(
-        self,
-        x: torch.Tensor,
-        w: Optional[torch.Tensor],
-        *,
-        t: Optional[float],
-        value: bool,
-        derivs: bool,
-    ):
-        proj = self._projection(x, w)
-        amps = self._effective_amplitudes(t)
-        ox = self._omega_spatial()
-
-        s = torch.sin(proj)
-        c = torch.cos(proj)
-
-        if self.activation is None:
-            psi = (amps * s).sum(-1) if value else None
-            if not derivs:
-                return psi, None, None
-            grad = (amps * c) @ ox
-            hess = torch.einsum("nk,ki,kj->nij", -(amps * s), ox, ox)
-            return psi, grad, hess
-
-        sig, sp, spp = _activation_derivs(s + self.bias, self.activation)
-        psi = (amps * sig).sum(-1) if value else None
-        if not derivs:
-            return psi, None, None
-        grad = (amps * sp * c) @ ox
-        hess = torch.einsum(
-            "nk,ki,kj->nij", amps * (spp * c * c - sp * s), ox, ox
-        )
-        return psi, grad, hess
-
-    def _envelope(self, x: torch.Tensor, *, derivs: bool):
-        a = (x - self.win_lo) / self.win_w
-        b = (self.win_hi - x) / self.win_w
-        s_lo, s_hi = torch.sigmoid(a), torch.sigmoid(b)
-        e = s_lo * s_hi
-        envelope = e.prod(dim=-1)
-        floor = 1.0 - self.envelope_floor
-        if not derivs:
-            return self.envelope_floor + floor * envelope, None, None
-
-        inv_w = 1.0 / self.win_w
-        d_lo = s_lo * (1 - s_lo) * inv_w
-        d_hi = -s_hi * (1 - s_hi) * inv_w
-        e_p = d_lo * s_hi + s_lo * d_hi
-        e_pp = (
-            (s_lo * (1 - s_lo) * (1 - 2 * s_lo) * inv_w**2) * s_hi
-            + 2 * d_lo * d_hi
-            + s_lo * (s_hi * (1 - s_hi) * (1 - 2 * s_hi) * inv_w**2)
-        )
-        e_safe = e.clamp_min(1e-12)
-        r1, r2 = e_p / e_safe, e_pp / e_safe
-        grad_e = envelope.unsqueeze(-1) * r1
-        hess_e = envelope[:, None, None] * torch.einsum("ni,nj->nij", r1, r1)
-        idx = torch.arange(self.input_dim, device=x.device)
-        hess_e[:, idx, idx] = envelope.unsqueeze(-1) * r2
-        return self.envelope_floor + floor * envelope, floor * grad_e, floor * hess_e
+        if not hess:
+            return psi, grad, None
+        hessian = ((amps * (spp * c * c - sp * s)) @ self.omega_outer).view(n, d, d)
+        return psi, grad, hessian

@@ -301,6 +301,14 @@ def cset_str(cset):
         lines.append(f"  property points: {len(C.pp)}")
     if C.eq is not None:
         lines.append(f"  equality traces: {len(C.eq)}")
+    if getattr(C, "sp", None) is not None:
+        parts = []
+        if getattr(C, "se", None) is not None:
+            parts.append("eigenvectors")
+        if getattr(C, "sr", None) is not None:
+            parts.append("eigenvalue ratio")
+        detail = f" ({', '.join(parts)})" if parts else ""
+        lines.append(f"  strain ellipses: {len(C.sp)}{detail}")
     if C.iq is not None:
         lines.append(f"  inequalities: {len(C.iq[1])} pairs ({C.iq[0]} samples/epoch)")
     if C.grid is not None:
